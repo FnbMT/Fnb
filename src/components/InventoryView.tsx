@@ -142,8 +142,8 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
         <table className="w-full text-left border-collapse min-w-[800px] text-sm">
           <thead>
             <tr className="bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 text-xs uppercase tracking-wider">
+              <th className="px-4 py-3 md:px-6 md:py-4 font-medium sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">Tên mặt hàng</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Mã hàng</th>
-              <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Tên mặt hàng</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Đơn vị</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Tồn kho</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Giá vốn</th>
@@ -154,11 +154,11 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
           <tbody className="divide-y divide-black/5 dark:divide-white/5">
             {filtered.map(item => (
               <tr key={item.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
-                <td className="px-4 py-3 md:px-6 md:py-4 font-mono text-xs text-gray-600 dark:text-gray-400">{item.code}</td>
-                <td className="px-4 py-3 md:px-6 md:py-4">
+                <td className="px-4 py-3 md:px-6 md:py-4 sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] group-hover:bg-[#f3f4f6] dark:group-hover:bg-[#25262b] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
                   <p className="font-medium text-gray-900 dark:text-white">{item.name}</p>
                   <p className="text-xs text-gray-500">{item.category}</p>
                 </td>
+                <td className="px-4 py-3 md:px-6 md:py-4 font-mono text-xs text-gray-600 dark:text-gray-400">{item.code}</td>
                 <td className="px-4 py-3 md:px-6 md:py-4 text-sm">{item.unit}</td>
                 <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono">
                   {item.trackStock !== false ? (
@@ -166,7 +166,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                       "px-2 py-1 rounded-lg",
                       item.stock < (item.minStock || 10) ? "bg-rose-500/20 text-rose-600 dark:text-rose-500" : "text-emerald-600 dark:text-emerald-400"
                     )}>
-                      {item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}
+                      {item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                     </span>
                   ) : (
                     <span className="text-gray-500 text-xs">-</span>
@@ -189,7 +189,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                   )}
                 </td>
                 <td className="px-4 py-3 md:px-6 md:py-4 text-right">
-                  <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex justify-end gap-2">
                     <button 
                       onClick={() => {
                         setEditingItem(item);
@@ -242,7 +242,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
         <table className="w-full text-left border-collapse min-w-[800px] text-sm">
           <thead>
             <tr className="bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 text-xs uppercase tracking-wider">
-              <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Mặt hàng</th>
+              <th className="px-4 py-3 md:px-6 md:py-4 font-medium sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">Mặt hàng</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Tồn hệ thống</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-center w-48">Tồn thực tế</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Chênh lệch</th>
@@ -253,20 +253,20 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               const actual = auditItems[item.id] ?? item.stock;
               const diff = actual - item.stock;
               return (
-                <tr key={item.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                  <td className="px-4 py-3 md:px-6 md:py-4">
+                <tr key={item.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
+                  <td className="px-4 py-3 md:px-6 md:py-4 sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] group-hover:bg-[#f3f4f6] dark:group-hover:bg-[#25262b] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
                     <p className="font-medium text-gray-900 dark:text-white">{item.name}</p>
                     <p className="text-xs text-gray-500">{item.unit}</p>
                   </td>
                   <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono text-gray-600 dark:text-gray-400">
-                    {item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}
+                    {item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                   </td>
                   <td className="px-4 py-3 md:px-6 md:py-4">
                     <input 
                       type="number" 
                       className="w-full bg-gray-100 dark:bg-black/20 border border-black/10 dark:border-white/10 rounded-lg py-2 px-3 text-center text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                       value={auditItems[item.id] ?? ''}
-                      placeholder={item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}
+                      placeholder={item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                       onChange={(e) => setAuditItems({...auditItems, [item.id]: e.target.value === '' ? item.stock : Number(e.target.value)})}
                     />
                   </td>
@@ -274,9 +274,9 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                     {diff === 0 ? (
                       <span className="text-gray-500">0</span>
                     ) : diff > 0 ? (
-                      <span className="text-emerald-600 dark:text-emerald-500">+{diff.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</span>
+                      <span className="text-emerald-600 dark:text-emerald-500">+{diff.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
                     ) : (
-                      <span className="text-rose-600 dark:text-rose-500">{diff.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</span>
+                      <span className="text-rose-600 dark:text-rose-500">{diff.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
                     )}
                   </td>
                 </tr>
@@ -299,7 +299,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
         <table className="w-full text-left border-collapse min-w-[800px] text-sm">
           <thead>
             <tr className="bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 text-xs uppercase tracking-wider">
-              <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Thời gian</th>
+              <th className="px-4 py-3 md:px-6 md:py-4 font-medium sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">Thời gian</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Nhân viên</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Số mặt hàng lệch</th>
               <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Thao tác</th>
@@ -312,8 +312,8 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               </tr>
             ) : (
               audits.map(audit => (
-                <tr key={audit.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                  <td className="px-4 py-3 md:px-6 md:py-4 text-sm">
+                <tr key={audit.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
+                  <td className="px-4 py-3 md:px-6 md:py-4 text-sm sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] group-hover:bg-[#f3f4f6] dark:group-hover:bg-[#25262b] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
                     {format(new Date(audit.date), 'HH:mm dd/MM/yyyy')}
                   </td>
                   <td className="px-4 py-3 md:px-6 md:py-4 text-sm">{audit.staffName}</td>
@@ -389,8 +389,8 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
           <table className="w-full text-left border-collapse min-w-[800px] text-sm">
             <thead>
               <tr className="bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 text-xs uppercase tracking-wider">
+                <th className="px-4 py-3 md:px-6 md:py-4 font-medium sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">Mặt hàng</th>
                 <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Thời gian</th>
-                <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Mặt hàng</th>
                 <th className="px-4 py-3 md:px-6 md:py-4 font-medium">Loại</th>
                 <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Thay đổi</th>
                 <th className="px-4 py-3 md:px-6 md:py-4 font-medium text-right">Tồn cuối</th>
@@ -404,11 +404,13 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                 </tr>
               ) : (
                 filteredEntries.map(entry => (
-                  <tr key={entry.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                  <tr key={entry.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
+                    <td className="px-4 py-3 md:px-6 md:py-4 text-sm font-medium text-gray-900 dark:text-white sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] group-hover:bg-[#f3f4f6] dark:group-hover:bg-[#25262b] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
+                      {entry.itemName}
+                    </td>
                     <td className="px-4 py-3 md:px-6 md:py-4 text-xs text-gray-600 dark:text-gray-400">
                       {format(new Date(entry.date), 'HH:mm dd/MM/yyyy')}
                     </td>
-                    <td className="px-4 py-3 md:px-6 md:py-4 text-sm font-medium text-gray-900 dark:text-white">{entry.itemName}</td>
                     <td className="px-4 py-3 md:px-6 md:py-4">
                       <span className={cn(
                         "px-2 py-1 rounded text-[10px] uppercase font-bold",
@@ -424,13 +426,13 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                     </td>
                     <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono font-bold">
                       {entry.change > 0 ? (
-                        <span className="text-emerald-600 dark:text-emerald-500">+{entry.change.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</span>
+                        <span className="text-emerald-600 dark:text-emerald-500">+{entry.change.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
                       ) : (
-                        <span className="text-rose-600 dark:text-rose-500">{entry.change.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</span>
+                        <span className="text-rose-600 dark:text-rose-500">{entry.change.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
                       )}
                     </td>
                     <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono font-bold text-gray-900 dark:text-white">
-                      {entry.remaining.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}
+                      {entry.remaining.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                     </td>
                     <td className="px-4 py-3 md:px-6 md:py-4 text-xs text-gray-500 max-w-xs truncate">
                       {entry.note}
@@ -715,32 +717,34 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               <button onClick={() => setViewingAudit(null)} className="text-gray-500 hover:text-gray-900 dark:hover:text-white"><X className="w-6 h-6" /></button>
             </div>
             
-            <table className="w-full text-left border-collapse min-w-[800px] text-sm">
-              <thead>
-                <tr className="text-gray-500 text-[10px] uppercase font-bold border-b border-black/5 dark:border-white/5">
-                  <th className="pb-3">Mặt hàng</th>
-                  <th className="pb-3 text-right">Hệ thống</th>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse min-w-[800px] text-sm">
+                <thead>
+                  <tr className="text-gray-500 text-[10px] uppercase font-bold border-b border-black/5 dark:border-white/5">
+                    <th className="pb-3 sticky left-0 z-10 bg-white dark:bg-[#1a1b1e]">Mặt hàng</th>
+                    <th className="pb-3 text-right">Hệ thống</th>
                   <th className="pb-3 text-right">Thực tế</th>
                   <th className="pb-3 text-right">Chênh lệch</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-black/5 dark:divide-white/5">
-                {viewingAudit.items.map((item, i) => (
-                  <tr key={i}>
-                    <td className="py-3 text-sm text-gray-900 dark:text-white">{item.itemName}</td>
-                    <td className="py-3 text-right font-mono text-gray-600 dark:text-gray-400">{item.systemStock.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</td>
-                    <td className="py-3 text-right font-mono text-gray-900 dark:text-white">{item.actualStock.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</td>
+                <tbody className="divide-y divide-black/5 dark:divide-white/5">
+                  {viewingAudit.items.map((item, i) => (
+                    <tr key={i} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
+                      <td className="py-3 text-sm text-gray-900 dark:text-white sticky left-0 z-10 bg-white dark:bg-[#1a1b1e] group-hover:bg-[#f9fafb] dark:group-hover:bg-[#25262b] shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.05)]">{item.itemName}</td>
+                      <td className="py-3 text-right font-mono text-gray-600 dark:text-gray-400">{item.systemStock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</td>
+                    <td className="py-3 text-right font-mono text-gray-900 dark:text-white">{item.actualStock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</td>
                     <td className="py-3 text-right font-mono font-bold">
                       {item.discrepancy > 0 ? (
-                        <span className="text-emerald-600 dark:text-emerald-500">+{item.discrepancy.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</span>
+                        <span className="text-emerald-600 dark:text-emerald-500">+{item.discrepancy.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
                       ) : (
-                        <span className="text-rose-600 dark:text-rose-500">{item.discrepancy.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</span>
+                        <span className="text-rose-600 dark:text-rose-500">{item.discrepancy.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
                       )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       )}

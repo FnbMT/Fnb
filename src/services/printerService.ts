@@ -371,7 +371,7 @@ export class PrinterService {
    * Tests connection to a specific IP by sending a small test print.
    */
   static async testConnection(ip: string, port: number = 9100): Promise<boolean> {
-    const builder = new EscPosBuilder(false); // In test connection, don't worry about accents for now, or assume false since it's just 'TEST KẾT NỐI MÁY IN THÀNH CÔNG!' which has accents, actually let's pass true or just false. Wait, EscPosBuilder removes accents if false. So false is safer.
+    const builder = new EscPosBuilder();
     const testData = builder.init()
                             .alignCenter()
                             .boldOn()

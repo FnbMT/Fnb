@@ -283,7 +283,7 @@ export const UserMgmtView = ({
   };
 
   return (
-    <div className="p-8 space-y-6 h-full overflow-y-auto">
+    <div className="p-4 md:p-8 space-y-6 h-full overflow-y-auto">
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
           <Shield className="w-6 h-6 text-emerald-600 dark:text-emerald-500" />
@@ -336,7 +336,7 @@ export const UserMgmtView = ({
           {users.filter(u => u.role !== 'admin').map((user) => (
             <div key={user.id} className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-6 relative group flex flex-col">
               {user.role !== 'admin' && (
-                <div className="absolute top-4 right-4 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="absolute top-4 right-4 flex gap-2">
                   <button 
                     onClick={() => handleEditUser(user)}
                     className="p-2 bg-blue-500/10 text-blue-600 dark:text-blue-500 hover:bg-blue-500/20 rounded-lg cursor-pointer"
@@ -425,8 +425,8 @@ export const UserMgmtView = ({
             />
           </div>
 
-          <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl overflow-hidden">
-            <table className="w-full text-left border-collapse">
+          <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-[800px]">
               <thead className="bg-white dark:bg-[#1a1b1e]">
                 <tr className="text-gray-600 dark:text-gray-400 text-xs uppercase tracking-wider">
                   <th className="px-6 py-4 font-medium">Nhân viên</th>
@@ -486,8 +486,8 @@ export const UserMgmtView = ({
                       {/* Expanded View for Attendance details and Payroll Finalization */}
                       {selectedUserPayroll === row.user.id && (
                         <tr className="bg-black/5 dark:bg-white/5 border-t-0">
-                          <td colSpan={5} className="px-6 py-4 p-0">
-                            <div className="bg-[#15161a] p-6 border-b border-black/5 dark:border-white/5 space-y-6">
+                          <td colSpan={5} className="p-0">
+                            <div className="sticky left-0 w-[calc(100vw-32px)] md:w-full bg-gray-100 dark:bg-[#15161a] p-4 md:p-6 border-b border-black/5 dark:border-white/5 space-y-6">
                               {/* Lương adjustments */}
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div className="space-y-4 bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4">

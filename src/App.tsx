@@ -1755,7 +1755,7 @@ const ReportsView = ({ invoices, activeOrdersCount }: { invoices: Invoice[], act
                 <XAxis dataKey="name" stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} />
                 <YAxis stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : `${(v/1000).toFixed(0)}K`} />
                 <Tooltip 
-                  contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #ffffff10', borderRadius: '12px' }}
+                  contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #ffffff10', borderRadius: '12px', color: '#f3f4f6' }}
                   itemStyle={{ color: '#10b981' }}
                   formatter={(v: number) => [v.toLocaleString() + 'đ', 'Doanh thu']}
                 />
@@ -1774,7 +1774,8 @@ const ReportsView = ({ invoices, activeOrdersCount }: { invoices: Invoice[], act
                 <YAxis dataKey="name" type="category" stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} width={100} />
                 <Tooltip 
                   cursor={{ fill: '#ffffff05' }}
-                  contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #ffffff10', borderRadius: '12px' }}
+                  contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #ffffff10', borderRadius: '12px', color: '#f3f4f6' }}
+                  itemStyle={{ color: '#f3f4f6' }}
                   formatter={(v: number) => [v.toLocaleString(), 'Số lượng']}
                 />
                 <Bar dataKey="sales" radius={[0, 4, 4, 0]} barSize={24}>
@@ -2507,6 +2508,15 @@ export default function App() {
   // Menu Management
   const handleAddItem = async (item: MenuItem) => {
     if (!currentUser) return;
+    setMenu(prev => {
+      const idx = prev.findIndex(i => i.id === item.id);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = item;
+        return copy;
+      }
+      return [...prev, item];
+    });
     if (item.id) {
       await setDoc(doc(db, 'menu', item.id), { 
         ...item, 
@@ -2514,20 +2524,23 @@ export default function App() {
         isInventory: item.isInventory || false 
       });
     } else {
-      await addDoc(collection(db, 'menu'), { 
+      const docRef = await addDoc(collection(db, 'menu'), { 
         ...item, 
         storeId: currentUser.storeId,
         isInventory: item.isInventory || false 
       });
+      setMenu(prev => prev.map(i => i.id === item.id ? { ...i, id: docRef.id } : i));
     }
   };
 
   const handleDeleteItem = async (id: string) => {
+    setMenu(prev => prev.filter(i => i.id !== id));
     await deleteDoc(doc(db, 'menu', id));
   };
 
   const handleUpdateItem = async (item: MenuItem) => {
     if (!item.id) return;
+    setMenu(prev => prev.map(i => i.id === item.id ? { ...i, ...item } : i));
     await updateDoc(doc(db, 'menu', item.id), { ...item });
   };
 
@@ -2538,6 +2551,7 @@ export default function App() {
         const currentCats = systemSettings.menuCategories || CATEGORIES;
         const newCats = currentCats.filter(c => c !== cat);
         await handleUpdateSettings({ ...systemSettings, menuCategories: newCats });
+        setMenu(prev => prev.filter(item => item.category !== cat));
 
         const itemsToDelete = menu.filter(item => item.category === cat);
         for (const item of itemsToDelete) {
@@ -2561,6 +2575,7 @@ export default function App() {
         const currentCats = systemSettings.inventoryCategories || ['Nguyên liệu', 'Đồ uống', 'Khác'];
         const newCats = currentCats.filter(c => c !== cat);
         await handleUpdateSettings({ ...systemSettings, inventoryCategories: newCats });
+        setMenu(prev => prev.filter(item => !(item.category === cat && (item.isInventory || item.type === 'goods'))));
 
         const itemsToDelete = menu.filter(item => item.category === cat && (item.isInventory || item.type === 'goods'));
         for (const item of itemsToDelete) {
@@ -2584,7 +2599,7 @@ export default function App() {
 
     const oldStock = item.stock || 0;
     const oldCostPrice = item.costPrice || 0;
-    const newStock = oldStock + quantity;
+    const newStock = Number((oldStock + quantity).toFixed(1));
     
     // Calculate new average cost price (Giá vốn bình quân gia quyền)
     let newCostPrice = oldCostPrice;
@@ -2593,6 +2608,8 @@ export default function App() {
     } else if (unitPrice > 0) {
       newCostPrice = unitPrice;
     }
+
+    setMenu(prev => prev.map(i => i.id === itemId ? { ...i, stock: newStock, costPrice: newCostPrice } : i));
 
     const itemRef = doc(db, 'menu', itemId);
     await updateDoc(itemRef, { 
@@ -2664,6 +2681,11 @@ export default function App() {
   const handleAuditInventory = async (audit: InventoryAudit) => {
     if (!currentUser) return;
     
+    setMenu(prev => prev.map(i => {
+      const aud = audit.items.find(a => a.itemId === i.id);
+      return aud ? { ...i, stock: Number(aud.actualStock.toFixed(1)) } : i;
+    }));
+
     const auditRef = await addDoc(collection(db, 'inventory_audits'), { ...audit, storeId: currentUser.storeId });
     
     for (const auditItem of audit.items) {
@@ -2689,11 +2711,13 @@ export default function App() {
   };
 
   const handleUpdateInventoryItem = async (item: MenuItem) => {
+    setMenu(prev => prev.map(i => i.id === item.id ? { ...i, ...item } : i));
     const itemRef = doc(db, 'menu', item.id);
     await updateDoc(itemRef, { ...item });
   };
 
   const handleDeleteInventoryItem = async (id: string) => {
+    setMenu(prev => prev.filter(i => i.id !== id));
     await deleteDoc(doc(db, 'menu', id));
   };
 
@@ -3120,7 +3144,7 @@ export default function App() {
       if (item.type === 'goods') {
         const menuItem = menu.find(m => m.id === item.id);
         if (menuItem && menuItem.trackStock !== false) {
-           const newStock = menuItem.stock - item.quantity;
+           const newStock = Number((menuItem.stock - item.quantity).toFixed(1));
            await updateDoc(doc(db, 'menu', item.id), { stock: newStock });
            
            // Record Stock Card
@@ -3142,7 +3166,7 @@ export default function App() {
           const ingredient = menu.find(m => m.id === recipeItem.ingredientId);
           if (ingredient && ingredient.trackStock !== false) {
             const deduction = recipeItem.quantity * item.quantity;
-            const newStock = ingredient.stock - deduction;
+            const newStock = Number((ingredient.stock - deduction).toFixed(1));
             await updateDoc(doc(db, 'menu', ingredient.id), { stock: newStock });
 
             // Record Stock Card for ingredients
@@ -3550,7 +3574,10 @@ export default function App() {
                   history={shifts} 
                   onOpenShift={handleOpenShift}
                   onCloseShift={handleCloseShift}
-                  onResolveDiscrepancy={async (shiftId) => { await updateDoc(doc(db, 'shifts', shiftId), { discrepancyProcessed: true }); }}
+                  onResolveDiscrepancy={async (shiftId) => {
+                    setShifts(prev => prev.map(s => s.id === shiftId ? { ...s, discrepancyProcessed: true } : s));
+                    await updateDoc(doc(db, 'shifts', shiftId), { discrepancyProcessed: true });
+                  }}
                   currentUser={currentUser}
                   tables={tables}
                 />
@@ -3976,7 +4003,7 @@ const ThemeToggle = () => {
 
 const Header = ({ 
   view, 
-  setView,
+  setView, 
   currentUser, 
   packages, 
   onShowUpgrade,
@@ -3993,6 +4020,7 @@ const Header = ({
 }) => {
   const [showPackageInfo, setShowPackageInfo] = React.useState(false);
   const [showNotifications, setShowNotifications] = React.useState(false);
+  const [dismissedNotifIds, setDismissedNotifIds] = React.useState<string[]>([]);
   const notifRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -4005,58 +4033,82 @@ const Header = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const notifications: { id: string, title: string, description: string, type: 'warning' | 'error' | 'info', action?: () => void }[] = [];
+  const allNotifications: { id: string, title: string, description: string, type: 'warning' | 'error' | 'info', actionText?: string, action?: () => void }[] = [];
   
   if (currentUser?.role === 'admin' || currentUser?.role === 'manager') {
+    // 1. Subscription Expiration
     if (currentUser.store?.subscription?.validUntil) {
       const daysLeft = Math.ceil((new Date(currentUser.store.subscription.validUntil).getTime() - new Date().getTime()) / (1000 * 3600 * 24));
       if (daysLeft >= 0 && daysLeft <= 7) {
-        notifications.push({
+        allNotifications.push({
           id: 'sub-expiring',
           title: 'Gói cước sắp hết hạn',
-          description: `Gói cước của bạn sẽ hết hạn sau ${daysLeft} ngày. Vui lòng gia hạn.`,
+          description: `Gói cước của bạn sẽ hết hạn ${daysLeft === 0 ? 'hôm nay' : `sau ${daysLeft} ngày`}. Vui lòng gia hạn để không gián đoạn dịch vụ.`,
           type: 'warning',
+          actionText: 'Gia hạn ngay',
           action: () => { setShowNotifications(false); onShowUpgrade(); }
         });
       }
     } else if (currentUser.store?.subscription?.status === 'trial' && currentUser.store?.subscription?.trialEndDate) {
       const daysLeft = Math.ceil((new Date(currentUser.store.subscription.trialEndDate).getTime() - new Date().getTime()) / (1000 * 3600 * 24));
       if (daysLeft >= 0 && daysLeft <= 7) {
-        notifications.push({
+        allNotifications.push({
           id: 'trial-expiring',
           title: 'Dùng thử sắp hết hạn',
-          description: `Gói dùng thử sẽ hết hạn sau ${daysLeft} ngày.`,
+          description: `Gói dùng thử sẽ hết hạn ${daysLeft === 0 ? 'hôm nay' : `sau ${daysLeft} ngày`}.`,
           type: 'warning',
+          actionText: 'Nâng cấp gói',
           action: () => { setShowNotifications(false); onShowUpgrade(); }
         });
       }
     }
 
-    const lowStockItems = menu.filter(item => (item.type === 'goods' || item.isInventory) && item.stock <= 5);
-    if (lowStockItems.length > 0) {
-      const itemNames = lowStockItems.slice(0, 3).map(i => i.name).join(', ');
-      const moreText = lowStockItems.length > 3 ? ` và ${lowStockItems.length - 3} mục khác` : '';
-      notifications.push({
-        id: 'low-stock',
-        title: 'Hàng hóa sắp hết tồn kho',
-        description: `Các mặt hàng sắp hết: ${itemNames}${moreText}.`,
+    // 2. Low Stock Items (per item)
+    const lowStockItems = menu.filter(item => {
+      if (item.trackStock === false) return false;
+      const isInv = item.isInventory || item.type === 'goods';
+      if (!isInv) return false;
+      const threshold = item.minStock !== undefined && item.minStock !== null ? item.minStock : 5;
+      return (item.stock ?? 0) <= threshold;
+    });
+
+    lowStockItems.forEach(item => {
+      const threshold = item.minStock !== undefined && item.minStock !== null ? item.minStock : 5;
+      allNotifications.push({
+        id: `low-stock-${item.id}`,
+        title: `Hàng tồn kho thấp: ${item.name}`,
+        description: `Mã ${item.code || '---'}: Tồn kho còn ${Number(item.stock ?? 0).toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ${item.unit || 'đv'} (Định mức: ${threshold}).`,
         type: 'error',
+        actionText: 'Nhập kho',
         action: () => { setShowNotifications(false); setView('inventory'); }
       });
-    }
+    });
 
+    // 3. Shift Discrepancies (per shift)
     const discrepancyShifts = shifts.filter(s => s.discrepancy !== undefined && s.discrepancy !== 0 && !s.discrepancyProcessed);
-    if (discrepancyShifts.length > 0) {
-      const totalDiscrepancy = discrepancyShifts.reduce((sum, s) => sum + (s.discrepancy || 0), 0);
-      notifications.push({
-        id: 'shift-discrepancy',
-        title: 'Chênh lệch ca làm việc',
-        description: `Có ${discrepancyShifts.length} ca làm việc chưa xử lý chênh lệch (Tổng: ${totalDiscrepancy.toLocaleString('vi-VN')}đ).`,
+    discrepancyShifts.forEach(s => {
+      const disc = s.discrepancy || 0;
+      allNotifications.push({
+        id: `shift-disc-${s.id}`,
+        title: `Chênh lệch ca: ${s.staffName || 'Nhân viên'}`,
+        description: `Ca làm việc ngày ${s.startTime ? format(new Date(s.startTime), 'dd/MM/yyyy HH:mm') : ''} có chênh lệch tiền mặt ${disc > 0 ? '+' : ''}${disc.toLocaleString('vi-VN')}đ chưa xử lý.`,
         type: 'error',
+        actionText: 'Xử lý ca',
         action: () => { setShowNotifications(false); setView('shifts'); }
       });
-    }
+    });
   }
+
+  const notifications = allNotifications.filter(n => !dismissedNotifIds.includes(n.id));
+
+  const dismissNotification = (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setDismissedNotifIds(prev => [...prev, id]);
+  };
+
+  const dismissAllNotifications = () => {
+    setDismissedNotifIds(prev => [...prev, ...allNotifications.map(n => n.id)]);
+  };
 
   const titles: Record<ViewType, string> = {
     tables: 'Sơ đồ phòng bàn',
@@ -4153,38 +4205,68 @@ const Header = ({
           <div className="relative" ref={notifRef}>
             <button 
               onClick={() => setShowNotifications(!showNotifications)}
-              className="relative p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer"
+              className="relative p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer rounded-full hover:bg-black/5 dark:hover:bg-white/5"
+              title="Thông báo hệ thống"
             >
               <Bell className="w-6 h-6" />
               {notifications.length > 0 && (
-                <span className="absolute top-1 right-1 flex h-3 w-3 items-center justify-center rounded-full bg-rose-500 text-[8px] font-bold text-white border-2 border-white dark:border-[#0a0a0a]">
+                <span className="absolute top-1 right-1 flex min-w-[16px] h-4 px-1 items-center justify-center rounded-full bg-rose-500 text-[9px] font-bold text-white border-2 border-white dark:border-[#0a0a0a]">
                   {notifications.length}
                 </span>
               )}
             </button>
 
             {showNotifications && (
-              <div className="absolute top-full right-0 mt-2 w-80 bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl shadow-xl overflow-hidden z-50">
+              <div className="absolute top-full right-0 mt-2 w-80 md:w-96 bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-150">
                 <div className="p-4 border-b border-black/10 dark:border-white/10 bg-gray-50 dark:bg-white/5 flex justify-between items-center">
-                  <h4 className="font-bold text-gray-900 dark:text-white">Thông báo hệ thống</h4>
-                  <span className="text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 px-2 py-1 rounded-lg font-bold">
-                    {notifications.length} mới
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-gray-900 dark:text-white text-sm">Thông báo hệ thống</h4>
+                    <span className="text-xs bg-rose-500/10 text-rose-600 dark:text-rose-400 px-2 py-0.5 rounded-full font-bold">
+                      {notifications.length}
+                    </span>
+                  </div>
+                  {notifications.length > 0 && (
+                    <button
+                      onClick={dismissAllNotifications}
+                      className="text-xs text-gray-500 hover:text-gray-900 dark:hover:text-white font-medium hover:underline cursor-pointer"
+                    >
+                      Đã đọc tất cả
+                    </button>
+                  )}
                 </div>
-                <div className="max-h-96 overflow-y-auto custom-scrollbar">
+                <div className="max-h-[380px] overflow-y-auto custom-scrollbar divide-y divide-black/5 dark:divide-white/5">
                   {notifications.length > 0 ? (
-                    notifications.map((notif, index) => (
-                      <div key={notif.id + index} onClick={notif.action} className="p-4 border-b border-black/5 dark:border-white/5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer">
-                        <div className="flex gap-3">
-                          <div className={`w-2 h-2 mt-1.5 rounded-full shrink-0 ${notif.type === 'error' ? 'bg-rose-500' : notif.type === 'warning' ? 'bg-amber-500' : 'bg-blue-500'}`} />
-                          <div>
-                            <h5 className={`text-sm font-bold ${notif.type === 'error' ? 'text-rose-600 dark:text-rose-400' : notif.type === 'warning' ? 'text-amber-600 dark:text-amber-500' : 'text-blue-600 dark:text-blue-400'}`}>
-                              {notif.title}
-                            </h5>
-                            <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 leading-relaxed">
+                    notifications.map((notif) => (
+                      <div 
+                        key={notif.id} 
+                        onClick={notif.action} 
+                        className="p-3.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer group relative"
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className={`w-2.5 h-2.5 mt-1 rounded-full shrink-0 ${notif.type === 'error' ? 'bg-rose-500' : notif.type === 'warning' ? 'bg-amber-500' : 'bg-blue-500'}`} />
+                          <div className="flex-1 pr-5">
+                            <div className="flex items-center justify-between">
+                              <h5 className={`text-xs font-bold leading-tight ${notif.type === 'error' ? 'text-rose-600 dark:text-rose-400' : notif.type === 'warning' ? 'text-amber-600 dark:text-amber-500' : 'text-blue-600 dark:text-blue-400'}`}>
+                                {notif.title}
+                              </h5>
+                            </div>
+                            <p className="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
                               {notif.description}
                             </p>
+                            {notif.actionText && (
+                              <div className="mt-2 flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 group-hover:underline">
+                                <span>{notif.actionText}</span>
+                                <span>→</span>
+                              </div>
+                            )}
                           </div>
+                          <button
+                            onClick={(e) => dismissNotification(notif.id, e)}
+                            className="absolute top-3 right-3 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-md hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+                            title="Ẩn thông báo này"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
                     ))

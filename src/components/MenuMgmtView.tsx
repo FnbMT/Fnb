@@ -761,7 +761,9 @@ export const MenuMgmtView = ({
                 </div>
                 <div className="text-right">
                   <p className="text-[9px] md:text-[10px] text-gray-500 uppercase hidden md:block">Tồn kho</p>
-                  <p className="text-xs md:text-sm font-mono text-gray-600 dark:text-gray-400">{item.stock} {item.unit}</p>
+                  <p className="text-xs md:text-sm font-mono text-gray-600 dark:text-gray-400">
+                    {Number(item.stock || 0).toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} {item.unit}
+                  </p>
                 </div>
               </div>
             </div>
