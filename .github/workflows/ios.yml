@@ -1,0 +1,261 @@
+name: Build and Archive iOS App
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build_ios:
+    # GitHub's macOS 26 runner uses Apple's current Xcode 26.x toolchain.
+    # Apple requires Xcode 26+ with the iOS 26 SDK for App Store Connect uploads
+    # since April 28, 2026.
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check macOS and Xcode
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+
+      - name: Install Dependencies
+        run: |
+          node -v
+          npm ci
+
+      - name: Generate Mobile Assets
+        run: |
+          npx @capacitor/assets generate
+
+      - name: Build Web App
+        run: npm run build
+
+      - name: Sync Capacitor iOS
+        run: |
+          test -d ios/App || {
+            echo "ERROR: ios/App is missing."
+            echo "Commit the ios/ directory to GitHub. This workflow intentionally does NOT run 'rm -rf ios' or 'cap add ios'."
+            exit 1
+          }
+
+          npx cap sync ios
+
+          cd ios/App
+          pod install --repo-update
+
+      - name: Verify iOS App Icon
+        run: |
+          ICON_DIR="ios/App/App/Assets.xcassets/AppIcon.appiconset"
+
+          if [ ! -d "$ICON_DIR" ]; then
+            echo "ERROR: $ICON_DIR not found."
+            exit 1
+          fi
+
+          echo "AppIcon.appiconset contents:"
+          ls -lah "$ICON_DIR"
+
+          ICON_COUNT=$(find "$ICON_DIR" -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) | wc -l | tr -d ' ')
+
+          if [ "$ICON_COUNT" -eq 0 ]; then
+            echo "ERROR: No icon image files found."
+            exit 1
+          fi
+
+          echo "Checking image files:"
+          find "$ICON_DIR" -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) -print0 |
+          while IFS= read -r -d '' file; do
+            file "$file"
+          done
+
+      - name: Install Apple Certificate and Provisioning Profile
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -e
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          PP_PATH="$RUNNER_TEMP/build_pp.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode > "$PP_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERTIFICATE_PATH" \
+            -P "$P12_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/"
+
+      - name: Extract Profile UUID and Name
+        id: profile_info
+        run: |
+          set -e
+
+          PP_PATH="$RUNNER_TEMP/build_pp.mobileprovision"
+          security cms -D -i "$PP_PATH" > "$RUNNER_TEMP/profile.plist"
+
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print Name" "$RUNNER_TEMP/profile.plist")
+          TEAM_ID=$(/usr/libexec/PlistBuddy -c "Print TeamIdentifier:0" "$RUNNER_TEMP/profile.plist")
+          BUNDLE_ID_FULL=$(/usr/libexec/PlistBuddy -c "Print Entitlements:application-identifier" "$RUNNER_TEMP/profile.plist")
+          BUNDLE_ID=${BUNDLE_ID_FULL#*.}
+
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
+          echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+
+          echo "Provisioning profile: $PROFILE_NAME"
+          echo "Team ID: $TEAM_ID"
+          echo "Bundle ID: $BUNDLE_ID"
+          echo "Profile UUID: $PROFILE_UUID"
+
+      - name: Build and Archive iOS App
+        working-directory: ios/App
+        env:
+          DEVELOPMENT_TEAM: ${{ env.TEAM_ID }}
+          BUNDLE_ID: ${{ env.BUNDLE_ID }}
+          PROFILE_NAME: ${{ env.PROFILE_NAME }}
+          PROFILE_UUID: ${{ env.PROFILE_UUID }}
+        run: |
+          set -e
+
+          cat > exportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store</string>
+              <key>teamID</key>
+              <string>${DEVELOPMENT_TEAM}</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>${BUNDLE_ID}</key>
+                  <string>${PROFILE_NAME}</string>
+              </dict>
+              <key>signingStyle</key>
+              <string>manual</string>
+          </dict>
+          </plist>
+          EOF
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :ITSAppUsesNonExemptEncryption bool false" \
+            App/Info.plist || true
+
+          BUILD_NUM=$(date "+%Y%m%d%H%M")
+          agvtool new-version -all "$BUILD_NUM"
+          agvtool new-marketing-version "1.0.1"
+
+          if [ -f "App.xcworkspace/contents.xcworkspacedata" ]; then
+            echo "Resolving Swift Package dependencies..."
+            xcodebuild \
+              -resolvePackageDependencies \
+              -workspace App.xcworkspace \
+              -scheme App
+
+            echo "Archiving workspace..."
+            xcodebuild \
+              -workspace App.xcworkspace \
+              -scheme App \
+              -configuration Release \
+              -archivePath App.xcarchive \
+              clean archive \
+              -skipPackagePluginValidation \
+              ENABLE_USER_SCRIPT_SANDBOXING=NO \
+              CODE_SIGN_STYLE=Manual \
+              CODE_SIGN_IDENTITY="Apple Distribution" \
+              PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
+              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}"
+          else
+            echo "Archiving project..."
+            xcodebuild \
+              -project App.xcodeproj \
+              -scheme App \
+              -configuration Release \
+              -archivePath App.xcarchive \
+              clean archive \
+              -skipPackagePluginValidation \
+              ENABLE_USER_SCRIPT_SANDBOXING=NO \
+              CODE_SIGN_STYLE=Manual \
+              CODE_SIGN_IDENTITY="Apple Distribution" \
+              PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
+              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}"
+          fi
+
+          echo "Exporting IPA..."
+          rm -rf output
+
+          xcodebuild \
+            -exportArchive \
+            -archivePath App.xcarchive \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath output
+
+          ls -lah output
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-app-release
+          path: ios/App/output/*.ipa
+          if-no-files-found: error
+
+      - name: Upload app to App Store Connect / TestFlight
+        env:
+          API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          set -e
+
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          printf '%s' "$API_PRIVATE_KEY" \
+            > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
+
+          IPA_PATH=$(find ios/App/output -name "*.ipa" -print -quit)
+
+          if [ -z "$IPA_PATH" ]; then
+            echo "ERROR: IPA file not found."
+            exit 1
+          fi
+
+          echo "Uploading: $IPA_PATH"
+
+          xcrun altool \
+            --upload-app \
+            -f "$IPA_PATH" \
+            -t ios \
+            --apiKey "$API_KEY_ID" \
+            --apiIssuer "$API_ISSUER_ID"
