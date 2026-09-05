@@ -4323,16 +4323,6 @@ const Header = ({
         )}
         
         <div className="h-8 w-[1px] bg-black/10 dark:bg-white/10 hidden md:block" />
-        
-        {currentUser?.requiresAttendance && (
-          <button 
-            onClick={() => onScanQR && onScanQR()}
-            className="p-2 text-emerald-600 dark:text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-400 transition-colors cursor-pointer rounded-full hover:bg-emerald-500/10"
-            title="Chấm công"
-          >
-            <QrCode className="w-6 h-6" />
-          </button>
-        )}
 
         <ThemeToggle />
         {(currentUser?.role === 'admin' || currentUser?.role === 'manager') && (

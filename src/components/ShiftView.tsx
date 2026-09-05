@@ -99,6 +99,35 @@ export const ShiftView = ({
           Quản lý Ca làm việc
         </h3>
       </div>
+      
+      {/* Attendance Check-in Section */}
+      {!isAdminOrManager && currentUser?.requiresAttendance && (
+         <div className="bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm">
+             <div className="flex items-center gap-4">
+                 <div className={cn("w-12 h-12 rounded-full flex items-center justify-center shrink-0", hasCheckedInToday ? "bg-emerald-500/20 text-emerald-600" : "bg-rose-500/20 text-rose-600")}>
+                     {hasCheckedInToday ? <Check className="w-6 h-6" /> : <QrCode className="w-6 h-6" />}
+                 </div>
+                 <div>
+                     <h4 className="font-bold text-gray-900 dark:text-white text-lg">Trạng thái chấm công</h4>
+                     <p className={cn("text-sm font-bold mt-0.5", hasCheckedInToday ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>
+                         {hasCheckedInToday ? "Hôm nay bạn đã chấm công thành công" : "Bạn chưa chấm công hôm nay"}
+                     </p>
+                 </div>
+             </div>
+             
+             <button
+                 onClick={() => onScanQR && onScanQR()}
+                 className={cn("px-6 py-3 md:w-auto w-full rounded-xl font-bold flex items-center justify-center gap-2 transition-all cursor-pointer",
+                     hasCheckedInToday 
+                     ? "bg-black/5 dark:bg-white/5 hover:bg-black/10 text-gray-700 dark:text-gray-300 border border-black/10 dark:border-white/10"
+                     : "bg-emerald-500 hover:bg-emerald-400 text-white shadow-lg hover:shadow-emerald-500/25"
+                 )}
+             >
+                 <QrCode className="w-5 h-5" />
+                 {hasCheckedInToday ? "Quét lại mã QR" : "Quét mã QR Chấm công"}
+             </button>
+         </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
         {/* Current Active Shift */}
