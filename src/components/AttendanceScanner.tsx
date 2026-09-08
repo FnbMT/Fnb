@@ -43,10 +43,33 @@ export const AttendanceScanner = ({
     }
   };
 
-  const processCheckIn = () => {
+  const processCheckIn = async () => {
+    // If no store location configured, just allow checkin directly without location check
     if (!settings?.storeLocation) {
-      setScanStatus('error');
-      setScanMessage('Cửa hàng chưa cấu hình vị trí chấm công');
+      try {
+        const now = new Date();
+        const todayStr = format(now, 'yyyy-MM-dd');
+        const todayRecord = attendanceRecords.find(r => r.userId === currentUser.id && r.date === todayStr);
+        const type = todayRecord?.checkInTime ? 'out' : 'in';
+
+        await onCheckIn({
+          userId: currentUser.id,
+          staffName: currentUser.name,
+          date: todayStr,
+          [type === 'in' ? 'checkInTime' : 'checkOutTime']: now.toISOString(),
+          locationValid: true
+        });
+        
+        setScanStatus('success');
+        setScanMessage(`Đã ghi nhận chấm công ${type === 'in' ? 'VÀO CA' : 'RA CA'} thành công!`);
+        
+        setTimeout(() => {
+          onClose();
+        }, 3000);
+      } catch (err) {
+        setScanStatus('error');
+        setScanMessage('Có lỗi xảy ra khi lưu dữ liệu');
+      }
       return;
     }
 
@@ -107,8 +130,8 @@ export const AttendanceScanner = ({
       }
     }, (error) => {
       setScanStatus('error');
-      setScanMessage('Không thể lấy vị trí của bạn. Vui lòng cấp quyền truy cập vị trí.');
-    }, { enableHighAccuracy: true });
+      setScanMessage('Không thể lấy vị trí của bạn. Vui lòng cấp quyền truy cập vị trí và bật GPS.');
+    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
   };
 
   return (
