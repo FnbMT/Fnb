@@ -3440,70 +3440,82 @@ export default function App() {
   }
 
   const handleCheckIn = async (record: Partial<AttendanceRecord>) => {
-    // Find existing record for today
-    const today = record.date;
-    const q = query(
-      collection(db, 'attendance_records'),
-      where('userId', '==', currentUser.id),
-      where('date', '==', today)
-    );
-    const snap = await getDocs(q);
-    
-    // Determine status if it's a check-in
-    let finalStatus = record.status || 'present';
-    if (record.checkInTime) {
-      const shiftStartStr = (currentUser.shifts && currentUser.shifts[0]) ? currentUser.shifts[0].start : currentUser.shiftStart;
-      if (shiftStartStr) {
-        const checkInDate = new Date(record.checkInTime);
-        const [hours, minutes] = shiftStartStr.split(':').map(Number);
-        const shiftStartDate = new Date(checkInDate);
-        shiftStartDate.setHours(hours, minutes, 0, 0);
+    try {
+      // Find existing record for today
+      const today = record.date;
+      const q = query(
+        collection(db, 'attendance_records'),
+        where('userId', '==', currentUser.id),
+        where('date', '==', today)
+      );
+      const snap = await getDocs(q);
+      
+      // Determine status if it's a check-in
+      let finalStatus = record.status || 'present';
+      if (record.checkInTime) {
+        const shiftStartStr = (currentUser.shifts && currentUser.shifts[0]) ? currentUser.shifts[0].start : currentUser.shiftStart;
+        if (shiftStartStr) {
+          const checkInDate = new Date(record.checkInTime);
+          const [hours, minutes] = shiftStartStr.split(':').map(Number);
+          const shiftStartDate = new Date(checkInDate);
+          shiftStartDate.setHours(hours, minutes, 0, 0);
 
-        const diffMinutes = (checkInDate.getTime() - shiftStartDate.getTime()) / 60000;
-        
-        if (diffMinutes > 240) { // > 4 hours late
-          finalStatus = 'half-day';
-        } else if (diffMinutes > 15) { // > 15 mins late
-          finalStatus = 'late';
+          const diffMinutes = (checkInDate.getTime() - shiftStartDate.getTime()) / 60000;
+          
+          if (diffMinutes > 240) { // > 4 hours late
+            finalStatus = 'half-day';
+          } else if (diffMinutes > 15) { // > 15 mins late
+            finalStatus = 'late';
+          }
         }
       }
-    }
 
-    if (!snap.empty) {
-      // Find the latest record
-      const sortedRecords = snap.docs.map(d => ({id: d.id, ...d.data()}) as AttendanceRecord).sort((a, b) => {
-        return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
-      });
-      const latestRecord = sortedRecords[0];
+      if (!snap.empty) {
+        // Find the latest record
+        const sortedRecords = snap.docs.map(d => ({id: d.id, ...d.data()}) as AttendanceRecord).sort((a, b) => {
+          return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
+        });
+        const latestRecord = sortedRecords[0];
 
-      if (record.checkOutTime) {
-        // It's a check-out request, so update the latest record
-        const updateData = { ...record };
-        if (updateData.status) delete updateData.status; // Don't override status on checkout
-        await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
-      } else if (record.checkInTime) {
-        // It's a check-in request. If the latest record already has a check-out, create a new record.
-        if (latestRecord.checkOutTime) {
-          await addDoc(collection(db, 'attendance_records'), { 
-            ...record, 
-            status: finalStatus,
-            storeId: currentUser.storeId,
-            id: Math.random().toString(36).substr(2, 9)
-          });
-        } else {
-          // If the latest record doesn't have a check-out, we are just updating the existing check-in (maybe overriding? Shouldn't happen normally)
-          const updateData = { ...record };
-          await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
+        if (record.checkOutTime) {
+          // It's a check-out request, so update the latest record
+          const updateData: any = { checkOutTime: record.checkOutTime };
+          if (record.locationValid !== undefined) updateData.locationValid = record.locationValid;
+          if (latestRecord.id) {
+            await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
+          } else {
+            console.error('latestRecord.id is missing');
+            throw new Error('Không tìm thấy bản ghi để cập nhật');
+          }
+        } else if (record.checkInTime) {
+          // It's a check-in request. If the latest record already has a check-out, create a new record.
+          if (latestRecord.checkOutTime) {
+            await addDoc(collection(db, 'attendance_records'), { 
+              ...record, 
+              status: finalStatus,
+              storeId: currentUser.storeId,
+              id: Math.random().toString(36).substr(2, 9)
+            });
+          } else {
+            // If the latest record doesn't have a check-out, we are just updating the existing check-in (maybe overriding? Shouldn't happen normally)
+            const updateData = { ...record };
+            if (latestRecord.id) {
+              await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
+            }
+          }
         }
+      } else {
+        // Create new record (e.g. check-in)
+        await addDoc(collection(db, 'attendance_records'), { 
+          ...record, 
+          status: finalStatus,
+          storeId: currentUser.storeId,
+          id: Math.random().toString(36).substr(2, 9)
+        });
       }
-    } else {
-      // Create new record (e.g. check-in)
-      await addDoc(collection(db, 'attendance_records'), { 
-        ...record, 
-        status: finalStatus,
-        storeId: currentUser.storeId,
-        id: Math.random().toString(36).substr(2, 9)
-      });
+    } catch (e) {
+      console.error("Check-in error:", e);
+      throw e;
     }
   };
 

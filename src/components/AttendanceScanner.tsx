@@ -120,7 +120,7 @@ export const AttendanceScanner = ({
       }, 3000);
     } catch (err) {
       setScanStatus('error');
-      setScanMessage('Có lỗi xảy ra khi lưu dữ liệu');
+      setScanMessage('Lỗi: ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
