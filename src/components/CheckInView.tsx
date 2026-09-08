@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Camera, MapPin, CheckCircle2, XCircle, LogIn, LogOut } from 'lucide-react';
 import { User, AttendanceRecord, SystemSettings } from '../types';
 import { format, parseISO } from 'date-fns';
+import { Geolocation } from '@capacitor/geolocation';
 
 export const CheckInView = ({
   currentUser,
@@ -31,21 +32,44 @@ export const CheckInView = ({
     }
 
     if (!settings?.storeLocation) {
-      setStatus('error');
-      setMessage('Cửa hàng chưa cấu hình vị trí chấm công');
+      try {
+        const now = new Date();
+        await onCheckIn({
+          userId: currentUser.id,
+          staffName: currentUser.name,
+          date: format(now, 'yyyy-MM-dd'),
+          [type === 'in' ? 'checkInTime' : 'checkOutTime']: now.toISOString(),
+          locationValid: true
+        });
+        setStatus('success');
+        setMessage(`Đã chấm công ${type === 'in' ? 'vào ca' : 'ra ca'} thành công!`);
+        setTimeout(() => {
+          window.location.href = '/';
+        }, 3000);
+      } catch (e) {
+        setStatus('error');
+        setMessage('Lỗi khi lưu dữ liệu chấm công');
+      }
       return;
     }
 
     setStatus('locating');
     setMessage('Đang kiểm tra vị trí...');
 
-    if (!navigator.geolocation) {
-      setStatus('error');
-      setMessage('Trình duyệt không hỗ trợ vị trí');
-      return;
-    }
+    try {
+      try {
+        const permissions = await Geolocation.checkPermissions();
+        if (permissions.location !== 'granted') {
+          const request = await Geolocation.requestPermissions();
+          if (request.location !== 'granted') {
+            throw new Error('Permission denied');
+          }
+        }
+      } catch (permError) {
+        console.warn('Could not check permissions, proceeding to request position directly', permError);
+      }
 
-    navigator.geolocation.getCurrentPosition(async (position) => {
+      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
       const { latitude, longitude } = position.coords;
       const storeLat = settings.storeLocation!.lat;
       const storeLng = settings.storeLocation!.lng;
@@ -86,10 +110,11 @@ export const CheckInView = ({
         setStatus('error');
         setMessage('Có lỗi xảy ra khi lưu dữ liệu');
       }
-    }, (error) => {
+    } catch (error) {
+      console.error('Location error:', error);
       setStatus('error');
-      setMessage('Không thể lấy vị trí của bạn. Vui lòng cấp quyền truy cập vị trí.');
-    }, { enableHighAccuracy: true });
+      setMessage('Không thể lấy vị trí của bạn. Vui lòng cấp quyền truy cập vị trí và bật GPS.');
+    }
   };
 
   return (

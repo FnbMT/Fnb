@@ -3,6 +3,7 @@ import { Scanner } from '@yudiel/react-qr-scanner';
 import { MapPin, CheckCircle2, QrCode } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { User, SystemSettings, AttendanceRecord } from '../types';
+import { Geolocation } from '@capacitor/geolocation';
 import { format } from 'date-fns';
 
 export const AttendanceScanner = ({
@@ -76,13 +77,22 @@ export const AttendanceScanner = ({
     setScanStatus('locating');
     setScanMessage('Đang kiểm tra vị trí của bạn...');
 
-    if (!navigator.geolocation) {
-      setScanStatus('error');
-      setScanMessage('Trình duyệt không hỗ trợ vị trí');
-      return;
-    }
+    try {
+      // First try to check permissions
+      try {
+        const permissions = await Geolocation.checkPermissions();
+        if (permissions.location !== 'granted') {
+          const request = await Geolocation.requestPermissions();
+          if (request.location !== 'granted') {
+            throw new Error('Permission denied');
+          }
+        }
+      } catch (permError) {
+        // Fallback for environments where permissions check might fail (e.g., standard web without Capacitor plugin fully initialized)
+        console.warn('Could not check permissions, proceeding to request position directly', permError);
+      }
 
-    navigator.geolocation.getCurrentPosition(async (position) => {
+      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
       const { latitude, longitude } = position.coords;
       const storeLat = settings.storeLocation!.lat;
       const storeLng = settings.storeLocation!.lng;
@@ -128,10 +138,11 @@ export const AttendanceScanner = ({
         setScanStatus('error');
         setScanMessage('Có lỗi xảy ra khi lưu dữ liệu');
       }
-    }, (error) => {
+    } catch (error) {
+      console.error('Location error:', error);
       setScanStatus('error');
       setScanMessage('Không thể lấy vị trí của bạn. Vui lòng cấp quyền truy cập vị trí và bật GPS.');
-    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+    }
   };
 
   return (
