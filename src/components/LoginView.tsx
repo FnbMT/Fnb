@@ -82,7 +82,7 @@ export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) 
       }
 
       // Query store by code
-      const storeQuery = query(collection(db, 'stores'), where('code', '==', storeCode.toLowerCase()));
+      const storeQuery = query(collection(db, 'stores'), where('code', '==', storeCode.toLowerCase().trim()));
       const storeSnapshot = await getDocs(storeQuery);
       
       if (storeSnapshot.empty) {
@@ -105,7 +105,7 @@ export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) 
       }
 
       // 2. Query user by storeId, username, and password
-      const q = query(collection(db, 'users'), where('storeId', '==', storeId), where('username', '==', username.toLowerCase()), where('password', '==', password));
+      const q = query(collection(db, 'users'), where('storeId', '==', storeId), where('username', '==', username.toLowerCase().trim()), where('password', '==', password.trim()));
       const querySnapshot = await getDocs(q);
 
       if (!querySnapshot.empty) {
@@ -123,12 +123,8 @@ export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) 
         }
 
         onLogin({
+          ...userData,
           id: userDoc.id,
-          username: userData.username,
-          name: userData.name,
-          role: userData.role,
-          storeId: userData.storeId,
-          avatar: userData.avatar,
           store: storeData
         } as any);
       } else {

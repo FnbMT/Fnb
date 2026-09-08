@@ -75,21 +75,26 @@ export const UserMgmtView = ({
   const handleSave = () => {
     if (!newUser.username || !newUser.name) return;
     
+    const formattedUser = {
+      ...newUser,
+      username: newUser.username.toLowerCase().trim()
+    };
+    
     if (editingUserId) {
       const existingUser = users.find(u => u.id === editingUserId);
       if (existingUser) {
         onUpdateUser({
           ...existingUser,
-          ...newUser,
+          ...formattedUser,
           // Only update password if provided
-          password: newUser.password ? newUser.password : existingUser.password
+          password: formattedUser.password ? formattedUser.password : existingUser.password
         });
       }
     } else {
-      if (!newUser.password) return; // password required for new user
+      if (!formattedUser.password) return; // password required for new user
       onAddUser({
         id: '',
-        ...newUser,
+        ...formattedUser,
         storeId: ''
       });
     }
@@ -391,6 +396,12 @@ export const UserMgmtView = ({
                   <UserIcon className="w-4 h-4 text-gray-500" />
                   {user.username}
                 </div>
+                {currentUser?.role === 'admin' && user.password && (
+                  <div className="flex items-center gap-3 text-gray-600 dark:text-gray-400">
+                    <Key className="w-4 h-4 text-gray-500" />
+                    <span className="font-mono text-xs bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded">{user.password}</span>
+                  </div>
+                )}
                 {user.phone && (
                   <div className="flex items-center gap-3 text-gray-600 dark:text-gray-400">
                     <Phone className="w-4 h-4 text-gray-500" />
@@ -674,7 +685,7 @@ export const UserMgmtView = ({
                     type="text" 
                     className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-2 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                     value={newUser.username}
-                    onChange={(e) => setNewUser({...newUser, username: e.target.value})}
+                    onChange={(e) => setNewUser({...newUser, username: e.target.value.toLowerCase().replace(/\s/g, '')})}
                     disabled={!!editingUserId}
                   />
                 </div>
