@@ -3470,11 +3470,32 @@ export default function App() {
     }
 
     if (!snap.empty) {
-      // Update existing record (e.g. check-out)
-      const docId = snap.docs[0].id;
-      const updateData = { ...record };
-      if (updateData.status) delete updateData.status; // Don't override status on checkout
-      await updateDoc(doc(db, 'attendance_records', docId), updateData);
+      // Find the latest record
+      const sortedRecords = snap.docs.map(d => ({id: d.id, ...d.data()}) as AttendanceRecord).sort((a, b) => {
+        return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
+      });
+      const latestRecord = sortedRecords[0];
+
+      if (record.checkOutTime) {
+        // It's a check-out request, so update the latest record
+        const updateData = { ...record };
+        if (updateData.status) delete updateData.status; // Don't override status on checkout
+        await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
+      } else if (record.checkInTime) {
+        // It's a check-in request. If the latest record already has a check-out, create a new record.
+        if (latestRecord.checkOutTime) {
+          await addDoc(collection(db, 'attendance_records'), { 
+            ...record, 
+            status: finalStatus,
+            storeId: currentUser.storeId,
+            id: Math.random().toString(36).substr(2, 9)
+          });
+        } else {
+          // If the latest record doesn't have a check-out, we are just updating the existing check-in (maybe overriding? Shouldn't happen normally)
+          const updateData = { ...record };
+          await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
+        }
+      }
     } else {
       // Create new record (e.g. check-in)
       await addDoc(collection(db, 'attendance_records'), { 
@@ -3493,7 +3514,9 @@ export default function App() {
   }
 
   const todayStr = format(new Date(), 'yyyy-MM-dd');
-  const hasCheckedInToday = currentUser ? attendanceRecords.some(r => r.userId === currentUser.id && r.date === todayStr && r.checkInTime) : false;
+  const todayRecords = currentUser ? attendanceRecords.filter(r => r.userId === currentUser.id && r.date === todayStr) : [];
+  const latestTodayRecord = todayRecords.sort((a, b) => new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime())[0];
+  const hasCheckedInToday = latestTodayRecord ? !!latestTodayRecord.checkInTime && !latestTodayRecord.checkOutTime : false;
 
   const activeOrdersCount = tables.reduce((acc, t) => acc + (t.orders?.filter(o => o.status !== 'paid').length || 0), 0);
 

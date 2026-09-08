@@ -124,7 +124,7 @@ export const ShiftView = ({
                  )}
              >
                  <QrCode className="w-5 h-5" />
-                 {hasCheckedInToday ? "Quét lại mã QR" : "Quét mã QR Chấm công"}
+                 {hasCheckedInToday ? "Kết thúc ca (Check-out)" : "Quét mã QR Chấm công"}
              </button>
          </div>
       )}

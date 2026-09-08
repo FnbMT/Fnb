@@ -163,6 +163,11 @@ export const UserMgmtView = ({
         calculatedSalary = (user.salaryAmount || 0) * totalHours;
       }
 
+      const sortedRecords = records.sort((a, b) => {
+        if (a.date === b.date) return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
+        return b.date.localeCompare(a.date);
+      });
+
       if (finalized) {
         return {
           user,
@@ -173,7 +178,7 @@ export const UserMgmtView = ({
           deduction: finalized.deduction || 0,
           deductionReason: finalized.deductionReason,
           totalSalary: finalized.totalSalary,
-          records,
+          records: sortedRecords,
           finalized: true
         };
       }
@@ -190,7 +195,7 @@ export const UserMgmtView = ({
         deduction,
         deductionReason: deductionReasonInputs[user.id] || '',
         totalSalary: calculatedSalary + bonus - deduction,
-        records,
+        records: sortedRecords,
         finalized: false
       };
     });
