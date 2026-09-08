@@ -45,19 +45,9 @@ export const MyPayrollView = ({
     setScanMessage('Đang kiểm tra vị trí của bạn...');
 
     try {
-      try {
-        const permissions = await Geolocation.checkPermissions();
-        if (permissions.location !== 'granted') {
-          const request = await Geolocation.requestPermissions();
-          if (request.location !== 'granted') {
-            throw new Error('Permission denied');
-          }
-        }
-      } catch (permError) {
-        console.warn('Could not check permissions, proceeding to request position directly', permError);
-      }
-
-      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+      // Geolocation.getCurrentPosition in web standard will automatically prompt if not granted.
+      // We use lower accuracy and some caching to speed it up significantly.
+      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
       const { latitude, longitude } = position.coords;
       const storeLat = settings.storeLocation!.lat;
       const storeLng = settings.storeLocation!.lng;
@@ -433,16 +423,21 @@ export const MyPayrollView = ({
                   )}
                 </div>
               )}
-              {scanStatus !== 'idle' && scanStatus !== 'error' && !(!gpsVerified && scanStatus === 'locating') && (
+              {scanStatus !== 'idle' && !(!gpsVerified && scanStatus === 'locating') && (
                 <div className="absolute inset-0 bg-black/70 flex items-center justify-center p-6 text-center backdrop-blur-sm z-20">
                   <div className={cn(
                     "p-4 rounded-xl flex flex-col items-center gap-3",
                     scanStatus === 'success' ? 'text-emerald-600 dark:text-emerald-500' :
+                    scanStatus === 'error' ? 'text-rose-600 dark:text-rose-500' :
                     'text-blue-600 dark:text-blue-500'
                   )}>
                     {scanStatus === 'success' ? <CheckCircle2 className="w-12 h-12" /> :
+                     scanStatus === 'error' ? <div className="w-12 h-12 border-4 border-rose-500 rounded-full flex items-center justify-center text-xl font-bold mb-2">✕</div> :
                      <MapPin className="w-12 h-12 animate-bounce" />}
                     <span className="font-bold text-sm bg-white dark:bg-[#1a1b1e] px-4 py-2 rounded-lg shadow-lg border border-black/10 dark:border-white/10">{scanMessage}</span>
+                    {scanStatus === 'error' && (
+                      <button onClick={() => setScanStatus('idle')} className="mt-2 px-6 py-2 bg-rose-500 text-white rounded-lg text-sm font-bold">Thử lại</button>
+                    )}
                   </div>
                 </div>
               )}

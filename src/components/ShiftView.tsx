@@ -151,7 +151,7 @@ export const ShiftView = ({
                     <Clock className="w-4 h-4" /> Bắt đầu lúc: {format(new Date(activeShift.startTime), 'HH:mm, dd/MM/yyyy')}
                   </p>
                 </div>
-                {!isOrderOnly && (
+                {isAdminOrManager && (
                   <div className="text-right">
                     <p className="text-sm text-gray-500 uppercase tracking-wider">Doanh thu hiện tại</p>
                     <p className="text-4xl font-mono font-bold text-emerald-600 dark:text-emerald-500">{(activeShift.totalRevenue || 0).toLocaleString()}đ</p>
@@ -178,36 +178,38 @@ export const ShiftView = ({
                 </div>
               )}
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-6 pt-8 border-t border-black/10 dark:border-white/10 relative z-10">
-                <div>
-                  <p className="text-xs text-gray-500 uppercase font-bold">Tiền đầu ca</p>
-                  <p className="text-xl font-mono font-bold text-gray-900 dark:text-white">{(activeShift.startCash || 0).toLocaleString()}đ</p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-500 uppercase font-bold">Tiền mặt (Thực thu)</p>
-                  <div className="flex flex-col">
-                    <span className="text-lg font-mono font-bold text-emerald-600 dark:text-emerald-500">{(activeShift.totalCash || 0).toLocaleString()}đ</span>
-                    <div className="flex gap-2">
-                      <span className="text-xs font-mono text-emerald-600 dark:text-emerald-400">+{((activeShift.cashIncome || 0)).toLocaleString()}</span>
-                      <span className="text-xs font-mono text-rose-600 dark:text-rose-400">-{((activeShift.cashExpense || 0)).toLocaleString()}</span>
+              {isAdminOrManager && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-6 pt-8 border-t border-black/10 dark:border-white/10 relative z-10">
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase font-bold">Tiền đầu ca</p>
+                    <p className="text-xl font-mono font-bold text-gray-900 dark:text-white">{(activeShift.startCash || 0).toLocaleString()}đ</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase font-bold">Tiền mặt (Thực thu)</p>
+                    <div className="flex flex-col">
+                      <span className="text-lg font-mono font-bold text-emerald-600 dark:text-emerald-500">{(activeShift.totalCash || 0).toLocaleString()}đ</span>
+                      <div className="flex gap-2">
+                        <span className="text-xs font-mono text-emerald-600 dark:text-emerald-400">+{((activeShift.cashIncome || 0)).toLocaleString()}</span>
+                        <span className="text-xs font-mono text-rose-600 dark:text-rose-400">-{((activeShift.cashExpense || 0)).toLocaleString()}</span>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-500 uppercase font-bold">Chuyển khoản (Thực thu)</p>
-                  <div className="flex flex-col">
-                    <span className="text-lg font-mono font-bold text-blue-600 dark:text-blue-500">{(activeShift.totalTransfer || 0).toLocaleString()}đ</span>
-                    <div className="flex gap-2">
-                      <span className="text-xs font-mono text-blue-600 dark:text-blue-400">+{((activeShift.transferIncome || 0)).toLocaleString()}</span>
-                      <span className="text-xs font-mono text-rose-600 dark:text-rose-400">-{((activeShift.transferExpense || 0)).toLocaleString()}</span>
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase font-bold">Chuyển khoản (Thực thu)</p>
+                    <div className="flex flex-col">
+                      <span className="text-lg font-mono font-bold text-blue-600 dark:text-blue-500">{(activeShift.totalTransfer || 0).toLocaleString()}đ</span>
+                      <div className="flex gap-2">
+                        <span className="text-xs font-mono text-blue-600 dark:text-blue-400">+{((activeShift.transferIncome || 0)).toLocaleString()}</span>
+                        <span className="text-xs font-mono text-rose-600 dark:text-rose-400">-{((activeShift.transferExpense || 0)).toLocaleString()}</span>
+                      </div>
                     </div>
                   </div>
+                  <div className="bg-emerald-500/10 p-3 -m-3 rounded-xl border border-emerald-500/20">
+                    <p className="text-xs text-emerald-700 dark:text-emerald-400 uppercase font-bold">Tiền mặt dự kiến tại két</p>
+                    <p className="text-xl font-mono font-bold text-emerald-600 dark:text-emerald-500">{((activeShift.startCash || 0) + (activeShift.totalCash || 0)).toLocaleString()}đ</p>
+                  </div>
                 </div>
-                <div className="bg-emerald-500/10 p-3 -m-3 rounded-xl border border-emerald-500/20">
-                  <p className="text-xs text-emerald-700 dark:text-emerald-400 uppercase font-bold">Tiền mặt dự kiến tại két</p>
-                  <p className="text-xl font-mono font-bold text-emerald-600 dark:text-emerald-500">{((activeShift.startCash || 0) + (activeShift.totalCash || 0)).toLocaleString()}đ</p>
-                </div>
-              </div>
+              )}
 
               <div className="pt-4 relative z-10">
                 <button 
