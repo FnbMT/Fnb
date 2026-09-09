@@ -103,11 +103,11 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
 
       // Load Stores
       const storeSnapshot = await getDocs(collection(db, 'stores'));
-      const storesData = storeSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as StoreTenant));
+      const storesData = storeSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StoreTenant));
       
       // Load all users to calculate stats
       const userSnapshot = await getDocs(collection(db, 'users'));
-      const users = userSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      const users = userSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as any));
       
       const now = new Date();
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -208,7 +208,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
         setPackages(defaultPackages);
         setEditingTrialDays(defaultPackages.find(p => p.id === 'trial')?.trialDays || 14);
       } else {
-        const loadedPackages = pkgsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as StorePackage));
+        const loadedPackages = pkgsSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StorePackage));
         setPackages(loadedPackages);
         setEditingTrialDays(loadedPackages.find(p => p.id === 'trial')?.trialDays || 14);
       }
@@ -238,7 +238,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
       const q = query(usersRef, where('storeId', '==', store.id), where('role', '==', 'admin'));
       const userSnapshot = await getDocs(q);
       if (!userSnapshot.empty) {
-        setEditingStoreAdmin({ id: userSnapshot.docs[0].id, ...userSnapshot.docs[0].data() });
+        setEditingStoreAdmin({ ...userSnapshot.docs[0].data(), id: userSnapshot.docs[0].id });
       } else {
         setEditingStoreAdmin(null);
       }
@@ -378,7 +378,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
       
       for (const colName of collectionsToExport) {
         const querySnapshot = await getDocs(collection(db, colName));
-        allData[colName] = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        allData[colName] = querySnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
       }
 
       const jsonString = JSON.stringify(allData, null, 2);

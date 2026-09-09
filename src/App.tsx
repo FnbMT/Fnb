@@ -654,7 +654,6 @@ const MenuOrdering = ({
           }
 
           const voidLog: VoidLog = {
-            id: Math.random().toString(36).substr(2, 9),
             time: new Date().toISOString(),
             staffName: staffName,
             tableName: activeTable.name,
@@ -1965,7 +1964,7 @@ export default function App() {
     const fetchPackages = async () => {
       try {
         const snapshot = await getDocs(collection(db, 'packages'));
-        const pkgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const pkgs = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
         setPackages(pkgs);
       } catch (err) {
         console.error(err);
@@ -2276,7 +2275,7 @@ export default function App() {
     const storeRef = doc(db, 'stores', storeId);
     const unsubStore = onSnapshot(storeRef, (docSnap) => {
       if (docSnap.exists()) {
-        const storeData = { id: docSnap.id, ...docSnap.data() } as any;
+        const storeData = { ...docSnap.data(), id: docSnap.id } as any;
 
         // Auto-check for expiration
         if (storeData.subscription) {
@@ -2719,7 +2718,6 @@ export default function App() {
 
     // Log transaction
     const log: InventoryTransaction = {
-      id: Math.random().toString(36).substr(2, 9),
       itemId,
       itemName: item.name,
       quantity,
@@ -2746,7 +2744,6 @@ export default function App() {
 
     // Record Stock Card
     const cardEntry: StockCardEntry = {
-      id: Math.random().toString(36).substr(2, 9),
       itemId,
       itemName: item.name,
       date: log.date,
@@ -2776,7 +2773,6 @@ export default function App() {
         
         // Record Stock Card
         const cardEntry: StockCardEntry = {
-          id: Math.random().toString(36).substr(2, 9),
           itemId: item.id,
           itemName: item.name,
           date: audit.date,
@@ -2848,7 +2844,6 @@ export default function App() {
         const total = subtotal + vatAmount; 
     
         const newSession: OrderSession = {
-          id: Math.random().toString(36).substr(2, 9),
           items: order,
           startTime: new Date().toISOString(),
           subtotal,
@@ -2868,7 +2863,6 @@ export default function App() {
       const total = subtotal + vatAmount; 
   
       const newSession: OrderSession = {
-        id: Math.random().toString(36).substr(2, 9),
         items: order,
         startTime: new Date().toISOString(),
         subtotal,
@@ -3003,7 +2997,7 @@ export default function App() {
     // Fetch fresh table data to avoid race conditions
     const tableDoc = await getDoc(doc(db, 'tables', tableId));
     if (!tableDoc.exists()) return;
-    const table = { id: tableDoc.id, ...tableDoc.data() } as Table;
+    const table = { ...tableDoc.data(), id: tableDoc.id } as Table;
 
     // Void Detection (Silent logging, no alert to avoid double-alerting with item_void)
     if (activeShift) {
@@ -3060,7 +3054,6 @@ export default function App() {
         }
 
         const voidLog: VoidLog = {
-          id: Math.random().toString(36).substr(2, 9),
           time: new Date().toISOString(),
           staffName: currentUser.name,
           tableName: table.name,
@@ -3114,7 +3107,6 @@ export default function App() {
     }, '');
 
     const invoice: Invoice = {
-      id: Math.random().toString(36).substr(2, 9),
       date: new Date().toISOString(),
       timeIn: minStartTime || table.startTime || new Date().toISOString(),
       items: groupedItems,
@@ -3208,7 +3200,6 @@ export default function App() {
 
     // Record Cash Transaction
     await addDoc(collection(db, 'cash_transactions'), {
-      id: Math.random().toString(36).substr(2, 9),
       amount: total,
       type: 'income',
       paymentMethod,
@@ -3230,7 +3221,6 @@ export default function App() {
            
            // Record Stock Card
            const cardEntry: StockCardEntry = {
-             id: Math.random().toString(36).substr(2, 9),
              itemId: menuItem.id,
              itemName: menuItem.name,
              date: invoice.date,
@@ -3252,7 +3242,6 @@ export default function App() {
 
             // Record Stock Card for ingredients
             const cardEntry: StockCardEntry = {
-              id: Math.random().toString(36).substr(2, 9),
               itemId: ingredient.id,
               itemName: ingredient.name,
               date: invoice.completedAt || invoice.date,
@@ -3472,7 +3461,7 @@ export default function App() {
 
       if (!snap.empty) {
         // Find the latest record
-        const sortedRecords = snap.docs.map(d => ({id: d.id, ...d.data()}) as AttendanceRecord).sort((a, b) => {
+        const sortedRecords = snap.docs.map(d => ({ ...d.data(), id: d.id }) as AttendanceRecord).sort((a, b) => {
           return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
         });
         const latestRecord = sortedRecords[0];
@@ -3494,7 +3483,6 @@ export default function App() {
               ...record, 
               status: finalStatus,
               storeId: currentUser.storeId,
-              id: Math.random().toString(36).substr(2, 9)
             });
           } else {
             // If the latest record doesn't have a check-out, we are just updating the existing check-in (maybe overriding? Shouldn't happen normally)
@@ -3510,7 +3498,6 @@ export default function App() {
           ...record, 
           status: finalStatus,
           storeId: currentUser.storeId,
-          id: Math.random().toString(36).substr(2, 9)
         });
       }
     } catch (e) {

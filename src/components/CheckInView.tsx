@@ -97,8 +97,9 @@ export const CheckInView = ({
         setStatus('success');
         setMessage(`Đã ghi nhận chấm công ${type === 'in' ? 'VÀO CA' : 'RA CA'} thành công!`);
       } catch (err) {
+        console.error('CheckIn/Out error:', err);
         setStatus('error');
-        setMessage('Có lỗi xảy ra khi lưu dữ liệu');
+        setMessage('Lỗi: ' + (err instanceof Error ? err.message : String(err)));
       }
     } catch (error) {
       console.error('Location error:', error);
