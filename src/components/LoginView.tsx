@@ -3,7 +3,7 @@ import { Coffee, Lock, User as UserIcon, AlertCircle, Loader2, ExternalLink, Wif
 import { User } from '../types';
 import { motion } from 'motion/react';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, limit, doc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, limit, doc, getDoc, updateDoc } from 'firebase/firestore';
 import { Capacitor } from '@capacitor/core';
 
 export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) => void, onRegisterClick?: () => void }) => {
@@ -114,7 +114,6 @@ export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) 
         
         // Update last login
         try {
-          const { updateDoc, doc } = await import('firebase/firestore');
           await updateDoc(doc(db, 'users', userDoc.id), {
             lastLogin: new Date().toISOString()
           });

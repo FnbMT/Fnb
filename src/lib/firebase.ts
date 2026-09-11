@@ -19,6 +19,7 @@ const app = initializeApp(firebaseConfig);
 
 export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
+  ignoreUndefinedProperties: true,
 });
 
 export const auth = initializeAuth(app, {

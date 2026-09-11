@@ -59,7 +59,14 @@ export const CheckInView = ({
     try {
       // Geolocation.getCurrentPosition in web standard will automatically prompt if not granted.
       // Lower accuracy and short caching to speed it up
-      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
+            const perm = await Geolocation.checkPermissions();
+      if (perm.location !== 'granted') {
+        const req = await Geolocation.requestPermissions();
+        if (req.location !== 'granted') {
+          throw new Error('Vui lòng cấp quyền truy cập vị trí để chấm công.');
+        }
+      }
+      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: false, timeout: 5000, maximumAge: 300000 });
       const { latitude, longitude } = position.coords;
       const storeLat = settings.storeLocation!.lat;
       const storeLng = settings.storeLocation!.lng;

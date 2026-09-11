@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Scanner } from '@yudiel/react-qr-scanner';
+import React, { useState, useEffect, useRef } from 'react';
+import { Html5Qrcode } from 'html5-qrcode';
 import { MapPin, CheckCircle2, QrCode } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { User, SystemSettings, AttendanceRecord } from '../types';
@@ -22,9 +22,19 @@ export const AttendanceScanner = ({
   const [scanStatus, setScanStatus] = useState<'idle' | 'locating' | 'success' | 'error'>('idle');
   const [scanMessage, setScanMessage] = useState('');
   const [gpsVerified, setGpsVerified] = useState(false);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
 
   useEffect(() => {
     verifyLocation();
+    
+    return () => {
+      if (scannerRef.current && scannerRef.current.isScanning) {
+        scannerRef.current.stop().then(() => {
+          scannerRef.current?.clear();
+          scannerRef.current = null;
+        }).catch(console.error);
+      }
+    };
   }, []);
 
   const verifyLocation = async () => {
@@ -39,7 +49,14 @@ export const AttendanceScanner = ({
     try {
       // Geolocation.getCurrentPosition in web standard will automatically prompt if not granted.
       // We use lower accuracy and some caching to speed it up significantly.
-      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
+            const perm = await Geolocation.checkPermissions();
+      if (perm.location !== 'granted') {
+        const req = await Geolocation.requestPermissions();
+        if (req.location !== 'granted') {
+          throw new Error('Vui lòng cấp quyền truy cập vị trí để chấm công.');
+        }
+      }
+      const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: false, timeout: 5000, maximumAge: 300000 });
       const { latitude, longitude } = position.coords;
       const storeLat = settings.storeLocation!.lat;
       const storeLng = settings.storeLocation!.lng;
@@ -100,20 +117,15 @@ export const AttendanceScanner = ({
       const now = new Date();
       const todayStr = format(now, 'yyyy-MM-dd');
       
-      const todayRecords = attendanceRecords.filter(r => r.userId === currentUser.id && r.date === todayStr);
-      const latestRecord = todayRecords.sort((a, b) => new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime())[0];
-      const type = (latestRecord && latestRecord.checkInTime && !latestRecord.checkOutTime) ? 'out' : 'in';
-
       await onCheckIn({
         userId: currentUser.id,
         staffName: currentUser.name,
         date: todayStr,
-        [type === 'in' ? 'checkInTime' : 'checkOutTime']: now.toISOString(),
         locationValid: true
       });
       
       setScanStatus('success');
-      setScanMessage(`Đã ghi nhận chấm công ${type === 'in' ? 'VÀO CA' : 'RA CA'} thành công!`);
+      setScanMessage(`Đã ghi nhận chấm công thành công!`);
       
       setTimeout(() => {
         onClose();
@@ -141,20 +153,26 @@ export const AttendanceScanner = ({
 
         <div className="rounded-2xl overflow-hidden bg-black aspect-square relative mb-4 flex items-center justify-center">
           {gpsVerified ? (
-            <Scanner
-              onScan={(detectedCodes) => {
-                if (detectedCodes && detectedCodes.length > 0) {
-                  handleScan(detectedCodes[0].rawValue);
-                }
-              }}
-              onError={(error) => {
-                console.error(error?.message);
-                setScanStatus('error');
-                setScanMessage('Không tìm thấy Camera hoặc chưa được cấp quyền.');
-              }}
-              scanDelay={5000}
-              retryDelay={1000}
-            />
+            <div id="reader-attendance" className="w-full h-full overflow-hidden" ref={(el) => {
+              if (el && !scannerRef.current) {
+                const scanner = new Html5Qrcode("reader-attendance");
+                scannerRef.current = scanner;
+                scanner.start(
+                  { facingMode: "environment" },
+                  { fps: 10, qrbox: { width: 250, height: 250 } },
+                  (decodedText) => {
+                    handleScan(decodedText);
+                  },
+                  (errorMessage) => {
+                    // Ignore parse errors (e.g. no QR code found in current frame)
+                  }
+                ).catch((err) => {
+                  console.error(err);
+                  setScanStatus('error');
+                  setScanMessage(`Lỗi Camera: ${err?.name || err?.message || err || "Không rõ"}`);
+                });
+              }
+            }}></div>
           ) : (
             <div className="text-white/50 text-sm flex flex-col items-center gap-2">
               {scanStatus === 'error' ? (

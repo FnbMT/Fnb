@@ -197,11 +197,11 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
   }
   
   if (currentUser?.role !== 'admin') {
-    menuItems.push({ id: 'my_payroll', label: 'Lương & Chấm công', icon: DollarSign });
+    menuItems.push({ id: 'my_payroll', label: 'Chấm công', icon: DollarSign });
   }
 
 
-  if (currentUser && ['admin', 'manager', 'cashier', 'order_cashier'].includes(currentUser.role)) {
+  if (currentUser && ['admin', 'manager'].includes(currentUser.role)) {
     menuItems.push({ id: 'summary', label: 'Tổng kết', icon: FileText });
   }
 
@@ -271,7 +271,7 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
       </div>
 
       {/* Mobile Bottom Navigation */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-white dark:bg-[#151619] border-t border-black/10 dark:border-white/10 flex items-center justify-between px-4 z-40 overflow-x-auto no-scrollbar gap-2">
+      <div className="md:hidden fixed bottom-0 left-0 right-0 h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-white dark:bg-[#151619] border-t border-black/10 dark:border-white/10 flex items-center justify-start px-4 z-40 overflow-x-auto no-scrollbar gap-2">
         {menuItems.map((item) => (
           <button
             key={item.id}
@@ -653,7 +653,7 @@ const MenuOrdering = ({
             return;
           }
 
-          const voidLog: VoidLog = {
+          const voidLog: Omit<VoidLog, "id"> = {
             time: new Date().toISOString(),
             staffName: staffName,
             tableName: activeTable.name,
@@ -795,7 +795,7 @@ const MenuOrdering = ({
       setSelectedOrdersToPay([]);
       
       // Calculate remaining orders based on what we just paid
-      const paidCommittedIds = new Set(ordersToPay.filter(o => !o.id.startsWith('draft-')).map(o => o.id));
+      const paidCommittedIds = new Set(ordersToPay.filter(o => o.id && !o.id.startsWith('draft-')).map(o => o.id));
       const remainingCount = committedOrders.filter(o => !paidCommittedIds.has(o.id)).length;
       
       // If no more orders left, close the modal
@@ -2844,6 +2844,7 @@ export default function App() {
         const total = subtotal + vatAmount; 
     
         const newSession: OrderSession = {
+          id: `session-${Date.now()}`,
           items: order,
           startTime: new Date().toISOString(),
           subtotal,
@@ -2863,6 +2864,7 @@ export default function App() {
       const total = subtotal + vatAmount; 
   
       const newSession: OrderSession = {
+        id: `session-${Date.now()}`,
         items: order,
         startTime: new Date().toISOString(),
         subtotal,
@@ -3053,7 +3055,7 @@ export default function App() {
           return;
         }
 
-        const voidLog: VoidLog = {
+        const voidLog: Omit<VoidLog, "id"> = {
           time: new Date().toISOString(),
           staffName: currentUser.name,
           tableName: table.name,
@@ -3083,7 +3085,7 @@ export default function App() {
     const combinedNotes = ordersToPay.filter(o => o.note).map(o => o.note).join('; ');
 
     // Create Invoice
-    const allItems = ordersToPay.flatMap(o => o.items);
+    const allItems = ordersToPay.reduce((acc, o) => acc.concat(o.items), [] as OrderItem[]);
     
     // Group items by ID, name, price, and add-ons (Task 1)
     const groupedItems: OrderItem[] = [];
@@ -3438,6 +3440,25 @@ export default function App() {
         where('date', '==', today)
       );
       const snap = await getDocs(q);
+
+      let isAuto = (!record.checkInTime && !record.checkOutTime);
+      let latestRecord: AttendanceRecord | null = null;
+
+      if (!snap.empty) {
+        const sortedRecords = snap.docs.map(d => ({ ...d.data(), id: d.id }) as AttendanceRecord).sort((a, b) => {
+          return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
+        });
+        latestRecord = sortedRecords[0];
+      }
+
+      if (isAuto) {
+        const nowIso = new Date().toISOString();
+        if (latestRecord && latestRecord.checkInTime && !latestRecord.checkOutTime) {
+          record.checkOutTime = nowIso;
+        } else {
+          record.checkInTime = nowIso;
+        }
+      }
       
       // Determine status if it's a check-in
       let finalStatus = record.status || 'present';
@@ -3448,7 +3469,6 @@ export default function App() {
           const [hours, minutes] = shiftStartStr.split(':').map(Number);
           const shiftStartDate = new Date(checkInDate);
           shiftStartDate.setHours(hours, minutes, 0, 0);
-
           const diffMinutes = (checkInDate.getTime() - shiftStartDate.getTime()) / 60000;
           
           if (diffMinutes > 240) { // > 4 hours late
@@ -3459,17 +3479,12 @@ export default function App() {
         }
       }
 
-      if (!snap.empty) {
-        // Find the latest record
-        const sortedRecords = snap.docs.map(d => ({ ...d.data(), id: d.id }) as AttendanceRecord).sort((a, b) => {
-          return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
-        });
-        const latestRecord = sortedRecords[0];
-
-        if (record.checkOutTime) {
+      if (latestRecord) {
+        if (record.checkOutTime && (!isAuto || (isAuto && latestRecord.checkInTime && !latestRecord.checkOutTime))) {
           // It's a check-out request, so update the latest record
           const updateData: any = { checkOutTime: record.checkOutTime };
           if (record.locationValid !== undefined) updateData.locationValid = record.locationValid;
+          
           if (latestRecord.id) {
             await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
           } else {
@@ -3480,12 +3495,12 @@ export default function App() {
           // It's a check-in request. If the latest record already has a check-out, create a new record.
           if (latestRecord.checkOutTime) {
             await addDoc(collection(db, 'attendance_records'), { 
-              ...record, 
-              status: finalStatus,
+               ...record, 
+               status: finalStatus,
               storeId: currentUser.storeId,
             });
           } else {
-            // If the latest record doesn't have a check-out, we are just updating the existing check-in (maybe overriding? Shouldn't happen normally)
+            // If the latest record doesn't have a check-out, we are just updating the existing check-in
             const updateData = { ...record };
             if (latestRecord.id) {
               await updateDoc(doc(db, 'attendance_records', latestRecord.id), updateData);
@@ -3495,9 +3510,9 @@ export default function App() {
       } else {
         // Create new record (e.g. check-in)
         await addDoc(collection(db, 'attendance_records'), { 
-          ...record, 
-          status: finalStatus,
-          storeId: currentUser.storeId,
+           ...record, 
+           status: finalStatus,
+           storeId: currentUser.storeId,
         });
       }
     } catch (e) {
@@ -3515,7 +3530,7 @@ export default function App() {
   const todayStr = format(new Date(), 'yyyy-MM-dd');
   const todayRecords = currentUser ? attendanceRecords.filter(r => r.userId === currentUser.id && r.date === todayStr) : [];
   const latestTodayRecord = todayRecords.sort((a, b) => new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime())[0];
-  const hasCheckedInToday = latestTodayRecord ? !!latestTodayRecord.checkInTime && !latestTodayRecord.checkOutTime : false;
+  const attendanceStatus: 'none' | 'checked_in' | 'checked_out' = (!latestTodayRecord || latestTodayRecord.checkOutTime) ? 'none' : 'checked_in';
 
   const activeOrdersCount = tables.reduce((acc, t) => acc + (t.orders?.filter(o => o.status !== 'paid').length || 0), 0);
 
@@ -3730,7 +3745,7 @@ export default function App() {
                   }}
                   currentUser={currentUser}
                   tables={tables}
-                  hasCheckedInToday={hasCheckedInToday}
+                  attendanceStatus={attendanceStatus}
                   onScanQR={() => setShowScanner(true)}
                 />
               )}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Wallet, Clock, ArrowRight, Lock, Unlock, History, X, AlertTriangle, Eye, Check, QrCode } from 'lucide-react';
+import { Wallet, Clock, ArrowRight, Lock, Unlock, History, X, AlertTriangle, Eye, Check, QrCode, CheckCircle2 } from 'lucide-react';
 import { Shift, VoidLog, User, Table } from '../types';
 import { format, isAfter, subDays } from 'date-fns';
 import { cn } from '../lib/utils';
@@ -13,7 +13,7 @@ export const ShiftView = ({
   onResolveDiscrepancy,
   currentUser,
   tables = [],
-  hasCheckedInToday,
+  attendanceStatus = 'none',
   onScanQR
 }: { 
   activeShift: Shift | null, 
@@ -24,7 +24,7 @@ export const ShiftView = ({
   onResolveDiscrepancy?: (shiftId: string) => void,
   currentUser: User | null,
   tables?: Table[],
-  hasCheckedInToday?: boolean,
+  attendanceStatus?: 'none' | 'checked_in' | 'checked_out',
   onScanQR?: () => void
 }) => {
   const [showOpenModal, setShowOpenModal] = React.useState(false);
@@ -49,7 +49,7 @@ export const ShiftView = ({
   };
 
   const handleOpenShiftClick = () => {
-    if (isAdminOrManager || !currentUser?.requiresAttendance || hasCheckedInToday) {
+    if (isAdminOrManager || !currentUser?.requiresAttendance || attendanceStatus === 'checked_in') {
       proceedToOpenShift();
       return;
     }
@@ -104,28 +104,40 @@ export const ShiftView = ({
       {!isAdminOrManager && currentUser?.requiresAttendance && (
          <div className="bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm">
              <div className="flex items-center gap-4">
-                 <div className={cn("w-12 h-12 rounded-full flex items-center justify-center shrink-0", hasCheckedInToday ? "bg-emerald-500/20 text-emerald-600" : "bg-rose-500/20 text-rose-600")}>
-                     {hasCheckedInToday ? <Check className="w-6 h-6" /> : <QrCode className="w-6 h-6" />}
+                 <div className={cn("w-12 h-12 rounded-full flex items-center justify-center shrink-0", 
+                    attendanceStatus === 'checked_in' ? "bg-emerald-500/20 text-emerald-600" : 
+                    attendanceStatus === 'checked_out' ? "bg-gray-500/20 text-gray-600" :
+                    "bg-rose-500/20 text-rose-600")}>
+                     {attendanceStatus === 'checked_in' ? <Check className="w-6 h-6" /> : 
+                      attendanceStatus === 'checked_out' ? <CheckCircle2 className="w-6 h-6" /> :
+                      <QrCode className="w-6 h-6" />}
                  </div>
                  <div>
                      <h4 className="font-bold text-gray-900 dark:text-white text-lg">Trạng thái chấm công</h4>
-                     <p className={cn("text-sm font-bold mt-0.5", hasCheckedInToday ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>
-                         {hasCheckedInToday ? "Hôm nay bạn đã chấm công thành công" : "Bạn chưa chấm công hôm nay"}
+                     <p className={cn("text-sm font-bold mt-0.5", 
+                        attendanceStatus === 'checked_in' ? "text-emerald-600 dark:text-emerald-400" : 
+                        attendanceStatus === 'checked_out' ? "text-gray-600 dark:text-gray-400" :
+                        "text-rose-600 dark:text-rose-400")}>
+                         {attendanceStatus === 'checked_in' ? "Hôm nay bạn đã chấm công thành công" : 
+                          attendanceStatus === 'checked_out' ? "Bạn đã kết thúc ca làm việc hôm nay" :
+                          "Bạn chưa chấm công hôm nay"}
                      </p>
                  </div>
              </div>
              
-             <button
-                 onClick={() => onScanQR && onScanQR()}
-                 className={cn("px-6 py-3 md:w-auto w-full rounded-xl font-bold flex items-center justify-center gap-2 transition-all cursor-pointer",
-                     hasCheckedInToday 
-                     ? "bg-black/5 dark:bg-white/5 hover:bg-black/10 text-gray-700 dark:text-gray-300 border border-black/10 dark:border-white/10"
-                     : "bg-emerald-500 hover:bg-emerald-400 text-white shadow-lg hover:shadow-emerald-500/25"
-                 )}
-             >
-                 <QrCode className="w-5 h-5" />
-                 {hasCheckedInToday ? "Kết thúc ca (Check-out)" : "Quét mã QR Chấm công"}
-             </button>
+             {attendanceStatus !== 'checked_out' && (
+                 <button
+                     onClick={() => onScanQR && onScanQR()}
+                     className={cn("px-6 py-3 md:w-auto w-full rounded-xl font-bold flex items-center justify-center gap-2 transition-all cursor-pointer",
+                         attendanceStatus === 'checked_in' 
+                         ? "bg-black/5 dark:bg-white/5 hover:bg-black/10 text-gray-700 dark:text-gray-300 border border-black/10 dark:border-white/10"
+                         : "bg-emerald-500 hover:bg-emerald-400 text-white shadow-lg hover:shadow-emerald-500/25"
+                     )}
+                 >
+                     <QrCode className="w-5 h-5" />
+                     {attendanceStatus === 'checked_in' ? "Kết thúc ca (Check-out)" : "Quét mã QR Chấm công"}
+                 </button>
+             )}
          </div>
       )}
 
@@ -310,7 +322,9 @@ export const ShiftView = ({
                   <span className="text-[10px] text-gray-500">{format(new Date(shift.endTime!), 'dd/MM/yyyy')}</span>
                 </div>
                 <div className="flex justify-between items-end">
-                  <p className="text-xs text-gray-600 dark:text-gray-400">Doanh thu: <span className="text-gray-900 dark:text-white font-mono">{(((shift.totalRevenue || 0) / 1000000)).toFixed(1)}M</span></p>
+                  {isAdminOrManager ? (
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Doanh thu: <span className="text-gray-900 dark:text-white font-mono">{(((shift.totalRevenue || 0) / 1000000)).toFixed(1)}M</span></p>
+                  ) : <div />}
                   <div className="text-[10px] text-gray-500">
                     {format(new Date(shift.startTime), 'HH:mm')} - {format(new Date(shift.endTime!), 'HH:mm')}
                   </div>
@@ -608,12 +622,12 @@ export const ShiftView = ({
                 <tbody className="divide-y divide-black/5 dark:divide-white/5">
                   {[...showVoidLogs]
                     .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
-                    .flatMap((log) => {
+                    .reduce((acc, log) => {
                       const isBillVoid = log.type === 'bill_void';
                       const hasDetails = log.details && log.details.length > 0;
 
                       if (isBillVoid && hasDetails) {
-                        return log.details!.map((detail, idx) => (
+                        return acc.concat(log.details!.map((detail, idx) => (
                           <tr key={`${log.id}-${idx}`} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                             <td className="p-4 text-gray-600 dark:text-gray-400 font-mono align-top">{format(new Date(log.time), 'HH:mm:ss')}</td>
                             <td className="p-4 font-medium align-top">{log.staffName}</td>
@@ -634,9 +648,10 @@ export const ShiftView = ({
                               -{detail.valueDiff.toLocaleString()}đ
                             </td>
                           </tr>
-                        ));
+                        )));
                       }
-                      return [
+
+                      return acc.concat(
                         <tr key={log.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                           <td className="p-4 text-gray-600 dark:text-gray-400 font-mono align-top">{format(new Date(log.time), 'HH:mm:ss')}</td>
                           <td className="p-4 font-medium align-top">{log.staffName}</td>
@@ -657,8 +672,8 @@ export const ShiftView = ({
                             -{log.valueDiff.toLocaleString()}đ
                           </td>
                         </tr>
-                      ];
-                    })}
+                      );
+                    }, [] as React.ReactNode[])}
                 </tbody>
               </table>
             </div>
