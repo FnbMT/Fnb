@@ -23,6 +23,23 @@ export const AttendanceScanner = ({
   const [scanMessage, setScanMessage] = useState('');
   const [gpsVerified, setGpsVerified] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const hasScannedRef = useRef(false);
+
+  const playBeep = () => {
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContext) return;
+      const ctx = new AudioContext();
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(800, ctx.currentTime);
+      osc.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.15);
+    } catch (e) {
+      console.error('Audio beep failed', e);
+    }
+  };
 
   useEffect(() => {
     verifyLocation();
@@ -88,9 +105,11 @@ export const AttendanceScanner = ({
   };
 
   const handleScan = (text: string) => {
-    if (!text || scanStatus === 'locating' || scanStatus === 'success') return;
+    if (!text || hasScannedRef.current) return;
+    hasScannedRef.current = true;
     
     try {
+      playBeep();
       const url = new URL(text);
       const isCheckin = url.searchParams.get('checkin') === 'true';
       const code = url.searchParams.get('code');
@@ -99,6 +118,7 @@ export const AttendanceScanner = ({
       if (!isCheckin || code !== settings?.attendanceQRSecret || storeId !== currentUser?.storeId) {
         setScanStatus('error');
         setScanMessage('Mã QR không hợp lệ hoặc không thuộc cửa hàng này.');
+        hasScannedRef.current = false;
         return;
       }
       
@@ -106,6 +126,7 @@ export const AttendanceScanner = ({
     } catch (e) {
       setScanStatus('error');
       setScanMessage('Định dạng QR không đúng.');
+      hasScannedRef.current = false;
     }
   };
 
@@ -133,6 +154,7 @@ export const AttendanceScanner = ({
     } catch (err) {
       setScanStatus('error');
       setScanMessage('Lỗi: ' + (err instanceof Error ? err.message : String(err)));
+      hasScannedRef.current = false;
     }
   };
 
@@ -159,7 +181,7 @@ export const AttendanceScanner = ({
                 scannerRef.current = scanner;
                 scanner.start(
                   { facingMode: "environment" },
-                  { fps: 10, qrbox: { width: 250, height: 250 } },
+                  { fps: 10, qrbox: 250, aspectRatio: 1.0 },
                   (decodedText) => {
                     handleScan(decodedText);
                   },
