@@ -845,14 +845,34 @@ export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetA
               </div>
               <div className="flex items-center justify-between p-4 bg-black/5 dark:bg-white/5 rounded-2xl border border-black/10 dark:border-white/10">
                 <div>
+                  <p className="font-bold text-gray-900 dark:text-white text-sm">Chức năng Nhà Bếp (KDS)</p>
+                  <p className="text-[10px] text-gray-500">Bật/tắt quy trình bếp và nhãn trạng thái món trên phòng bàn</p>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => setLocalSettings({...localSettings, kitchenEnabled: localSettings.kitchenEnabled === false ? true : false})}
+                  className={cn(
+                    "w-12 h-6 rounded-full transition-all relative cursor-pointer",
+                    localSettings.kitchenEnabled !== false ? "bg-emerald-500" : "bg-gray-400 dark:bg-gray-700"
+                  )}
+                >
+                  <div className={cn(
+                    "absolute top-1 w-4 h-4 bg-white rounded-full transition-all",
+                    localSettings.kitchenEnabled !== false ? "left-7" : "left-1"
+                  )} />
+                </button>
+              </div>
+              <div className="flex items-center justify-between p-4 bg-black/5 dark:bg-white/5 rounded-2xl border border-black/10 dark:border-white/10">
+                <div>
                   <p className="font-bold text-gray-900 dark:text-white text-sm">Chuông báo món mới</p>
                   <p className="text-[10px] text-gray-500">Phát âm thanh khi có đơn hàng mới</p>
                 </div>
                 <button 
+                  type="button"
                   onClick={() => setLocalSettings({...localSettings, kitchenBellEnabled: !localSettings.kitchenBellEnabled})}
                   className={cn(
-                    "w-12 h-6 rounded-full transition-all relative",
-                    localSettings.kitchenBellEnabled ? "bg-emerald-500" : "bg-gray-700"
+                    "w-12 h-6 rounded-full transition-all relative cursor-pointer",
+                    localSettings.kitchenBellEnabled ? "bg-emerald-500" : "bg-gray-400 dark:bg-gray-700"
                   )}
                 >
                   <div className={cn(

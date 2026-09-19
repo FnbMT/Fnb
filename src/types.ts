@@ -305,6 +305,7 @@ export interface SystemSettings {
   logo?: string;
   adminUsername: string;
   adminPassword?: string;
+  kitchenEnabled?: boolean;
   kitchenBellEnabled: boolean;
   vatPercent: number;
   kitchenBillTemplate: string;

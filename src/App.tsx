@@ -184,18 +184,19 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
 
   const menuItems = allMenuItems.filter(item => {
     if (!currentUser) return false;
-    // Allow tax_report by default if they are admin/manager
-    // if (item.id === 'tax_report' && !currentPackageForMenu?.features?.taxReport) {
-    //  return false;
-    // }
     if (currentUser.role === 'admin' || currentUser.role === 'manager') return true;
-    if (currentUser.role === 'order' || currentUser.role === 'order_cashier' || currentUser.role === 'cashier') {
-      return ['tables', 'kitchen', 'shifts', 'my_payroll'].includes(item.id);
+    if (currentUser.role === 'order') {
+      // Order staff only needs tables and shifts
+      return ['tables', 'shifts'].includes(item.id);
+    }
+    if (currentUser.role === 'cashier' || currentUser.role === 'order_cashier') {
+      // Cashier needs tables and shifts (summary is added below)
+      return ['tables', 'shifts'].includes(item.id);
     }
     if (currentUser.role === 'kitchen') {
-      return ['kitchen', 'shifts', 'my_payroll'].includes(item.id);
+      return ['kitchen', 'shifts'].includes(item.id);
     }
-    return ['tables', 'my_payroll'].includes(item.id); // Default for staff
+    return ['tables'].includes(item.id); // Default for staff
   });
 
   if (currentUser?.role === 'admin' || currentUser?.role === 'manager') {
@@ -206,12 +207,13 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
     menuItems.push({ id: 'my_payroll', label: 'Chấm công', icon: DollarSign });
   }
 
-
-  if (currentUser && ['admin', 'manager', 'cashier', 'order_cashier', 'order'].includes(currentUser.role)) {
+  // Summary: only for admin, manager, cashier, order_cashier (Hidden from order staff)
+  if (currentUser && ['admin', 'manager', 'cashier', 'order_cashier'].includes(currentUser.role)) {
     menuItems.push({ id: 'summary', label: 'Tổng kết', icon: FileText });
   }
 
-  if (currentUser?.role === 'admin' || currentUser?.role === 'manager' || currentUser?.role === 'order' || currentUser?.role === 'cashier' || currentUser?.role === 'order_cashier' || currentUser?.role === 'kitchen') {
+  // Settings: admin, manager, cashier, order_cashier, kitchen (Hidden from order staff to keep UI clean and focused)
+  if (currentUser && ['admin', 'manager', 'cashier', 'order_cashier', 'kitchen'].includes(currentUser.role)) {
     menuItems.push({ id: 'settings', label: 'Cài đặt', icon: Settings });
   }
 
@@ -310,12 +312,13 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
   );
 };
 
-const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentUser }: { 
+const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentUser, kitchenEnabled = true }: { 
   tables: Table[], 
   onSelectTable: (t: Table) => void, 
   onDeleteTable: (id: string) => void,
   onEditTable: (t: Table) => void,
-  currentUser: any
+  currentUser: any,
+  kitchenEnabled?: boolean
 }) => {
   const isAdminOrManager = currentUser?.role === 'admin' || currentUser?.role === 'manager';
   return (
@@ -396,7 +399,7 @@ const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentU
                 {((table.orders || []).reduce((sum, o) => sum + o.total, 0) + (table.currentOrder?.reduce((sum, item) => sum + item.price * item.quantity, 0) || 0)).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ
               </p>
             )}
-            {table.status === 'occupied' && (() => {
+            {table.status === 'occupied' && kitchenEnabled && (() => {
               const activeOrders = (table.orders || []).filter(o => o.status !== 'paid');
               const hasReady = activeOrders.some(o => o.status === 'ready');
               const hasCooking = activeOrders.some(o => o.status === 'cooking');
@@ -1269,22 +1272,22 @@ const MenuOrdering = ({
                             <Check className="w-2.5 h-2.5" />
                           </div>
                           <span className="font-bold text-sm text-gray-900 dark:text-white">Đơn #{orderIndex + 1}</span>
-                          {order.status === 'ready' && (
+                          {systemSettings.kitchenEnabled !== false && order.status === 'ready' && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500 text-white font-bold animate-pulse flex items-center gap-1">
                               <CheckCheck className="w-2.5 h-2.5" /> Bếp đã xong
                             </span>
                           )}
-                          {order.status === 'cooking' && (
+                          {systemSettings.kitchenEnabled !== false && order.status === 'cooking' && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-600 dark:text-sky-400 font-semibold border border-sky-500/30 flex items-center gap-1">
                               <Flame className="w-2.5 h-2.5" /> Đang nấu
                             </span>
                           )}
-                          {order.status === 'pending' && (
+                          {systemSettings.kitchenEnabled !== false && order.status === 'pending' && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 font-semibold border border-amber-500/30 flex items-center gap-1">
                               <Clock className="w-2.5 h-2.5" /> Chờ bếp
                             </span>
                           )}
-                          {order.status === 'completed' && (
+                          {systemSettings.kitchenEnabled !== false && order.status === 'completed' && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-black/10 dark:bg-white/10 text-gray-500 font-semibold">
                               Đã lên món
                             </span>
@@ -2123,6 +2126,7 @@ export default function App() {
     phone: '',
     logo: '',
     adminUsername: 'admin',
+    kitchenEnabled: true,
     kitchenBellEnabled: true,
     vatPercent: 8,
     kitchenBillTemplate: 'Mẫu bill bếp mặc định',
@@ -3693,6 +3697,24 @@ export default function App() {
     }
   };
 
+  const handleToggleKitchenEnabled = async (enabled: boolean) => {
+    if (!currentUser) return;
+    const newSettings = { ...systemSettings, kitchenEnabled: enabled };
+    setSystemSettings(newSettings);
+
+    try {
+      const settingsQuery = query(collection(db, 'settings'), where('storeId', '==', currentUser.storeId));
+      const settingsSnap = await getDocs(settingsQuery);
+      if (!settingsSnap.empty) {
+        await updateDoc(doc(db, 'settings', settingsSnap.docs[0].id), { kitchenEnabled: enabled });
+      } else {
+        await addDoc(collection(db, 'settings'), { ...newSettings, storeId: currentUser.storeId });
+      }
+    } catch (error) {
+      console.error('Error updating kitchen enabled setting:', error);
+    }
+  };
+
   if (!currentUser) {
     if (isRegistering) {
       return <RegisterStoreView onBack={() => setIsRegistering(false)} onSuccess={() => setIsRegistering(false)} />;
@@ -3912,6 +3934,7 @@ export default function App() {
                     }}
                     onDeleteTable={handleDeleteTable}
                     onEditTable={setEditingTable}
+                    kitchenEnabled={systemSettings.kitchenEnabled !== false}
                   />
                 </div>
               )}
@@ -3922,6 +3945,8 @@ export default function App() {
                   onUpdateTableOrders={handleUpdateTableOrders}
                   onPrint={triggerPrint}
                   currentUser={currentUser}
+                  kitchenEnabled={systemSettings.kitchenEnabled !== false}
+                  onToggleKitchenEnabled={handleToggleKitchenEnabled}
                 />
               )}
               {view === 'inventory' && (

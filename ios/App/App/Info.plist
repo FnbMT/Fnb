@@ -4,6 +4,10 @@
 <dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Ứng dụng cần quyền vị trí để xác định bạn đang ở cửa hàng khi chấm công.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Ứng dụng cần quyền vị trí để xác định bạn đang ở cửa hàng khi chấm công.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Ứng dụng cần quyền vị trí để xác định bạn đang ở cửa hàng khi chấm công.</string>
 	
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>

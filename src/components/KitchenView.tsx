@@ -14,7 +14,8 @@ import {
   CheckCheck,
   Search,
   Filter,
-  Utensils
+  Utensils,
+  Power
 } from 'lucide-react';
 import { Table, OrderSession, OrderItem, User } from '../types';
 
@@ -23,6 +24,8 @@ interface KitchenViewProps {
   onUpdateTableOrders: (tableId: string, updatedOrders: OrderSession[]) => Promise<void>;
   onPrint?: (data: any) => void;
   currentUser?: User | null;
+  kitchenEnabled?: boolean;
+  onToggleKitchenEnabled?: (enabled: boolean) => void;
 }
 
 // Kitchen-specific live timer that shows urgency colors
@@ -103,7 +106,9 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
   tables,
   onUpdateTableOrders,
   onPrint,
-  currentUser
+  currentUser,
+  kitchenEnabled = true,
+  onToggleKitchenEnabled
 }) => {
   const [viewMode, setViewMode] = useState<'tickets' | 'aggregate'>('tickets');
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'cooking' | 'ready' | 'completed'>('all');
@@ -370,98 +375,154 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
 
           {/* Quick Metrics & Mode Toggles */}
           <div className="flex flex-wrap items-center gap-2">
-            {/* View Mode Switcher */}
-            <div className="p-1 bg-black/5 dark:bg-white/5 rounded-xl flex items-center gap-1 border border-black/5 dark:border-white/5">
+            {/* Master Kitchen Switch */}
+            <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 shadow-xs">
+              <div className="flex flex-col text-right">
+                <span className="text-xs font-bold text-gray-900 dark:text-white leading-tight">
+                  {kitchenEnabled ? 'Chức năng bếp: BẬT' : 'Chức năng bếp: TẮT'}
+                </span>
+                <span className="text-[10px] text-gray-500 leading-tight">
+                  {kitchenEnabled ? 'Hiện trạng thái bàn' : 'Đã ẩn trên phòng bàn'}
+                </span>
+              </div>
               <button
-                onClick={() => setViewMode('tickets')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                  viewMode === 'tickets'
-                    ? 'bg-white dark:bg-[#202227] text-gray-900 dark:text-white shadow-sm'
-                    : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                type="button"
+                role="switch"
+                aria-checked={kitchenEnabled}
+                onClick={() => onToggleKitchenEnabled?.(!kitchenEnabled)}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                  kitchenEnabled ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-600'
                 }`}
+                title={kitchenEnabled ? "Bấm để tắt chức năng bếp và ẩn các trạng thái trên sơ đồ bàn" : "Bấm để bật chức năng bếp"}
               >
-                <Layers className="w-3.5 h-3.5" />
-                <span>Theo bàn ({allKitchenOrders.filter(x => x.order.status !== 'completed').length})</span>
-              </button>
-              <button
-                onClick={() => setViewMode('aggregate')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                  viewMode === 'aggregate'
-                    ? 'bg-white dark:bg-[#202227] text-gray-900 dark:text-white shadow-sm'
-                    : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
-                }`}
-              >
-                <Utensils className="w-3.5 h-3.5" />
-                <span>Tổng hợp món ({aggregatedDishes.reduce((sum, d) => sum + d.totalQuantity, 0)})</span>
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                    kitchenEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
               </button>
             </div>
 
-            {/* Sound Notification Toggle */}
-            <button
-              onClick={toggleSound}
-              title={soundEnabled ? "Tắt âm thanh chuông báo đơn" : "Bật âm thanh chuông báo đơn"}
-              className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold ${
-                soundEnabled 
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400' 
-                  : 'bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-400'
-              }`}
-            >
-              {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
-              <span className="hidden sm:inline">{soundEnabled ? 'Chuông: Bật' : 'Chuông: Tắt'}</span>
-            </button>
+            {kitchenEnabled && (
+              <>
+                {/* View Mode Switcher */}
+                <div className="p-1 bg-black/5 dark:bg-white/5 rounded-xl flex items-center gap-1 border border-black/5 dark:border-white/5">
+                  <button
+                    onClick={() => setViewMode('tickets')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      viewMode === 'tickets'
+                        ? 'bg-white dark:bg-[#202227] text-gray-900 dark:text-white shadow-sm'
+                        : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <Layers className="w-3.5 h-3.5" />
+                    <span>Theo bàn ({allKitchenOrders.filter(x => x.order.status !== 'completed').length})</span>
+                  </button>
+                  <button
+                    onClick={() => setViewMode('aggregate')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      viewMode === 'aggregate'
+                        ? 'bg-white dark:bg-[#202227] text-gray-900 dark:text-white shadow-sm'
+                        : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <Utensils className="w-3.5 h-3.5" />
+                    <span>Tổng hợp món ({aggregatedDishes.reduce((sum, d) => sum + d.totalQuantity, 0)})</span>
+                  </button>
+                </div>
+
+                {/* Sound Notification Toggle */}
+                <button
+                  onClick={toggleSound}
+                  title={soundEnabled ? "Tắt âm thanh chuông báo đơn" : "Bật âm thanh chuông báo đơn"}
+                  className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold ${
+                    soundEnabled 
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400' 
+                      : 'bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-400'
+                  }`}
+                >
+                  {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+                  <span className="hidden sm:inline">{soundEnabled ? 'Chuông: Bật' : 'Chuông: Tắt'}</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Filter Bar & Search */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-          {/* Status Filter Tabs */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            {[
-              { id: 'all', label: 'Đang làm', count: pendingCount + cookingCount + readyCount },
-              { id: 'pending', label: 'Chờ nấu', count: pendingCount, color: 'text-amber-600 dark:text-amber-400' },
-              { id: 'cooking', label: 'Đang nấu', count: cookingCount, color: 'text-sky-600 dark:text-sky-400' },
-              { id: 'ready', label: 'Bếp đã xong', count: readyCount, color: 'text-emerald-600 dark:text-emerald-400' },
-              { id: 'completed', label: 'Đã trả món', count: completedCount, color: 'text-gray-500' }
-            ].map(tab => (
-              <button
-                key={tab.id}
-                onClick={() => setStatusFilter(tab.id as any)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${
-                  statusFilter === tab.id
-                    ? 'bg-gray-900 text-white dark:bg-white dark:text-gray-900 shadow-sm'
-                    : 'bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10'
-                }`}
-              >
-                <span>{tab.label}</span>
-                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                  statusFilter === tab.id 
-                    ? 'bg-white/20 text-white dark:bg-black/20 dark:text-gray-900' 
-                    : 'bg-black/10 dark:bg-white/10 text-gray-600 dark:text-gray-400'
-                }`}>
-                  {tab.count}
-                </span>
-              </button>
-            ))}
-          </div>
+        {/* Filter Bar & Search - Only when kitchen is enabled */}
+        {kitchenEnabled && (
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            {/* Status Filter Tabs */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { id: 'all', label: 'Đang làm', count: pendingCount + cookingCount + readyCount },
+                { id: 'pending', label: 'Chờ nấu', count: pendingCount, color: 'text-amber-600 dark:text-amber-400' },
+                { id: 'cooking', label: 'Đang nấu', count: cookingCount, color: 'text-sky-600 dark:text-sky-400' },
+                { id: 'ready', label: 'Bếp đã xong', count: readyCount, color: 'text-emerald-600 dark:text-emerald-400' },
+                { id: 'completed', label: 'Đã trả món', count: completedCount, color: 'text-gray-500' }
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setStatusFilter(tab.id as any)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${
+                    statusFilter === tab.id
+                      ? 'bg-gray-900 text-white dark:bg-white dark:text-gray-900 shadow-sm'
+                      : 'bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10'
+                  }`}
+                >
+                  <span>{tab.label}</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                    statusFilter === tab.id 
+                      ? 'bg-white/20 text-white dark:bg-black/20 dark:text-gray-900' 
+                      : 'bg-black/10 dark:bg-white/10 text-gray-600 dark:text-gray-400'
+                  }`}>
+                    {tab.count}
+                  </span>
+                </button>
+              ))}
+            </div>
 
-          {/* Search Box */}
-          <div className="relative w-full sm:w-64">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Tìm theo bàn, món, ghi chú..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-3 py-1.5 bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl text-xs text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-            />
+            {/* Search Box */}
+            <div className="relative w-full sm:w-64">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Tìm theo bàn, món, ghi chú..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-1.5 bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl text-xs text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+              />
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto p-4 md:p-6">
-        {/* VIEW 1: TICKETS / PER-TABLE ORDERS */}
-        {viewMode === 'tickets' && (
+        {!kitchenEnabled ? (
+          <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center max-w-lg mx-auto p-6 space-y-4">
+            <div className="w-20 h-20 rounded-3xl bg-amber-500/10 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center shadow-inner border border-amber-500/20">
+              <ChefHat className="w-10 h-10 opacity-80" />
+            </div>
+            <div className="space-y-2">
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">
+                Chức năng Nhà Bếp (KDS) đang TẮT
+              </h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed">
+                Nhiều nhà hàng không cần sử dụng chức năng này. Khi tắt, toàn bộ quy trình làm món và các huy hiệu trạng thái (Chờ bếp, Đang nấu, Bếp đã xong...) trên sơ đồ phòng bàn được ẩn hoàn toàn để giao diện gọn gàng và không gây rối mắt cho nhân viên.
+              </p>
+            </div>
+            <button
+              onClick={() => onToggleKitchenEnabled?.(true)}
+              className="px-6 py-3 rounded-xl bg-emerald-500 text-white text-sm font-bold shadow-lg shadow-emerald-500/25 hover:bg-emerald-600 transition-all flex items-center gap-2 cursor-pointer"
+            >
+              <Power className="w-4 h-4" /> Bật lại chức năng nhà bếp
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* VIEW 1: TICKETS / PER-TABLE ORDERS */}
+            {viewMode === 'tickets' && (
           <>
             {filteredOrders.length === 0 ? (
               <div className="h-96 flex flex-col items-center justify-center text-gray-400 dark:text-gray-500 space-y-3">
@@ -777,7 +838,9 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
             </div>
           </div>
         )}
-      </div>
-    </div>
+      </>
+    )}
+  </div>
+</div>
   );
 };
