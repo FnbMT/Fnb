@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta name="google" content="notranslate">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="apple-touch-icon" href="/icon.png" />
+    <title>Fnb Master</title>
+  
+    <script>
+      (function() {
+        try {
+          var theme = localStorage.getItem('theme'); var isDark = theme === 'dark' || (theme !== 'light');
+          if (isDark) {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
+  
+
+</head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Patch fetch to prevent "Cannot set property fetch" error if a library tries to overwrite it
+      try {
+        const originalFetch = window.fetch;
+        Object.defineProperty(window, 'fetch', {
+          get: () => originalFetch,
+          set: () => { console.warn('Blocked attempt to overwrite window.fetch'); },
+          configurable: true
+        });
+      } catch (e) {
+        console.warn('Could not patch window.fetch', e);
+      }
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
