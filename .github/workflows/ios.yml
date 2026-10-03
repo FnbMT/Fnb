@@ -4,6 +4,11 @@ on:
   push:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "App Marketing Version (e.g. 1.0.3)"
+        required: false
+        default: "1.0.3"
 
 jobs:
   build_ios:
@@ -176,7 +181,18 @@ jobs:
 
           BUILD_NUM=$(date "+%Y%m%d%H%M")
           agvtool new-version -all "$BUILD_NUM"
-          agvtool new-marketing-version "1.0.2"
+
+          # Determine marketing version: from workflow input, package.json, or fallback to 1.0.3
+          APP_VERSION="${{ inputs.version }}"
+          if [ -z "$APP_VERSION" ]; then
+            APP_VERSION=$(node -p "require('../../package.json').version" 2>/dev/null || echo "1.0.3")
+          fi
+          if [ "$APP_VERSION" = "0.0.0" ] || [ -z "$APP_VERSION" ] || [ "$APP_VERSION" = "1.0.2" ]; then
+            APP_VERSION="1.0.3"
+          fi
+
+          echo "Setting Marketing Version to: $APP_VERSION (Build: $BUILD_NUM)"
+          agvtool new-marketing-version "$APP_VERSION"
 
           if [ -f "App.xcworkspace/contents.xcworkspacedata" ]; then
             echo "Resolving Swift Package dependencies..."
