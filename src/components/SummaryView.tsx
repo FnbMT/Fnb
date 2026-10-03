@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { BarChart3, Search, Calendar, ArrowDownToLine, ArrowUpFromLine, FileText, Download, X, Eye, Wallet, Plus, Printer, ChevronLeft, ChevronRight, Trash2, Check } from 'lucide-react';
+import { BarChart3, Search, Calendar, ArrowDownToLine, ArrowUpFromLine, FileText, Download, X, Eye, Wallet, Plus, Printer, ChevronLeft, ChevronRight, Trash2, Check, Banknote, CreditCard } from 'lucide-react';
 import { Invoice, InventoryTransaction, CashTransaction, User, SystemSettings, PayrollRecord } from '../types';
 import { format, isSameDay, isSameMonth, isSameYear, parseISO, startOfMonth, endOfMonth, isBefore, startOfDay } from 'date-fns';
 import { cn } from '../lib/utils';
@@ -28,7 +28,7 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
   const isAdminOrManager = currentUser?.role === 'admin' || currentUser?.role === 'manager';
   const [activeTab, setActiveTab] = useState<'sales' | 'inventory' | 'items' | 'cash' | 'financial'>('sales');
   const [dateFilter, setDateFilter] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [filterType, setFilterType] = useState<'day' | 'month' | 'year'>(isAdmin ? 'month' : 'day');
+  const [filterType, setFilterType] = useState<'day' | 'month' | 'year'>('day');
   const [taxRevenueType, setTaxRevenueType] = useState<'under_1b' | 'over_1b'>('under_1b');
   const [invoiceSearch, setInvoiceSearch] = useState('');
 
@@ -40,10 +40,10 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
   }, [isAdminOrManager, activeTab]);
 
   useEffect(() => {
-    if (!isAdmin && filterType !== 'day') {
+    if (!isAdminOrManager && filterType !== 'day') {
       setFilterType('day');
     }
-  }, [isAdmin, filterType]);
+  }, [isAdminOrManager, filterType]);
   const [viewingInvoice, setViewingInvoice] = useState<Invoice | null>(null);
   const [viewingLog, setViewingLog] = useState<InventoryTransaction | null>(null);
   const [showAddCashModal, setShowAddCashModal] = useState<'income' | 'expense' | null>(null);
@@ -322,6 +322,76 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
   const totalImport = filteredLogs.filter(l => l.type === 'import').reduce((sum, l) => sum + (l.totalPrice || 0), 0);
   const totalReturn = filteredLogs.filter(l => l.type === 'return').reduce((sum, l) => sum + (l.totalPrice || 0), 0);
 
+  // Tự động liên kết số liệu thu chi theo bộ lọc (ngày, tháng, năm) để đối soát TIỀN MẶT và CHUYỂN KHOẢN
+  const storePaymentStats = useMemo(() => {
+    const periodTxs = cashTransactions.filter(t => {
+      try {
+        const date = parseISO(t.date);
+        const filterDate = parseISO(dateFilter);
+        if (filterType === 'day') return isSameDay(date, filterDate);
+        if (filterType === 'month') return isSameMonth(date, filterDate);
+        return isSameYear(date, filterDate);
+      } catch (e) {
+        return false;
+      }
+    });
+
+    const isTransferPayment = (method: string | undefined) => 
+      method === 'transfer' || method === 'bank' || method === 'card' || method === 'qr';
+
+    // Đối soát hóa đơn bán hàng trong kỳ với sổ quỹ (category: 'Bán hàng')
+    const autoCashSalesInTx = periodTxs
+      .filter(t => t.category === 'Bán hàng' && t.type === 'income' && (t.paymentMethod === 'cash' || !t.paymentMethod))
+      .reduce((sum, t) => sum + (t.amount || 0), 0);
+
+    const invoiceCashSales = filteredInvoices
+      .filter(inv => inv.paymentMethod === 'cash' || !inv.paymentMethod)
+      .reduce((sum, inv) => sum + (inv.total || 0), 0);
+
+    const unrecordedCashSales = Math.max(0, invoiceCashSales - autoCashSalesInTx);
+
+    const autoTransferSalesInTx = periodTxs
+      .filter(t => t.category === 'Bán hàng' && t.type === 'income' && isTransferPayment(t.paymentMethod))
+      .reduce((sum, t) => sum + (t.amount || 0), 0);
+
+    const invoiceTransferSales = filteredInvoices
+      .filter(inv => isTransferPayment(inv.paymentMethod))
+      .reduce((sum, inv) => sum + (inv.total || 0), 0);
+
+    const unrecordedTransferSales = Math.max(0, invoiceTransferSales - autoTransferSalesInTx);
+
+    // 1. TIỀN MẶT
+    const cashIncome = periodTxs
+      .filter(t => t.type === 'income' && (t.paymentMethod === 'cash' || !t.paymentMethod))
+      .reduce((sum, t) => sum + (t.amount || 0), 0) + unrecordedCashSales;
+
+    const cashExpense = periodTxs
+      .filter(t => t.type === 'expense' && (t.paymentMethod === 'cash' || !t.paymentMethod))
+      .reduce((sum, t) => sum + (t.amount || 0), 0);
+
+    const cashNet = cashIncome - cashExpense;
+
+    // 2. CHUYỂN KHOẢN
+    const transferIncome = periodTxs
+      .filter(t => t.type === 'income' && isTransferPayment(t.paymentMethod))
+      .reduce((sum, t) => sum + (t.amount || 0), 0) + unrecordedTransferSales;
+
+    const transferExpense = periodTxs
+      .filter(t => t.type === 'expense' && isTransferPayment(t.paymentMethod))
+      .reduce((sum, t) => sum + (t.amount || 0), 0);
+
+    const transferNet = transferIncome - transferExpense;
+
+    return {
+      cashIncome,
+      cashExpense,
+      cashNet,
+      transferIncome,
+      transferExpense,
+      transferNet
+    };
+  }, [cashTransactions, filteredInvoices, dateFilter, filterType]);
+
   const paginate = (data: any[]) => {
     const startIndex = (currentPage - 1) * rowsPerPage;
     return data.slice(startIndex, startIndex + rowsPerPage);
@@ -432,14 +502,46 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
                 <p className="text-xs text-gray-600 dark:text-gray-400">Tỷ suất: {totalSales > 0 ? ((totalProfit / totalSales) * 100).toFixed(1) : 0}%</p>
               </div>
               <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
-                <p className="text-xs text-gray-500 uppercase font-bold">Tổng nhập hàng</p>
-                <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-amber-600 dark:text-amber-500">{totalImport.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</p>
-                <p className="text-xs text-gray-600 dark:text-gray-400">{filteredLogs.filter(l => l.type === 'import').length} phiếu nhập</p>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-gray-500 uppercase font-bold flex items-center gap-1.5">
+                    <Banknote className="w-4 h-4 text-emerald-500" />
+                    TIỀN MẶT
+                  </p>
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                    Thu - Chi
+                  </span>
+                </div>
+                <p className={cn(
+                  "text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold",
+                  storePaymentStats.cashNet >= 0 ? "text-emerald-600 dark:text-emerald-500" : "text-rose-600 dark:text-rose-500"
+                )}>
+                  {storePaymentStats.cashNet.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ
+                </p>
+                <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400 font-mono pt-1 border-t border-black/5 dark:border-white/5">
+                  <span className="text-emerald-600 dark:text-emerald-500 font-medium">Thu: +{storePaymentStats.cashIncome.toLocaleString('vi-VN')}đ</span>
+                  <span className="text-rose-600 dark:text-rose-500 font-medium">Chi: -{storePaymentStats.cashExpense.toLocaleString('vi-VN')}đ</span>
+                </div>
               </div>
               <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
-                <p className="text-xs text-gray-500 uppercase font-bold">Tổng trả hàng</p>
-                <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-rose-600 dark:text-rose-500">{totalReturn.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</p>
-                <p className="text-xs text-gray-600 dark:text-gray-400">{filteredLogs.filter(l => l.type === 'return').length} phiếu trả</p>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-gray-500 uppercase font-bold flex items-center gap-1.5">
+                    <CreditCard className="w-4 h-4 text-blue-500" />
+                    CHUYỂN KHOẢN
+                  </p>
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                    Thu - Chi
+                  </span>
+                </div>
+                <p className={cn(
+                  "text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold",
+                  storePaymentStats.transferNet >= 0 ? "text-blue-600 dark:text-blue-500" : "text-rose-600 dark:text-rose-500"
+                )}>
+                  {storePaymentStats.transferNet.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ
+                </p>
+                <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400 font-mono pt-1 border-t border-black/5 dark:border-white/5">
+                  <span className="text-emerald-600 dark:text-emerald-500 font-medium">Thu: +{storePaymentStats.transferIncome.toLocaleString('vi-VN')}đ</span>
+                  <span className="text-rose-600 dark:text-rose-500 font-medium">Chi: -{storePaymentStats.transferExpense.toLocaleString('vi-VN')}đ</span>
+                </div>
               </div>
             </>
           )}
@@ -447,7 +549,7 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
       ) : null}
 
       <div className="flex flex-col md:flex-row gap-4 items-center bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 p-4 rounded-2xl">
-        {isAdmin && (
+        {isAdminOrManager && (
           <div className="flex gap-2 p-1 bg-gray-100 dark:bg-black/20 rounded-xl">
             {(['day', 'month', 'year'] as const).filter(t => t === 'day' || currentUser?.store?.packageFeatures?.invoiceHistory !== 'daily').map(t => (
               <button
