@@ -380,3 +380,33 @@ export const INITIAL_USERS: User[] = [
   { id: '1', username: 'admin', name: 'Quản trị viên', password: '123', role: 'admin', storeId: 'default' },
   { id: '2', username: 'staff1', name: 'Nhân viên 1', password: '123', role: 'order', storeId: 'default' },
 ];
+
+export interface StorePackageFeatures {
+  maxUsers?: number;
+  kitchen?: boolean;
+  inventory?: boolean;
+  customers?: boolean;
+  reports?: boolean;
+  tax_report?: boolean;
+  summary?: boolean;
+  // Backward compatibility
+  taxReport?: boolean;
+  financialReports?: boolean;
+  invoiceHistory?: 'daily' | 'all';
+  [key: string]: any;
+}
+
+export interface StorePackagePricing {
+  durationMonths: number;
+  price: number;
+}
+
+export interface StorePackage {
+  id: string;
+  name: string;
+  trialDays: number;
+  price: number;
+  durationMonths?: number;
+  pricing?: StorePackagePricing[];
+  features: StorePackageFeatures;
+}

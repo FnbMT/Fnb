@@ -157,8 +157,33 @@ import { MyPayrollView } from './components/MyPayrollView';
 import { AttendanceScanner } from "./components/AttendanceScanner";
 import { getMenuItemImage } from "./utils/foodImageHelper";
 import { KitchenView } from './components/KitchenView';
+import { checkStoreTabPermission, isTabAllowedInPackage, APP_PACKAGE_TABS } from './utils/packagePermissions';
 
 // --- Components ---
+
+const LockedTabView = ({ title, onUpgrade }: { title: string, onUpgrade: () => void }) => {
+  return (
+    <div className="flex flex-col items-center justify-center h-full min-h-[400px] p-8 text-center space-y-4">
+      <div className="w-16 h-16 rounded-2xl bg-amber-500/10 text-amber-500 border border-amber-500/20 flex items-center justify-center shadow-lg">
+        <Lock className="w-8 h-8" />
+      </div>
+      <div className="max-w-md space-y-2">
+        <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+          Tính năng "{title}" chưa được kích hoạt
+        </h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
+          Gói dịch vụ hiện tại của cửa hàng chưa bao gồm quyền sử dụng tính năng này. Vui lòng liên hệ Quản trị viên hoặc nâng cấp gói để mở khóa toàn bộ tiện ích.
+        </p>
+      </div>
+      <button
+        onClick={onUpgrade}
+        className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white rounded-xl font-bold text-sm shadow-lg shadow-emerald-500/20 transition-all cursor-pointer"
+      >
+        Nâng cấp gói dịch vụ
+      </button>
+    </div>
+  );
+};
 
 const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsCount, packages }: { 
   activeView: ViewType, 
@@ -181,6 +206,10 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
 
   const currentPackageIdForMenu = currentUser?.store?.subscription?.packageId || 'trial';
   const currentPackageForMenu = packages.find(p => p.id === currentPackageIdForMenu);
+
+  const isFeatureAllowedInMenu = (tabId: string): boolean => {
+    return checkStoreTabPermission(tabId, currentUser, packages);
+  };
 
   const menuItems = allMenuItems.filter(item => {
     if (!currentUser) return false;
@@ -231,26 +260,36 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
         </div>
         
         <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto custom-scrollbar">
-          {menuItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setView(item.id as ViewType)}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group cursor-pointer",
-                activeView === item.id 
-                  ? "bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-500/20" 
-                  : "text-gray-600 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white"
-              )}
-            >
-              <div className="relative">
-                <item.icon className={cn("w-5 h-5", activeView === item.id ? "text-black" : "group-hover:text-white")} />
-                {item.id === 'shifts' && unresolvedShiftsCount > 0 && (
-                  <div className="absolute -top-1 -right-1 w-3 h-3 bg-rose-500 rounded-full border-2 border-[#151619]"></div>
+          {menuItems.map((item) => {
+            const isAllowed = isFeatureAllowedInMenu(item.id);
+            return (
+              <button
+                key={item.id}
+                onClick={() => setView(item.id as ViewType)}
+                className={cn(
+                  "w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 group cursor-pointer",
+                  activeView === item.id 
+                    ? "bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-500/20" 
+                    : "text-gray-600 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white"
                 )}
-              </div>
-              <span className="text-sm">{item.label}</span>
-            </button>
-          ))}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="relative">
+                    <item.icon className={cn("w-5 h-5", activeView === item.id ? "text-black" : "group-hover:text-white")} />
+                    {item.id === 'shifts' && unresolvedShiftsCount > 0 && (
+                      <div className="absolute -top-1 -right-1 w-3 h-3 bg-rose-500 rounded-full border-2 border-[#151619]"></div>
+                    )}
+                  </div>
+                  <span className="text-sm truncate">{item.label}</span>
+                </div>
+                {!isAllowed && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1 shrink-0 ml-1">
+                    <Lock className="w-3 h-3" /> Gói
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
 
         <div className="p-4 border-t border-black/5 dark:border-white/5 space-y-2">
@@ -280,26 +319,34 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
 
       {/* Mobile Bottom Navigation */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-white dark:bg-[#151619] border-t border-black/10 dark:border-white/10 flex items-center justify-start px-4 z-40 overflow-x-auto no-scrollbar gap-2">
-        {menuItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => setView(item.id as ViewType)}
-            className={cn(
-              "flex flex-col items-center justify-center min-w-[60px] h-full gap-1 transition-all duration-200",
-              activeView === item.id 
-                ? "text-emerald-600 dark:text-emerald-500" 
-                : "text-gray-500 hover:text-gray-900 dark:hover:text-white"
-            )}
-          >
-            <div className="relative">
-              <item.icon className={cn("w-5 h-5", activeView === item.id && "fill-current")} />
-              {item.id === 'shifts' && unresolvedShiftsCount > 0 && (
-                <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 rounded-full border-2 border-white dark:border-[#151619]"></div>
+        {menuItems.map((item) => {
+          const isAllowed = isFeatureAllowedInMenu(item.id);
+          return (
+            <button
+              key={item.id}
+              onClick={() => setView(item.id as ViewType)}
+              className={cn(
+                "flex flex-col items-center justify-center min-w-[60px] h-full gap-1 transition-all duration-200 relative",
+                activeView === item.id 
+                  ? "text-emerald-600 dark:text-emerald-500" 
+                  : "text-gray-500 hover:text-gray-900 dark:hover:text-white"
               )}
-            </div>
-            <span className="text-[10px] font-medium whitespace-nowrap">{item.label}</span>
-          </button>
-        ))}
+            >
+              <div className="relative">
+                <item.icon className={cn("w-5 h-5", activeView === item.id && "fill-current")} />
+                {item.id === 'shifts' && unresolvedShiftsCount > 0 && (
+                  <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 rounded-full border-2 border-white dark:border-[#151619]"></div>
+                )}
+                {!isAllowed && (
+                  <div className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-amber-500 text-white rounded-full flex items-center justify-center text-[8px] font-bold">
+                    <Lock className="w-2 h-2" />
+                  </div>
+                )}
+              </div>
+              <span className="text-[10px] font-medium whitespace-nowrap">{item.label}</span>
+            </button>
+          );
+        })}
         <button 
             onClick={onLogout}
             className="flex flex-col items-center justify-center min-w-[60px] h-full gap-1 text-rose-600 dark:text-rose-500/70 hover:text-rose-500"
@@ -2051,24 +2098,6 @@ export default function App() {
   });
 
   const handleSetView = (newView: ViewType) => {
-    const currentPackageId = currentUser?.store?.subscription?.packageId || 'trial';
-    const currentPackage = packages.find(p => p.id === currentPackageId);
-    const pkgFeatures = currentPackage?.features || {};
-    // Give trial users full access if features aren't explicitly false
-    if (currentPackageId === 'trial') {
-      if (pkgFeatures.financialReports === undefined) pkgFeatures.financialReports = true;
-      if (pkgFeatures.taxReport === undefined) pkgFeatures.taxReport = true;
-    }
-
-    if (newView === 'reports' && pkgFeatures && !pkgFeatures.financialReports) {
-      setFeatureLimitMessage('Bạn cần nâng cấp gói để xem được tính năng Báo cáo tài chính.');
-      return;
-    }
-    if (newView === 'tax_report' && pkgFeatures && !pkgFeatures.taxReport) {
-      setFeatureLimitMessage('Bạn cần nâng cấp gói để xem được tính năng Báo cáo thuế.');
-      return;
-    }
-
     setView(newView);
   };
   const [confirmDialog, setConfirmDialog] = useState<{ message: string, onConfirm: () => void } | null>(null);
@@ -3938,52 +3967,74 @@ export default function App() {
                   />
                 </div>
               )}
-              {view === 'reports' && <ReportsView invoices={invoices} activeOrdersCount={activeOrdersCount} />}
+              {view === 'reports' && (
+                !checkStoreTabPermission('reports', currentUser, packages) ? (
+                  <LockedTabView title="Báo cáo doanh thu" onUpgrade={() => setShowUpgradeModal(true)} />
+                ) : (
+                  <ReportsView invoices={invoices} activeOrdersCount={activeOrdersCount} />
+                )
+              )}
               {view === 'kitchen' && (
-                <KitchenView 
-                  tables={tables} 
-                  onUpdateTableOrders={handleUpdateTableOrders}
-                  onPrint={triggerPrint}
-                  currentUser={currentUser}
-                  kitchenEnabled={systemSettings.kitchenEnabled !== false}
-                  onToggleKitchenEnabled={handleToggleKitchenEnabled}
-                />
+                !checkStoreTabPermission('kitchen', currentUser, packages) ? (
+                  <LockedTabView title="Nhà bếp" onUpgrade={() => setShowUpgradeModal(true)} />
+                ) : (
+                  <KitchenView 
+                    tables={tables} 
+                    onUpdateTableOrders={handleUpdateTableOrders}
+                    onPrint={triggerPrint}
+                    currentUser={currentUser}
+                    kitchenEnabled={systemSettings.kitchenEnabled !== false}
+                    onToggleKitchenEnabled={handleToggleKitchenEnabled}
+                  />
+                )
               )}
               {view === 'inventory' && (
-                <InventoryView 
-                  menu={menu} 
-                  onImportStock={handleImportStock}
-                  onAddItem={handleAddItem}
-                  onUpdateItem={handleUpdateInventoryItem}
-                  onDeleteItem={handleDeleteInventoryItem}
-                  categories={systemSettings.inventoryCategories}
-                  onUpdateCategories={(cats) => setSystemSettings({...systemSettings, inventoryCategories: cats})}
-                  audits={inventoryAudits}
-                  onAudit={handleAuditInventory}
-                  stockCard={stockCardEntries}
-                  currentUser={currentUser}
-                />
+                !checkStoreTabPermission('inventory', currentUser, packages) ? (
+                  <LockedTabView title="Kho hàng" onUpgrade={() => setShowUpgradeModal(true)} />
+                ) : (
+                  <InventoryView 
+                    menu={menu} 
+                    onImportStock={handleImportStock}
+                    onAddItem={handleAddItem}
+                    onUpdateItem={handleUpdateInventoryItem}
+                    onDeleteItem={handleDeleteInventoryItem}
+                    categories={systemSettings.inventoryCategories}
+                    onUpdateCategories={(cats) => setSystemSettings({...systemSettings, inventoryCategories: cats})}
+                    audits={inventoryAudits}
+                    onAudit={handleAuditInventory}
+                    stockCard={stockCardEntries}
+                    currentUser={currentUser}
+                  />
+                )
               )}
               {view === 'tax_report' && (
-                <TaxReportView 
-                  invoices={invoices}
-                  currentUser={currentUser}
-                  onPrint={triggerPrint}
-                />
+                !checkStoreTabPermission('tax_report', currentUser, packages) ? (
+                  <LockedTabView title="Báo cáo bán hàng" onUpgrade={() => setShowUpgradeModal(true)} />
+                ) : (
+                  <TaxReportView 
+                    invoices={invoices}
+                    currentUser={currentUser}
+                    onPrint={triggerPrint}
+                  />
+                )
               )}
               {view === 'summary' && (
-                <SummaryView 
-                  invoices={invoices}
-                  inventoryLogs={inventoryLogs}
-                  cashTransactions={cashTransactions}
-                  payrollRecords={payrollRecords}
-                  onAddCashTransaction={handleAddCashTransaction}
-                  currentUser={currentUser}
-                  settings={systemSettings}
-                  onUpdateSettings={handleUpdateSettings}
-                  onPrint={triggerPrint}
-                  activeOrdersCount={activeOrdersCount}
-                />
+                !checkStoreTabPermission('summary', currentUser, packages) ? (
+                  <LockedTabView title="Tổng kết" onUpgrade={() => setShowUpgradeModal(true)} />
+                ) : (
+                  <SummaryView 
+                    invoices={invoices}
+                    inventoryLogs={inventoryLogs}
+                    cashTransactions={cashTransactions}
+                    payrollRecords={payrollRecords}
+                    onAddCashTransaction={handleAddCashTransaction}
+                    currentUser={currentUser}
+                    settings={systemSettings}
+                    onUpdateSettings={handleUpdateSettings}
+                    onPrint={triggerPrint}
+                    activeOrdersCount={activeOrdersCount}
+                  />
+                )
               )}
               {view === 'settings' && (
                 <SettingsView 
@@ -3998,13 +4049,17 @@ export default function App() {
                 />
               )}
               {view === 'customers' && (
-                <CustomerView 
-                  customers={customers} 
-                  customerTypes={systemSettings.customerTypes || []}
-                  onAddCustomer={handleAddCustomer}
-                  onUpdateCustomerTypes={handleUpdateCustomerTypes}
-                  currentUser={currentUser}
-                />
+                !checkStoreTabPermission('customers', currentUser, packages) ? (
+                  <LockedTabView title="Khách hàng" onUpgrade={() => setShowUpgradeModal(true)} />
+                ) : (
+                  <CustomerView 
+                    customers={customers} 
+                    customerTypes={systemSettings.customerTypes || []}
+                    onAddCustomer={handleAddCustomer}
+                    onUpdateCustomerTypes={handleUpdateCustomerTypes}
+                    currentUser={currentUser}
+                  />
+                )
               )}
               {view === 'shifts' && (
                 <ShiftView 
@@ -4602,16 +4657,38 @@ const Header = ({
               </button>
               
               {showPackageInfo && (
-                <div className="absolute top-full right-0 mt-2 w-64 bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl shadow-xl p-4 z-50">
-                  <h4 className="font-bold mb-2">Thông tin tài khoản</h4>
+                <div className="absolute top-full right-0 mt-2 w-72 bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl shadow-xl p-4 z-50">
+                  <h4 className="font-bold mb-2">Thông tin gói dịch vụ</h4>
                   <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
-                    <li>• Cửa hàng: {store?.name || '---'}</li>
-                    <li>• Tối đa {currentPackage.features?.maxUsers || 'Không giới hạn'} nhân viên</li>
-                    <li>• Xem báo cáo: {currentPackage.features?.financialReports ? 'Có' : 'Không'}</li>
+                    <li>• Cửa hàng: <span className="font-semibold text-gray-900 dark:text-white">{store?.name || '---'}</span></li>
+                    <li>• Gói hiện tại: <span className="font-bold text-emerald-600 dark:text-emerald-400">{currentPackage.name}</span></li>
+                    <li>• Tối đa: <span className="font-medium text-gray-900 dark:text-white">{currentPackage.features?.maxUsers || 'Không giới hạn'} nhân viên</span></li>
                     {store?.subscription?.validUntil && (
-                      <li>• Hết hạn: {format(new Date(store.subscription.validUntil), 'dd/MM/yyyy')}</li>
+                      <li>• Hết hạn: <span className="font-medium text-gray-900 dark:text-white">{format(new Date(store.subscription.validUntil), 'dd/MM/yyyy')}</span></li>
                     )}
                   </ul>
+                  <div className="mt-3 pt-3 border-t border-black/10 dark:border-white/10">
+                    <p className="text-xs font-bold text-gray-900 dark:text-white mb-2">Quyền truy cập các Tab:</p>
+                    <div className="grid grid-cols-2 gap-1.5 text-xs">
+                      {APP_PACKAGE_TABS.map(tab => {
+                        const isAllowed = isTabAllowedInPackage(tab.id, currentPackage);
+                        return (
+                          <div 
+                            key={tab.id}
+                            className={cn(
+                              "flex items-center gap-1.5 px-2 py-1 rounded-md",
+                              isAllowed 
+                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-semibold" 
+                                : "bg-black/5 dark:bg-white/5 text-gray-400 line-through opacity-60"
+                            )}
+                          >
+                            <span>{isAllowed ? '✓' : '✕'}</span>
+                            <span className="truncate">{tab.label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

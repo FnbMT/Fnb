@@ -1,30 +1,51 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Store, Settings, LogOut, Package as PackageIcon, Edit2, CheckCircle2, XCircle, Search, Trash2, QrCode, Download, Brush as Broom, Smartphone, UploadCloud } from 'lucide-react';
+import { Store, Settings, LogOut, Package as PackageIcon, Edit2, CheckCircle2, XCircle, Search, Trash2, QrCode, Download, Brush as Broom, Smartphone, UploadCloud, ChefHat, Users, BarChart3, FileText, PieChart, Check, Lock } from 'lucide-react';
 import { db, storage } from '../lib/firebase';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { CurrencyInput } from './CurrencyInput';
 import { collection, getDocs, getDoc, updateDoc, doc, deleteDoc, setDoc, query, where } from 'firebase/firestore';
+import { cn } from '../lib/utils';
+import { StorePackage, StorePackageFeatures, StorePackagePricing } from '../types';
 
-interface StorePackagePricing {
-  durationMonths: number;
-  price: number;
-}
-
-interface StorePackage {
-  id: string;
-  name: string;
-  trialDays: number;
-  price: number;
-  durationMonths?: number;
-  pricing?: StorePackagePricing[];
-  features: {
-    maxUsers: number;
-    invoiceHistory: 'daily' | 'all';
-    financialReports: boolean;
-    taxReport?: boolean;
-  };
-}
+export const PACKAGE_TABS = [
+  { 
+    id: 'kitchen', 
+    label: 'Nhà bếp', 
+    icon: ChefHat, 
+    description: 'Màn hình điều phối chế biến, nhận món và báo hoàn thành món' 
+  },
+  { 
+    id: 'inventory', 
+    label: 'Kho hàng', 
+    icon: PackageIcon, 
+    description: 'Quản lý nguyên liệu, định lượng món, nhập/xuất kho và kiểm kê' 
+  },
+  { 
+    id: 'customers', 
+    label: 'Khách hàng', 
+    icon: Users, 
+    description: 'Quản lý thông tin khách hàng, phân nhóm và tích điểm' 
+  },
+  { 
+    id: 'reports', 
+    label: 'Báo cáo doanh thu', 
+    icon: BarChart3, 
+    description: 'Báo cáo doanh thu bán hàng theo ca, theo ngày và PTTT' 
+  },
+  { 
+    id: 'tax_report', 
+    label: 'Báo cáo bán hàng', 
+    icon: FileText, 
+    description: 'Báo cáo hóa đơn chi tiết, dữ liệu thuế và kết xuất báo cáo' 
+  },
+  { 
+    id: 'summary', 
+    label: 'Tổng kết', 
+    icon: PieChart, 
+    description: 'Tổng kết doanh thu, đối soát tiền mặt & chuyển khoản, sổ quỹ' 
+  }
+] as const;
 
 interface StoreTenant {
   id: string;
@@ -182,7 +203,18 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
             trialDays: 14,
             price: 0,
             pricing: [],
-            features: { maxUsers: 999, invoiceHistory: 'all', financialReports: true, taxReport: true }
+            features: { 
+              maxUsers: 999, 
+              kitchen: true, 
+              inventory: true, 
+              customers: true, 
+              reports: true, 
+              tax_report: true, 
+              summary: true,
+              invoiceHistory: 'all', 
+              financialReports: true, 
+              taxReport: true 
+            }
           },
           {
             id: 'basic',
@@ -190,7 +222,18 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
             trialDays: 14,
             price: 199000,
             pricing: [{ durationMonths: 1, price: 199000 }, { durationMonths: 12, price: 2000000 }, { durationMonths: 24, price: 3000000 }],
-            features: { maxUsers: 5, invoiceHistory: 'daily', financialReports: false, taxReport: false }
+            features: { 
+              maxUsers: 5, 
+              kitchen: false, 
+              inventory: false, 
+              customers: false, 
+              reports: true, 
+              tax_report: false, 
+              summary: true,
+              invoiceHistory: 'daily', 
+              financialReports: true, 
+              taxReport: false 
+            }
           },
           {
             id: 'pro',
@@ -198,7 +241,18 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
             trialDays: 14,
             price: 499000,
             pricing: [{ durationMonths: 1, price: 499000 }, { durationMonths: 12, price: 5000000 }, { durationMonths: 24, price: 9000000 }],
-            features: { maxUsers: 20, invoiceHistory: 'all', financialReports: true, taxReport: true }
+            features: { 
+              maxUsers: 20, 
+              kitchen: true, 
+              inventory: true, 
+              customers: true, 
+              reports: true, 
+              tax_report: true, 
+              summary: true,
+              invoiceHistory: 'all', 
+              financialReports: true, 
+              taxReport: true 
+            }
           }
         ];
         // Create defaults
@@ -450,11 +504,42 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
     e.preventDefault();
     if (!editingPackage) return;
     try {
+      const isTabEnabled = (tabId: string) => {
+        if (tabId === 'reports') {
+          if (editingPackage.features?.reports !== undefined) return !!editingPackage.features.reports;
+          if (editingPackage.features?.financialReports !== undefined) return !!editingPackage.features.financialReports;
+          return true;
+        }
+        if (tabId === 'tax_report') {
+          if (editingPackage.features?.tax_report !== undefined) return !!editingPackage.features.tax_report;
+          if (editingPackage.features?.taxReport !== undefined) return !!editingPackage.features.taxReport;
+          return true;
+        }
+        return editingPackage.features?.[tabId as keyof StorePackageFeatures] !== undefined
+          ? !!editingPackage.features[tabId as keyof StorePackageFeatures]
+          : true;
+      };
+
+      const packageToSave: StorePackage = {
+        ...editingPackage,
+        features: {
+          ...editingPackage.features,
+          kitchen: isTabEnabled('kitchen'),
+          inventory: isTabEnabled('inventory'),
+          customers: isTabEnabled('customers'),
+          reports: isTabEnabled('reports'),
+          tax_report: isTabEnabled('tax_report'),
+          summary: isTabEnabled('summary'),
+          financialReports: isTabEnabled('reports'),
+          taxReport: isTabEnabled('tax_report'),
+        }
+      };
+
       if (editingPackage.id.startsWith('new-')) {
         const newId = Math.random().toString(36).substr(2, 9);
-        await setDoc(doc(db, 'packages', newId), { ...editingPackage, id: newId });
+        await setDoc(doc(db, 'packages', newId), { ...packageToSave, id: newId });
       } else {
-        await updateDoc(doc(db, 'packages', editingPackage.id), editingPackage as any);
+        await updateDoc(doc(db, 'packages', editingPackage.id), packageToSave as any);
       }
       setEditingPackage(null);
       fetchData();
@@ -750,8 +835,22 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
               <button 
                 onClick={() => setEditingPackage({
                   id: 'new-' + Date.now(),
-                  name: '', trialDays: 14, price: 0, pricing: [{durationMonths: 12, price: 2000000}],
-                  features: { maxUsers: 5, invoiceHistory: 'daily', financialReports: false, taxReport: false }
+                  name: '', 
+                  trialDays: 14, 
+                  price: 0, 
+                  pricing: [{ durationMonths: 12, price: 2000000 }],
+                  features: { 
+                    maxUsers: 5, 
+                    kitchen: true, 
+                    inventory: true, 
+                    customers: true, 
+                    reports: true, 
+                    tax_report: true, 
+                    summary: true,
+                    financialReports: true,
+                    taxReport: true,
+                    invoiceHistory: 'all'
+                  }
                 })}
                 className="w-full sm:w-auto bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white px-4 py-2.5 font-bold rounded-xl text-sm transition-all cursor-pointer text-center"
               >
@@ -792,7 +891,18 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                           trialDays: newDays,
                           price: 0,
                           pricing: [],
-                          features: { maxUsers: 999, invoiceHistory: 'all', financialReports: true, taxReport: true }
+                          features: { 
+                            maxUsers: 999, 
+                            kitchen: true, 
+                            inventory: true, 
+                            customers: true, 
+                            reports: true, 
+                            tax_report: true, 
+                            summary: true,
+                            invoiceHistory: 'all', 
+                            financialReports: true, 
+                            taxReport: true 
+                          }
                         };
                         setPackages([trialPkg, ...packages]);
                       }
@@ -811,21 +921,65 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
             </div>
             
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-              {packages.filter(pkg => pkg.id !== 'trial').map(pkg => (
-                <div key={pkg.id} className="bg-white dark:bg-[#151619] border border-black/10 dark:border-white/10 rounded-2xl p-6 relative">
-                  <button onClick={() => setEditingPackage(pkg)} className="absolute top-4 right-4 text-blue-600 dark:text-blue-500 hover:bg-blue-500/10 p-2 rounded-lg">
-                    <Edit2 className="w-4 h-4" />
-                  </button>
-                  <h3 className="text-xl font-bold text-emerald-600 dark:text-emerald-500">{pkg.name}</h3>
-                  <div className="mt-4 space-y-2 text-sm text-gray-600 dark:text-gray-400">
-                    <p>Giá: <span className="text-gray-900 dark:text-white font-bold">{((pkg.pricing && pkg.pricing.length > 0 ? pkg.pricing[0].price : pkg.price) || 0).toLocaleString()}đ</span> / {(pkg.pricing && pkg.pricing.length > 0 ? pkg.pricing[0].durationMonths : pkg.durationMonths) || 1} tháng</p>
-                    <div className="pt-2">
-                      <p className="font-bold text-gray-900 dark:text-white mb-1">Chức năng:</p>
-                      <ul className="space-y-1">
-                        <li className="flex items-center gap-2"><CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-500" /> Tối đa {pkg.features?.maxUsers || 0} nhân viên</li>
-                        <li className="flex items-center gap-2"><CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-500" /> Xem hóa đơn: {pkg.features?.invoiceHistory === 'all' ? 'Tất cả (ngày, tháng, năm)' : 'Chỉ xem trong ngày'}</li>
-                        <li className="flex items-center gap-2"><CheckCircle2 className={`w-3 h-3 ${pkg.features?.financialReports ? 'text-emerald-600 dark:text-emerald-500' : 'text-gray-600'}`} /> Báo cáo tài chính</li>
-                      </ul>
+              {packages.map(pkg => (
+                <div key={pkg.id} className="bg-white dark:bg-[#151619] border border-black/10 dark:border-white/10 rounded-2xl p-6 relative flex flex-col justify-between shadow-sm hover:border-black/20 dark:hover:border-white/20 transition-all">
+                  <div>
+                    <button 
+                      onClick={() => setEditingPackage(pkg)} 
+                      className="absolute top-4 right-4 text-blue-600 dark:text-blue-500 hover:bg-blue-500/10 p-2 rounded-lg cursor-pointer transition-colors"
+                      title="Chỉnh sửa phân quyền Tab & cấu hình gói"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <div className="flex items-center gap-2 flex-wrap pr-10">
+                      <h3 className="text-xl font-bold text-emerald-600 dark:text-emerald-500">{pkg.name}</h3>
+                      {pkg.id === 'trial' && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 font-bold border border-blue-500/20">
+                          Mặc định khi đăng ký
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-4 space-y-3 text-sm text-gray-600 dark:text-gray-400">
+                      <p>
+                        {pkg.id === 'trial' ? (
+                          <>Thời hạn: <span className="text-gray-900 dark:text-white font-bold">{pkg.trialDays || 14} ngày dùng thử miễn phí</span></>
+                        ) : (
+                          <>Giá: <span className="text-gray-900 dark:text-white font-bold">{((pkg.pricing && pkg.pricing.length > 0 ? pkg.pricing[0].price : pkg.price) || 0).toLocaleString()}đ</span> / {(pkg.pricing && pkg.pricing.length > 0 ? pkg.pricing[0].durationMonths : pkg.durationMonths) || 1} tháng</>
+                        )}
+                      </p>
+                      <div className="pt-2">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="font-bold text-gray-900 dark:text-white text-xs uppercase tracking-wider">Các Tab được sử dụng:</p>
+                          <span className="text-[11px] font-medium text-gray-500">Tối đa {pkg.features?.maxUsers || 0} NV</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {PACKAGE_TABS.map(tab => {
+                            const isAllowed = !!(pkg.features?.[tab.id as keyof StorePackageFeatures] ?? (
+                              tab.id === 'reports' ? pkg.features?.financialReports :
+                              tab.id === 'tax_report' ? (pkg.features?.taxReport || pkg.features?.tax_report) :
+                              true
+                            ));
+                            return (
+                              <div 
+                                key={tab.id}
+                                className={cn(
+                                  "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors",
+                                  isAllowed 
+                                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400" 
+                                    : "bg-black/5 dark:bg-white/5 border-transparent text-gray-400 line-through opacity-60"
+                                )}
+                              >
+                                {isAllowed ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+                                ) : (
+                                  <XCircle className="w-3.5 h-3.5 shrink-0 text-gray-400" />
+                                )}
+                                <span className="truncate">{tab.label}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -910,40 +1064,160 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                 </div>
               )}
               
-              <div className="pt-4 border-t border-black/10 dark:border-white/10">
-                <label className="block text-sm font-bold text-gray-900 dark:text-white mb-3">Tùy chọn chức năng (Tích để kích hoạt)</label>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Số lượng nhân viên tối đa</label>
-                    <input type="number" className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2" value={editingPackage.features?.maxUsers || 0} onChange={e => setEditingPackage({
+              <div className="pt-4 border-t border-black/10 dark:border-white/10 space-y-4">
+                <div>
+                  <label className="block text-sm font-bold text-gray-900 dark:text-white mb-1">Số lượng nhân viên tối đa</label>
+                  <input 
+                    type="number" 
+                    className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2" 
+                    value={editingPackage.features?.maxUsers || 0} 
+                    onChange={e => setEditingPackage({
                       ...editingPackage,
                       features: { ...editingPackage.features, maxUsers: parseInt(e.target.value) || 0 }
-                    })} required />
+                    })} 
+                    required 
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-sm font-bold text-gray-900 dark:text-white">
+                      Phân quyền tính năng theo Tab (Nút chọn)
+                    </label>
+                    <div className="flex items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingPackage({
+                            ...editingPackage,
+                            features: {
+                              ...editingPackage.features,
+                              kitchen: true,
+                              inventory: true,
+                              customers: true,
+                              reports: true,
+                              tax_report: true,
+                              summary: true,
+                              financialReports: true,
+                              taxReport: true
+                            }
+                          });
+                        }}
+                        className="text-emerald-600 dark:text-emerald-400 hover:underline font-semibold cursor-pointer"
+                      >
+                        Bật tất cả
+                      </button>
+                      <span className="text-gray-400">•</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingPackage({
+                            ...editingPackage,
+                            features: {
+                              ...editingPackage.features,
+                              kitchen: false,
+                              inventory: false,
+                              customers: false,
+                              reports: false,
+                              tax_report: false,
+                              summary: false,
+                              financialReports: false,
+                              taxReport: false
+                            }
+                          });
+                        }}
+                        className="text-rose-500 hover:underline font-semibold cursor-pointer"
+                      >
+                        Tắt tất cả
+                      </button>
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Xem hóa đơn bán hàng</label>
-                    <select className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2" value={editingPackage.features?.invoiceHistory || 'daily'} onChange={e => setEditingPackage({
-                      ...editingPackage,
-                      features: { ...editingPackage.features, invoiceHistory: e.target.value as any }
-                    })}>
-                      <option value="daily">Xem theo ngày</option>
-                      <option value="all">Xem tất cả (ngày, tháng, năm)</option>
-                    </select>
+                  <p className="text-xs text-gray-500 mb-3">
+                    Bấm vào từng nút bên dưới để cấp quyền cho phép người dùng được sử dụng các tab tương ứng:
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {PACKAGE_TABS.map(tab => {
+                      const isSelected = !!(editingPackage.features?.[tab.id as keyof StorePackageFeatures] ?? (
+                        tab.id === 'reports' ? editingPackage.features?.financialReports :
+                        tab.id === 'tax_report' ? (editingPackage.features?.taxReport || editingPackage.features?.tax_report) :
+                        true
+                      ));
+                      const Icon = tab.icon;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => {
+                            const newFeatures = {
+                              ...editingPackage.features,
+                              [tab.id]: !isSelected
+                            };
+                            if (tab.id === 'reports') newFeatures.financialReports = !isSelected;
+                            if (tab.id === 'tax_report') {
+                              newFeatures.taxReport = !isSelected;
+                              newFeatures.tax_report = !isSelected;
+                            }
+                            setEditingPackage({
+                              ...editingPackage,
+                              features: newFeatures
+                            });
+                          }}
+                          className={cn(
+                            "p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between cursor-pointer group relative overflow-hidden",
+                            isSelected 
+                              ? "bg-emerald-500/10 border-emerald-500 dark:bg-emerald-500/15 text-emerald-950 dark:text-emerald-100 shadow-sm ring-1 ring-emerald-500/40" 
+                              : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-500 hover:border-black/20 dark:hover:border-white/20 opacity-70"
+                          )}
+                        >
+                          <div className="flex items-start justify-between w-full mb-2">
+                            <div className="flex items-center gap-2.5">
+                              <div className={cn(
+                                "w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-colors shadow-xs",
+                                isSelected 
+                                  ? "bg-emerald-500 text-white" 
+                                  : "bg-black/10 dark:bg-white/10 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-200"
+                              )}>
+                                <Icon className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <span className={cn(
+                                  "text-sm font-bold block leading-tight",
+                                  isSelected ? "text-gray-900 dark:text-white" : "text-gray-600 dark:text-gray-300"
+                                )}>
+                                  {tab.label}
+                                </span>
+                                <span className="text-[10px] text-gray-500 dark:text-gray-400 line-clamp-1 mt-0.5">
+                                  {tab.description}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className={cn(
+                              "w-6 h-6 rounded-lg flex items-center justify-center border transition-all shrink-0 ml-2",
+                              isSelected 
+                                ? "bg-emerald-500 border-emerald-500 text-white shadow-xs" 
+                                : "border-black/20 dark:border-white/20 bg-transparent text-transparent"
+                            )}>
+                              <Check className="w-4 h-4 stroke-[3]" />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between pt-2 border-t border-black/5 dark:border-white/5 text-[11px]">
+                            <span className="text-gray-400">Trạng thái:</span>
+                            <span className={cn(
+                              "font-bold px-2 py-0.5 rounded-md text-[10px]",
+                              isSelected 
+                                ? "bg-emerald-500/20 text-emerald-700 dark:text-emerald-300" 
+                                : "bg-black/10 dark:bg-white/10 text-gray-500"
+                            )}>
+                              {isSelected ? '✓ Cho phép dùng' : '✕ Bị khóa'}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <input type="checkbox" className="w-5 h-5 accent-emerald-500" checked={editingPackage.features?.financialReports || false} onChange={e => setEditingPackage({
-                      ...editingPackage,
-                      features: { ...editingPackage.features, financialReports: e.target.checked }
-                    })} />
-                    <span className="text-sm">Xem báo cáo tài chính</span>
-                  </label>
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <input type="checkbox" className="w-5 h-5 accent-emerald-500" checked={editingPackage.features?.taxReport || false} onChange={e => setEditingPackage({
-                      ...editingPackage,
-                      features: { ...editingPackage.features, taxReport: e.target.checked }
-                    })} />
-                    <span className="text-sm">Báo cáo thuế</span>
-                  </label>
                 </div>
               </div>
               
