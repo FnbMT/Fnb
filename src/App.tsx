@@ -76,6 +76,8 @@ import { LayoutDashboard,
   ShoppingCart,
   Flame,
   CheckCheck,
+  Smartphone,
+  BellRing,
   ArrowRightLeft, Sun, Moon, QrCode } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, isSameDay, parseISO } from 'date-fns';
@@ -158,6 +160,15 @@ import { AttendanceScanner } from "./components/AttendanceScanner";
 import { getMenuItemImage } from "./utils/foodImageHelper";
 import { KitchenView } from './components/KitchenView';
 import { checkStoreTabPermission, isTabAllowedInPackage, APP_PACKAGE_TABS } from './utils/packagePermissions';
+import {
+  sendDeviceNotification,
+  checkNotificationPermission,
+  requestNotificationPermission,
+  isDeviceNotificationEnabled,
+  setDeviceNotificationEnabled,
+  seedInitialNotificationIds,
+  hasNotificationBeenSent
+} from './utils/deviceNotification';
 
 // --- Components ---
 
@@ -732,7 +743,7 @@ const MenuOrdering = ({
         );
 
         // Log void if quantity reduced or item removed
-        if (newItem.quantity < oldItem.quantity && activeShift) {
+        if (newItem.quantity < oldItem.quantity) {
           const diff = oldItem.quantity - Math.max(0, newItem.quantity);
           const valueDiff = diff * oldItem.price; // Only track main item price difference
           
@@ -3124,6 +3135,68 @@ export default function App() {
     }
   };
 
+  const handleDeleteInvoice = async (invoiceId: string) => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      alert('Chỉ quản trị viên (Admin) mới có quyền xóa hóa đơn.');
+      return;
+    }
+
+    const targetInvoice = invoices.find(inv => inv.id === invoiceId);
+    if (!targetInvoice) return;
+
+    try {
+      // 1. Delete invoice from Firestore
+      await deleteDoc(doc(db, 'invoices', invoiceId));
+
+      // 2. Find and delete linked cash_transaction (if any)
+      const matchedCashTx = cashTransactions.find(t => 
+        (t as any).invoiceId === invoiceId ||
+        (t.category === 'Bán hàng' &&
+         t.type === 'income' &&
+         t.amount === targetInvoice.total &&
+         (t.paymentMethod === targetInvoice.paymentMethod || (!t.paymentMethod && targetInvoice.paymentMethod === 'cash')) &&
+         Math.abs(new Date(t.date).getTime() - new Date(targetInvoice.date).getTime()) < 300000)
+      );
+
+      if (matchedCashTx) {
+        await deleteDoc(doc(db, 'cash_transactions', matchedCashTx.id));
+        setCashTransactions(prev => prev.filter(c => c.id !== matchedCashTx.id));
+      }
+
+      // 3. Revert customer points if awarded
+      if (targetInvoice.customerId) {
+        const pointsAwarded = Math.floor(targetInvoice.total / 100000);
+        const targetCust = customers.find(c => c.id === targetInvoice.customerId);
+        if (targetCust && pointsAwarded > 0) {
+          const revertedPoints = Math.max(0, (targetCust.points || 0) - pointsAwarded);
+          await updateDoc(doc(db, 'customers', targetCust.id), { points: revertedPoints });
+          setCustomers(prev => prev.map(c => c.id === targetCust.id ? { ...c, points: revertedPoints } : c));
+        }
+      }
+
+      // 4. Restore menu stock for direct goods items
+      if (targetInvoice.items && targetInvoice.items.length > 0) {
+        for (const item of targetInvoice.items) {
+          if (item.type === 'goods') {
+            const menuItem = menu.find(m => m.id === item.id);
+            if (menuItem && menuItem.trackStock !== false) {
+              const restoredStock = Number(((menuItem.stock || 0) + item.quantity).toFixed(2));
+              await updateDoc(doc(db, 'menu', item.id), { stock: restoredStock });
+              setMenu(prev => prev.map(m => m.id === item.id ? { ...m, stock: restoredStock } : m));
+            }
+          }
+        }
+      }
+
+      // 5. Update local invoices state
+      setInvoices(prev => prev.filter(inv => inv.id !== invoiceId));
+
+    } catch (error) {
+      console.error('Error deleting invoice:', error);
+      alert('Có lỗi xảy ra khi xóa hóa đơn!');
+    }
+  };
+
   const handleResetAllTables = async () => {
     setConfirmDialog({
       message: 'Bạn có chắc chắn muốn xóa toàn bộ thông tin bàn và đưa tất cả về trạng thái trống?',
@@ -3446,7 +3519,8 @@ export default function App() {
       date: new Date().toISOString(),
       staffId: currentUser.id,
       staffName: currentUser.name,
-      storeId: currentUser.storeId
+      storeId: currentUser.storeId,
+      invoiceId: invoiceId
     });
 
     // Update Inventory (Direct goods, dish recipes, and linked add-ons)
@@ -3841,7 +3915,7 @@ export default function App() {
           onShowUpgrade={() => setShowUpgradeModal(true)} 
           onScanQR={() => setShowScanner(true)}
           menu={menu} 
-          shifts={shifts} 
+          shifts={[...allActiveShifts, ...shifts]} 
         />
         
         {/* Content Area */}
@@ -4028,6 +4102,7 @@ export default function App() {
                     cashTransactions={cashTransactions}
                     payrollRecords={payrollRecords}
                     onAddCashTransaction={handleAddCashTransaction}
+                    onDeleteInvoice={handleDeleteInvoice}
                     currentUser={currentUser}
                     settings={systemSettings}
                     onUpdateSettings={handleUpdateSettings}
@@ -4165,9 +4240,10 @@ export default function App() {
           customers={customers}
           customerTypes={systemSettings.customerTypes || []}
           onLogVoid={async (log) => {
-            if (activeShift) {
-              const updatedLogs = [...(activeShift.voidLogs || []), log];
-              await updateDoc(doc(db, 'shifts', activeShift.id), {
+            const targetShift = activeShift || allActiveShifts[0];
+            if (targetShift) {
+              const updatedLogs = [...(targetShift.voidLogs || []), log];
+              await updateDoc(doc(db, 'shifts', targetShift.id), {
                 voidLogs: updatedLogs
               });
             }
@@ -4528,8 +4604,23 @@ const Header = ({
 }) => {
   const [showPackageInfo, setShowPackageInfo] = React.useState(false);
   const [showNotifications, setShowNotifications] = React.useState(false);
-  const [dismissedNotifIds, setDismissedNotifIds] = React.useState<string[]>([]);
+  const [dismissedNotifIds, setDismissedNotifIds] = React.useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('fnb_dismissed_notif_ids');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
   const notifRef = React.useRef<HTMLDivElement>(null);
+
+  const [phoneNotifEnabled, setPhoneNotifEnabled] = React.useState<boolean>(isDeviceNotificationEnabled);
+  const [permStatus, setPermStatus] = React.useState<'granted' | 'denied' | 'prompt'>('prompt');
+  const isInitialMountRef = React.useRef(true);
+
+  React.useEffect(() => {
+    checkNotificationPermission().then(status => setPermStatus(status));
+  }, []);
 
   React.useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -4541,7 +4632,15 @@ const Header = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const allNotifications: { id: string, title: string, description: string, type: 'warning' | 'error' | 'info', actionText?: string, action?: () => void }[] = [];
+  const allNotifications: { 
+    id: string; 
+    title: string; 
+    description: string; 
+    type: 'warning' | 'error' | 'info'; 
+    actionText?: string; 
+    action?: () => void;
+    time?: string;
+  }[] = [];
   
   if (currentUser?.role === 'admin' || currentUser?.role === 'manager') {
     // 1. Subscription Expiration
@@ -4567,7 +4666,7 @@ const Header = ({
       }
     }
 
-    // 2. Low Stock Items (per item)
+    // 2. Low Stock Items (báo sắp hết nguyên liệu)
     const lowStockItems = menu.filter(item => {
       if (item.trackStock === false) return false;
       const isInv = item.isInventory || item.type === 'goods';
@@ -4580,38 +4679,156 @@ const Header = ({
       const threshold = item.minStock !== undefined && item.minStock !== null ? item.minStock : 5;
       allNotifications.push({
         id: `low-stock-${item.id}`,
-        title: `Hàng tồn kho thấp: ${item.name}`,
-        description: `Mã ${item.code || '---'}: Tồn kho còn ${Number(item.stock ?? 0).toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ${item.unit || 'đv'} (Định mức: ${threshold}).`,
+        title: `📦 Sắp hết nguyên liệu: ${item.name}`,
+        description: `Mã ${item.code || '---'}: Tồn kho còn ${Number(item.stock ?? 0).toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ${item.unit || 'đv'} (Định mức: ${threshold}). Cần nhập thêm ngay.`,
         type: 'error',
         actionText: 'Nhập kho',
-        action: () => { setShowNotifications(false); setView('inventory'); }
+        action: () => { setShowNotifications(false); setView('inventory'); },
+        time: new Date().toISOString()
       });
     });
 
-    // 3. Shift Discrepancies (per shift)
+    // 3. Shift Discrepancies (chênh lệch tiền)
     const discrepancyShifts = shifts.filter(s => s.discrepancy !== undefined && s.discrepancy !== 0 && !s.discrepancyProcessed);
     discrepancyShifts.forEach(s => {
       const disc = s.discrepancy || 0;
       allNotifications.push({
         id: `shift-disc-${s.id}`,
-        title: `Chênh lệch ca: ${s.staffName || 'Nhân viên'}`,
+        title: `⚠️ Lệch tiền ca: ${s.staffName || 'Nhân viên'}`,
         description: `Ca làm việc ngày ${s.startTime ? format(new Date(s.startTime), 'dd/MM/yyyy HH:mm') : ''} có chênh lệch tiền mặt ${disc > 0 ? '+' : ''}${disc.toLocaleString('vi-VN')}đ chưa xử lý.`,
         type: 'error',
         actionText: 'Xử lý ca',
-        action: () => { setShowNotifications(false); setView('shifts'); }
+        action: () => { setShowNotifications(false); setView('shifts'); },
+        time: s.startTime
+      });
+    });
+
+    // 4. Void / Modified Items by Staff (nhân viên hủy món, sửa món)
+    const recentCutoff = Date.now() - 48 * 3600 * 1000;
+    shifts.forEach(s => {
+      if (!s.voidLogs || !Array.isArray(s.voidLogs) || s.voidLogs.length === 0) return;
+      const isShiftRecent = s.status === 'open' || (s.startTime && new Date(s.startTime).getTime() > recentCutoff);
+      if (!isShiftRecent) return;
+
+      s.voidLogs.forEach((log, idx) => {
+        if (log.time && new Date(log.time).getTime() < recentCutoff) return;
+
+        const isCancel = log.newQuantity === 0;
+        const logId = `void-${s.id}-${log.time || idx}-${log.itemName}-${log.oldQuantity}-${log.newQuantity}`;
+
+        let title = '';
+        let desc = '';
+
+        if (log.type === 'bill_void') {
+          title = `⚠️ Hủy/lệch khi tính tiền: Bàn ${log.tableName || '---'}`;
+          const detailsStr = log.details && log.details.length > 0 
+            ? log.details.map(d => `${d.itemName} (${d.oldQuantity}→${d.newQuantity})`).join(', ')
+            : log.itemName;
+          desc = `NV: ${log.staffName || 'Nhân viên'} • ${detailsStr} • Giảm: ${(log.valueDiff || 0).toLocaleString('vi-VN')}đ${log.reason ? `. Lý do: "${log.reason}"` : ''}`;
+        } else if (isCancel) {
+          title = `🚫 Nhân viên hủy món: ${log.itemName}`;
+          desc = `Bàn ${log.tableName || '---'} • NV: ${log.staffName || 'Nhân viên'} hủy ${log.oldQuantity || 1} phần${log.valueDiff ? ` (-${log.valueDiff.toLocaleString('vi-VN')}đ)` : ''}${log.reason ? `. Lý do: "${log.reason}"` : ''}`;
+        } else {
+          title = `✏️ Nhân viên sửa/giảm món: ${log.itemName}`;
+          desc = `Bàn ${log.tableName || '---'} • NV: ${log.staffName || 'Nhân viên'} giảm từ ${log.oldQuantity} xuống ${log.newQuantity} phần${log.valueDiff ? ` (-${log.valueDiff.toLocaleString('vi-VN')}đ)` : ''}${log.reason ? `. Lý do: "${log.reason}"` : ''}`;
+        }
+
+        allNotifications.push({
+          id: logId,
+          title,
+          description: desc,
+          type: isCancel || log.type === 'bill_void' ? 'error' : 'warning',
+          actionText: 'Xem ca làm việc',
+          action: () => { setShowNotifications(false); setView('shifts'); },
+          time: log.time || s.startTime
+        });
       });
     });
   }
 
+  // Sort error notifications first, then newest
+  allNotifications.sort((a, b) => {
+    if (a.type === 'error' && b.type !== 'error') return -1;
+    if (a.type !== 'error' && b.type === 'error') return 1;
+    if (a.time && b.time) return b.time.localeCompare(a.time);
+    return 0;
+  });
+
   const notifications = allNotifications.filter(n => !dismissedNotifIds.includes(n.id));
+
+  // Push un-sent bell notifications to phone screen
+  React.useEffect(() => {
+    if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'manager')) {
+      return;
+    }
+
+    if (isInitialMountRef.current) {
+      seedInitialNotificationIds(notifications.map(n => n.id));
+      isInitialMountRef.current = false;
+      return;
+    }
+
+    notifications.forEach(notif => {
+      if (!hasNotificationBeenSent(notif.id)) {
+        sendDeviceNotification({
+          id: notif.id,
+          title: notif.title,
+          body: notif.description,
+          type: notif.type
+        });
+      }
+    });
+  }, [notifications, currentUser]);
 
   const dismissNotification = (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    setDismissedNotifIds(prev => [...prev, id]);
+    setDismissedNotifIds(prev => {
+      const updated = [...prev, id];
+      try { localStorage.setItem('fnb_dismissed_notif_ids', JSON.stringify(updated.slice(-200))); } catch {}
+      return updated;
+    });
   };
 
   const dismissAllNotifications = () => {
-    setDismissedNotifIds(prev => [...prev, ...allNotifications.map(n => n.id)]);
+    setDismissedNotifIds(prev => {
+      const updated = [...prev, ...allNotifications.map(n => n.id)];
+      try { localStorage.setItem('fnb_dismissed_notif_ids', JSON.stringify(updated.slice(-200))); } catch {}
+      return updated;
+    });
+  };
+
+  const handleRequestPermission = async () => {
+    const granted = await requestNotificationPermission();
+    setPermStatus(granted ? 'granted' : 'denied');
+    if (granted) {
+      setPhoneNotifEnabled(true);
+      setDeviceNotificationEnabled(true);
+      await sendDeviceNotification({
+        id: `welcome-${Date.now()}`,
+        title: '🔔 Fnb Master: Đã kích hoạt thông báo',
+        body: 'Bạn sẽ nhận thông báo trên màn hình điện thoại khi có hủy món, sửa món, hết nguyên liệu, hoặc lệch tiền.',
+        type: 'info'
+      });
+    }
+  };
+
+  const handleTestNotification = async () => {
+    await sendDeviceNotification({
+      id: `test-notif-${Date.now()}`,
+      title: '🔔 Fnb Master: Thông báo điện thoại hoạt động!',
+      body: 'Chủ quán nhận biến động ngay: sắp hết nguyên liệu, nhân viên hủy món, sửa món, chênh lệch tiền.',
+      type: 'info'
+    });
+    if (permStatus !== 'granted') {
+      const status = await checkNotificationPermission();
+      setPermStatus(status);
+    }
+  };
+
+  const handleTogglePhoneNotif = () => {
+    const nextVal = !phoneNotifEnabled;
+    setPhoneNotifEnabled(nextVal);
+    setDeviceNotificationEnabled(nextVal);
   };
 
   const titles: Record<ViewType, string> = {
@@ -4746,6 +4963,55 @@ const Header = ({
                     </button>
                   )}
                 </div>
+
+                {/* Phone Notification Status & Action Bar */}
+                <div className="px-3.5 py-2.5 bg-blue-50/80 dark:bg-blue-500/10 border-b border-black/5 dark:border-white/5 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Smartphone className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                    <div className="truncate">
+                      <span className="font-semibold text-gray-800 dark:text-gray-200">Màn hình điện thoại: </span>
+                      {permStatus === 'granted' && phoneNotifEnabled ? (
+                        <span className="text-emerald-600 dark:text-emerald-400 font-bold">Đang bật</span>
+                      ) : !phoneNotifEnabled ? (
+                        <span className="text-amber-600 dark:text-amber-400 font-medium">Đang tắt</span>
+                      ) : (
+                        <span className="text-gray-500 dark:text-gray-400 font-medium">Chưa cấp quyền</span>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {permStatus !== 'granted' ? (
+                      <button
+                        onClick={handleRequestPermission}
+                        className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-[11px] transition-colors cursor-pointer shadow-sm"
+                      >
+                        Bật ngay
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={handleTestNotification}
+                          className="px-2 py-1 bg-white dark:bg-[#25272c] hover:bg-gray-100 dark:hover:bg-white/10 text-gray-700 dark:text-gray-200 border border-black/10 dark:border-white/10 font-medium rounded-lg text-[10px] transition-colors cursor-pointer flex items-center gap-1"
+                          title="Gửi thử một thông báo lên màn hình điện thoại"
+                        >
+                          <BellRing className="w-3 h-3 text-blue-500" />
+                          <span>Thử báo</span>
+                        </button>
+                        <button
+                          onClick={handleTogglePhoneNotif}
+                          className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer border ${
+                            phoneNotifEnabled 
+                              ? 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-500/20 hover:bg-rose-100' 
+                              : 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/20 hover:bg-emerald-100'
+                          }`}
+                        >
+                          {phoneNotifEnabled ? 'Tắt' : 'Bật'}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
                 <div className="max-h-[380px] overflow-y-auto custom-scrollbar divide-y divide-black/5 dark:divide-white/5">
                   {notifications.length > 0 ? (
                     notifications.map((notif) => (
@@ -4757,10 +5023,15 @@ const Header = ({
                         <div className="flex items-start gap-3">
                           <div className={`w-2.5 h-2.5 mt-1 rounded-full shrink-0 ${notif.type === 'error' ? 'bg-rose-500' : notif.type === 'warning' ? 'bg-amber-500' : 'bg-blue-500'}`} />
                           <div className="flex-1 pr-5">
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-2">
                               <h5 className={`text-xs font-bold leading-tight ${notif.type === 'error' ? 'text-rose-600 dark:text-rose-400' : notif.type === 'warning' ? 'text-amber-600 dark:text-amber-500' : 'text-blue-600 dark:text-blue-400'}`}>
                                 {notif.title}
                               </h5>
+                              {notif.time && (
+                                <span className="text-[10px] text-gray-400 font-normal shrink-0">
+                                  {format(new Date(notif.time), 'HH:mm')}
+                                </span>
+                              )}
                             </div>
                             <p className="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
                               {notif.description}

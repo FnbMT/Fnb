@@ -12,12 +12,13 @@ const paymentMethodMap = {
   'card': 'Thẻ'
 };
 
-export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payrollRecords, onAddCashTransaction, currentUser, settings, onUpdateSettings, onPrint, activeOrdersCount = 0 }: { 
+export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payrollRecords, onAddCashTransaction, onDeleteInvoice, currentUser, settings, onUpdateSettings, onPrint, activeOrdersCount = 0 }: { 
   invoices: Invoice[], 
   inventoryLogs: InventoryTransaction[],
   cashTransactions: CashTransaction[],
   payrollRecords: PayrollRecord[],
-    onAddCashTransaction: (t: Omit<CashTransaction, 'id' | 'storeId'>) => void,
+  onAddCashTransaction: (t: Omit<CashTransaction, 'id' | 'storeId'>) => void,
+  onDeleteInvoice?: (invoiceId: string) => Promise<void> | void,
   currentUser: User | null,
   settings: SystemSettings,
   onUpdateSettings: (s: SystemSettings) => void,
@@ -31,6 +32,8 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
   const [filterType, setFilterType] = useState<'day' | 'month' | 'year'>('day');
   const [taxRevenueType, setTaxRevenueType] = useState<'under_1b' | 'over_1b'>('under_1b');
   const [invoiceSearch, setInvoiceSearch] = useState('');
+  const [confirmDeleteInvoice, setConfirmDeleteInvoice] = useState<Invoice | null>(null);
+  const [isDeletingInvoice, setIsDeletingInvoice] = useState(false);
 
   // Non-admin/manager can only view sales invoices and cash transactions
   useEffect(() => {
@@ -762,6 +765,15 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
                             >
                               <Eye className="w-4 h-4" />
                             </button>
+                            {isAdmin && (
+                              <button 
+                                title="Xóa hóa đơn bán hàng"
+                                onClick={() => setConfirmDeleteInvoice(inv)}
+                                className="p-1.5 text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 dark:hover:bg-rose-500/20 rounded-lg transition-all cursor-pointer"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1190,15 +1202,113 @@ export const SummaryView = ({ invoices, inventoryLogs, cashTransactions, payroll
                   });
                   setViewingInvoice(null);
                 }}
-                className="flex-1 py-3 rounded-xl bg-blue-500 text-gray-900 dark:text-white font-bold hover:bg-blue-400 transition-all flex items-center justify-center gap-2"
+                className="flex-1 py-3 rounded-xl bg-blue-500 text-gray-900 dark:text-white font-bold hover:bg-blue-400 transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Printer className="w-4 h-4" /> In hóa đơn
               </button>
+              {isAdmin && (
+                <button 
+                  onClick={() => {
+                    const toDelete = viewingInvoice;
+                    setViewingInvoice(null);
+                    setConfirmDeleteInvoice(toDelete);
+                  }}
+                  className="px-4 py-3 rounded-xl bg-rose-500/10 text-rose-600 dark:text-rose-400 font-bold hover:bg-rose-500/20 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  title="Xóa hóa đơn bán hàng"
+                >
+                  <Trash2 className="w-4 h-4" /> Xóa
+                </button>
+              )}
               <button 
                 onClick={() => setViewingInvoice(null)}
-                className="flex-1 py-3 rounded-xl bg-black/5 dark:bg-white/5 text-gray-900 dark:text-white font-bold hover:bg-black/10 dark:hover:bg-white/10 transition-all"
+                className="flex-1 py-3 rounded-xl bg-black/5 dark:bg-white/5 text-gray-900 dark:text-white font-bold hover:bg-black/10 dark:hover:bg-white/10 transition-all cursor-pointer"
               >
                 Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Delete Invoice Modal */}
+      {confirmDeleteInvoice && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-[#1a1b1e] w-full max-w-md rounded-3xl border border-black/10 dark:border-white/10 p-6 md:p-7 shadow-2xl space-y-5">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-2xl bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20 flex items-center justify-center shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white">Xác nhận xóa hóa đơn</h3>
+                <p className="text-xs text-gray-500">Chỉ quản trị viên mới có thể thực hiện thao tác này</p>
+              </div>
+            </div>
+
+            <div className="bg-black/5 dark:bg-white/5 rounded-2xl p-4 text-sm space-y-2 border border-black/5 dark:border-white/5">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Mã hóa đơn:</span>
+                <span className="font-mono font-bold text-gray-900 dark:text-white">#{confirmDeleteInvoice.id.substr(-6).toUpperCase()}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Bàn:</span>
+                <span className="font-semibold text-gray-900 dark:text-white">{confirmDeleteInvoice.tableName}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Thời gian:</span>
+                <span className="text-gray-700 dark:text-gray-300">{format(parseISO(confirmDeleteInvoice.completedAt || confirmDeleteInvoice.date), 'HH:mm dd/MM/yyyy')}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Nhân viên:</span>
+                <span className="text-gray-700 dark:text-gray-300">{confirmDeleteInvoice.staffName}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">PTTT:</span>
+                <span className="font-medium text-gray-900 dark:text-white uppercase text-xs">{paymentMethodMap[confirmDeleteInvoice.paymentMethod as keyof typeof paymentMethodMap] || confirmDeleteInvoice.paymentMethod}</span>
+              </div>
+              <div className="flex justify-between pt-2 border-t border-black/5 dark:border-white/5">
+                <span className="font-bold text-gray-900 dark:text-white">Tổng tiền:</span>
+                <span className="font-bold text-rose-600 dark:text-rose-400 text-base">{confirmDeleteInvoice.total.toLocaleString()}đ</span>
+              </div>
+            </div>
+
+            <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 leading-relaxed">
+              ⚠️ <strong>Lưu ý:</strong> Khi xóa hóa đơn này, hệ thống sẽ xóa vĩnh viễn và tự động tính toán lại toàn bộ doanh thu bán hàng, lợi nhuận gộp, số dư tiền mặt / chuyển khoản và sổ quỹ tương ứng.
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={isDeletingInvoice}
+                onClick={() => setConfirmDeleteInvoice(null)}
+                className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-900 dark:text-white font-bold hover:bg-black/5 dark:hover:bg-white/5 transition-all cursor-pointer disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingInvoice}
+                onClick={async () => {
+                  if (!onDeleteInvoice || !confirmDeleteInvoice) return;
+                  setIsDeletingInvoice(true);
+                  try {
+                    await onDeleteInvoice(confirmDeleteInvoice.id);
+                    setConfirmDeleteInvoice(null);
+                  } catch (err) {
+                    console.error(err);
+                  } finally {
+                    setIsDeletingInvoice(false);
+                  }
+                }}
+                className="flex-1 py-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold transition-all shadow-lg shadow-rose-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isDeletingInvoice ? (
+                  <span>Đang xóa...</span>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>Xác nhận xóa</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
