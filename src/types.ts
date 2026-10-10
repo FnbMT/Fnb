@@ -389,6 +389,7 @@ export interface StorePackageFeatures {
   reports?: boolean;
   tax_report?: boolean;
   summary?: boolean;
+  attendance?: boolean;
   // Backward compatibility
   taxReport?: boolean;
   financialReports?: boolean;

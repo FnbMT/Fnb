@@ -4121,6 +4121,8 @@ export default function App() {
                   localPrinters={localPrinters}
                   onUpdateLocalPrinters={handleUpdateLocalPrinters}
                   onDeleteAccount={handleDeleteAccount}
+                  isAttendanceUnlocked={checkStoreTabPermission('attendance', currentUser, packages)}
+                  onUpgrade={() => setShowUpgradeModal(true)}
                 />
               )}
               {view === 'customers' && (
@@ -4151,6 +4153,7 @@ export default function App() {
                   tables={tables}
                   attendanceStatus={attendanceStatus}
                   onScanQR={() => setShowScanner(true)}
+                  isAttendanceAllowed={checkStoreTabPermission('attendance', currentUser, packages)}
                 />
               )}
               {view === 'menu_mgmt' && (

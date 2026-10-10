@@ -1,7 +1,7 @@
 import { StorePackage, StorePackageFeatures, User } from '../types';
 
 export interface PackageTabDefinition {
-  id: 'kitchen' | 'inventory' | 'customers' | 'reports' | 'tax_report' | 'summary';
+  id: 'kitchen' | 'inventory' | 'customers' | 'reports' | 'tax_report' | 'summary' | 'attendance';
   label: string;
   description: string;
 }
@@ -36,6 +36,11 @@ export const APP_PACKAGE_TABS: PackageTabDefinition[] = [
     id: 'summary', 
     label: 'Tổng kết', 
     description: 'Tổng kết doanh thu, đối soát tiền mặt & chuyển khoản, sổ quỹ thu chi' 
+  },
+  {
+    id: 'attendance',
+    label: 'Chấm công nhân viên',
+    description: 'Mở khóa chức năng chấm công QR & định vị vị trí GPS cho nhân viên'
   }
 ];
 
@@ -68,6 +73,11 @@ export const isTabAllowedInPackage = (
   if (tabId === 'summary') {
     return feat.summary !== undefined ? !!feat.summary : true;
   }
+  if (tabId === 'attendance') {
+    if (feat.attendance !== undefined) return !!feat.attendance;
+    if (pkg?.id === 'basic') return false;
+    return true;
+  }
 
   return true;
 };
@@ -97,4 +107,11 @@ export const checkStoreTabPermission = (
   }
 
   return isTabAllowedInPackage(tabId, currentPkg);
+};
+
+export const isStoreAttendanceAllowed = (
+  currentUser: User | null,
+  packagesList: StorePackage[] = []
+): boolean => {
+  return checkStoreTabPermission('attendance', currentUser, packagesList);
 };

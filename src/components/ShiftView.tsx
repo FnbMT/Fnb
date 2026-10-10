@@ -14,7 +14,8 @@ export const ShiftView = ({
   currentUser,
   tables = [],
   attendanceStatus = 'none',
-  onScanQR
+  onScanQR,
+  isAttendanceAllowed = true
 }: { 
   activeShift: Shift | null, 
   allActiveShifts?: Shift[],
@@ -25,7 +26,8 @@ export const ShiftView = ({
   currentUser: User | null,
   tables?: Table[],
   attendanceStatus?: 'none' | 'checked_in' | 'checked_out',
-  onScanQR?: () => void
+  onScanQR?: () => void,
+  isAttendanceAllowed?: boolean
 }) => {
   const [showOpenModal, setShowOpenModal] = React.useState(false);
   const [showCloseModal, setShowCloseModal] = React.useState(false);
@@ -49,7 +51,7 @@ export const ShiftView = ({
   };
 
   const handleOpenShiftClick = () => {
-    if (isAdminOrManager || !currentUser?.requiresAttendance || attendanceStatus === 'checked_in') {
+    if (isAdminOrManager || !currentUser?.requiresAttendance || !isAttendanceAllowed || attendanceStatus === 'checked_in') {
       proceedToOpenShift();
       return;
     }
@@ -101,7 +103,7 @@ export const ShiftView = ({
       </div>
       
       {/* Attendance Check-in Section */}
-      {!isAdminOrManager && currentUser?.requiresAttendance && (
+      {!isAdminOrManager && currentUser?.requiresAttendance && isAttendanceAllowed && (
          <div className="bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm">
              <div className="flex items-center gap-4">
                  <div className={cn("w-12 h-12 rounded-full flex items-center justify-center shrink-0", 

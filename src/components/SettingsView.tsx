@@ -8,7 +8,18 @@ import { CapacitorWifi } from '@capgo/capacitor-wifi';
 import { PrinterService } from '../services/printerService';
 import { QRCodeSVG } from 'qrcode.react';
 
-export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetAllTables, onChangePassword, localPrinters, onUpdateLocalPrinters, onDeleteAccount }: { 
+export const SettingsView = ({ 
+  settings, 
+  onUpdateSettings, 
+  currentUser, 
+  onResetAllTables, 
+  onChangePassword, 
+  localPrinters, 
+  onUpdateLocalPrinters, 
+  onDeleteAccount,
+  isAttendanceUnlocked = true,
+  onUpgrade
+}: { 
   settings: SystemSettings, 
   onUpdateSettings: (s: SystemSettings) => void,
   currentUser: UserType | null,
@@ -16,7 +27,9 @@ export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetA
   onChangePassword?: (newPassword: string) => void,
   localPrinters: PrinterConfig[],
   onUpdateLocalPrinters: (p: PrinterConfig[]) => void,
-  onDeleteAccount?: () => Promise<void> | void
+  onDeleteAccount?: () => Promise<void> | void,
+  isAttendanceUnlocked?: boolean,
+  onUpgrade?: () => void
 }) => {
   
   const [networkInfo, setNetworkInfo] = useState<{ ip?: string, defaultGateway?: string, error?: string } | null>(null);
@@ -1029,13 +1042,64 @@ export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetA
         )}
 
         {isAdmin && (
-          <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-3xl p-8 space-y-6 col-span-1 md:col-span-2">
-            <div className="flex items-center gap-3 text-emerald-600 dark:text-emerald-500">
-              <MapPin className="w-5 h-5" />
-              <h4 className="font-bold uppercase text-xs tracking-wider">Chấm công & Vị trí</h4>
+          <div className={cn(
+            "rounded-3xl p-6 md:p-8 space-y-6 col-span-1 md:col-span-2 relative transition-all",
+            !isAttendanceUnlocked
+              ? "bg-amber-500/[0.04] dark:bg-amber-500/[0.06] border-2 border-amber-400 dark:border-amber-500/80 shadow-sm"
+              : "bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10"
+          )}>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className={cn(
+                "flex items-center gap-3",
+                !isAttendanceUnlocked ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-500"
+              )}>
+                <MapPin className="w-5 h-5" />
+                <h4 className="font-bold uppercase text-xs tracking-wider">Chấm công & Vị trí</h4>
+              </div>
+
+              {!isAttendanceUnlocked ? (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-400/40 text-xs font-bold w-fit">
+                  <Lock className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Đã khóa theo gói dịch vụ</span>
+                </div>
+              ) : (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-xs font-medium w-fit">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Đã mở khóa</span>
+                </div>
+              )}
             </div>
+
+            {!isAttendanceUnlocked && (
+              <div className="bg-amber-500/15 dark:bg-amber-500/20 border-2 border-amber-400 dark:border-amber-500 rounded-2xl p-6 md:p-8 text-center space-y-4 shadow-sm">
+                <div className="w-16 h-16 mx-auto rounded-2xl bg-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center border border-amber-400/60 shadow-inner">
+                  <Lock className="w-8 h-8 text-amber-500 animate-pulse" />
+                </div>
+                <div className="space-y-1.5 max-w-lg mx-auto">
+                  <h5 className="text-base md:text-lg font-bold text-amber-900 dark:text-amber-200">
+                    Chức năng Chấm công & Vị trí đang bị khóa
+                  </h5>
+                  <p className="text-xs md:text-sm text-amber-800/90 dark:text-amber-300/90 leading-relaxed">
+                    Gói dịch vụ hiện tại của cửa hàng chưa mở khóa tính năng <span className="font-bold">Chấm công nhân viên</span>. Để cài đặt tọa độ GPS cửa hàng và tạo mã QR chấm công cho nhân viên, vui lòng nâng cấp gói dịch vụ.
+                  </p>
+                </div>
+                {onUpgrade && (
+                  <button
+                    type="button"
+                    onClick={onUpgrade}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-bold rounded-xl text-xs md:text-sm transition-all shadow-md shadow-amber-500/20 cursor-pointer"
+                  >
+                    <Lock className="w-4 h-4" />
+                    Xem & Nâng cấp gói dịch vụ
+                  </button>
+                )}
+              </div>
+            )}
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className={cn(
+              "grid grid-cols-1 md:grid-cols-2 gap-8 transition-all",
+              !isAttendanceUnlocked && "opacity-40 pointer-events-none select-none filter blur-[0.5px]"
+            )}>
               <div className="space-y-4">
                 <div>
                   <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Tọa độ cửa hàng (Kinh độ, Vĩ độ)</label>
@@ -1049,6 +1113,7 @@ export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetA
                     />
                     <button
                       type="button"
+                      disabled={!isAttendanceUnlocked}
                       onClick={() => {
                         if (navigator.geolocation) {
                           navigator.geolocation.getCurrentPosition((position) => {
@@ -1067,7 +1132,7 @@ export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetA
                           alert('Trình duyệt không hỗ trợ lấy vị trí.');
                         }
                       }}
-                      className="px-4 py-3 sm:py-2 bg-emerald-500/20 text-emerald-600 dark:text-emerald-500 rounded-xl hover:bg-emerald-500/30 transition-all font-bold text-sm whitespace-nowrap cursor-pointer relative z-10 active:scale-95"
+                      className="px-4 py-3 sm:py-2 bg-emerald-500/20 text-emerald-600 dark:text-emerald-500 rounded-xl hover:bg-emerald-500/30 transition-all font-bold text-sm whitespace-nowrap cursor-pointer relative z-10 active:scale-95 disabled:opacity-50"
                     >
                       <MapPin className="w-4 h-4 inline-block mr-1" />
                       Lấy vị trí hiện tại
@@ -1085,13 +1150,15 @@ export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetA
                       value={localSettings.attendanceQRSecret || ''}
                       onChange={(e) => setLocalSettings({...localSettings, attendanceQRSecret: e.target.value})}
                       placeholder="Nhập mã ngẫu nhiên..."
+                      disabled={!isAttendanceUnlocked}
                     />
                     <button
+                      disabled={!isAttendanceUnlocked}
                       onClick={() => {
                         const newSecret = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
                         setLocalSettings({...localSettings, attendanceQRSecret: newSecret});
                       }}
-                      className="px-4 py-2 bg-black/10 dark:bg-white/10 text-gray-900 dark:text-white rounded-xl hover:bg-white/20 transition-all font-bold text-sm whitespace-nowrap"
+                      className="px-4 py-2 bg-black/10 dark:bg-white/10 text-gray-900 dark:text-white rounded-xl hover:bg-white/20 transition-all font-bold text-sm whitespace-nowrap disabled:opacity-50"
                     >
                       Tạo mã mới
                     </button>
@@ -1112,8 +1179,9 @@ export const SettingsView = ({ settings, onUpdateSettings, currentUser, onResetA
                       />
                     </div>
                     <button
+                      disabled={!isAttendanceUnlocked}
                       onClick={printQRCode}
-                      className="flex items-center justify-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-emerald-500/20"
+                      className="flex items-center justify-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer"
                     >
                       <Printer className="w-5 h-5" />
                       In Mã QR

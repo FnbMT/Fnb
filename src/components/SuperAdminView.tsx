@@ -44,6 +44,12 @@ export const PACKAGE_TABS = [
     label: 'Tổng kết', 
     icon: PieChart, 
     description: 'Tổng kết doanh thu, đối soát tiền mặt & chuyển khoản, sổ quỹ' 
+  },
+  { 
+    id: 'attendance', 
+    label: 'Chấm công nhân viên', 
+    icon: QrCode, 
+    description: 'Mở khóa chấm công QR & định vị vị trí GPS cho nhân viên' 
   }
 ] as const;
 
@@ -211,6 +217,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
               reports: true, 
               tax_report: true, 
               summary: true,
+              attendance: true,
               invoiceHistory: 'all', 
               financialReports: true, 
               taxReport: true 
@@ -230,6 +237,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
               reports: true, 
               tax_report: false, 
               summary: true,
+              attendance: false,
               invoiceHistory: 'daily', 
               financialReports: true, 
               taxReport: false 
@@ -249,6 +257,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
               reports: true, 
               tax_report: true, 
               summary: true,
+              attendance: true,
               invoiceHistory: 'all', 
               financialReports: true, 
               taxReport: true 
@@ -515,6 +524,10 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
           if (editingPackage.features?.taxReport !== undefined) return !!editingPackage.features.taxReport;
           return true;
         }
+        if (tabId === 'attendance') {
+          if (editingPackage.features?.attendance !== undefined) return !!editingPackage.features.attendance;
+          return editingPackage.id !== 'basic';
+        }
         return editingPackage.features?.[tabId as keyof StorePackageFeatures] !== undefined
           ? !!editingPackage.features[tabId as keyof StorePackageFeatures]
           : true;
@@ -530,6 +543,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
           reports: isTabEnabled('reports'),
           tax_report: isTabEnabled('tax_report'),
           summary: isTabEnabled('summary'),
+          attendance: isTabEnabled('attendance'),
           financialReports: isTabEnabled('reports'),
           taxReport: isTabEnabled('tax_report'),
         }
@@ -847,6 +861,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                     reports: true, 
                     tax_report: true, 
                     summary: true,
+                    attendance: true,
                     financialReports: true,
                     taxReport: true,
                     invoiceHistory: 'all'
@@ -899,6 +914,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                             reports: true, 
                             tax_report: true, 
                             summary: true,
+                            attendance: true,
                             invoiceHistory: 'all', 
                             financialReports: true, 
                             taxReport: true 
@@ -957,6 +973,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                             const isAllowed = !!(pkg.features?.[tab.id as keyof StorePackageFeatures] ?? (
                               tab.id === 'reports' ? pkg.features?.financialReports :
                               tab.id === 'tax_report' ? (pkg.features?.taxReport || pkg.features?.tax_report) :
+                              tab.id === 'attendance' ? (pkg.features?.attendance !== undefined ? pkg.features?.attendance : (pkg.id !== 'basic')) :
                               true
                             ));
                             return (
@@ -1098,6 +1115,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                               reports: true,
                               tax_report: true,
                               summary: true,
+                              attendance: true,
                               financialReports: true,
                               taxReport: true
                             }
@@ -1121,6 +1139,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                               reports: false,
                               tax_report: false,
                               summary: false,
+                              attendance: false,
                               financialReports: false,
                               taxReport: false
                             }
@@ -1141,6 +1160,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                       const isSelected = !!(editingPackage.features?.[tab.id as keyof StorePackageFeatures] ?? (
                         tab.id === 'reports' ? editingPackage.features?.financialReports :
                         tab.id === 'tax_report' ? (editingPackage.features?.taxReport || editingPackage.features?.tax_report) :
+                        tab.id === 'attendance' ? (editingPackage.features?.attendance !== undefined ? editingPackage.features?.attendance : (editingPackage.id !== 'basic')) :
                         true
                       ));
                       const Icon = tab.icon;
@@ -1157,6 +1177,9 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                             if (tab.id === 'tax_report') {
                               newFeatures.taxReport = !isSelected;
                               newFeatures.tax_report = !isSelected;
+                            }
+                            if (tab.id === 'attendance') {
+                              newFeatures.attendance = !isSelected;
                             }
                             setEditingPackage({
                               ...editingPackage,
