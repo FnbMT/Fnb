@@ -12,10 +12,8 @@ on:
 
 jobs:
   build_ios:
-    # GitHub's macOS 26 runner uses Apple's current Xcode 26.x toolchain.
-    # Apple requires Xcode 26+ with the iOS 26 SDK for App Store Connect uploads
-    # since April 28, 2026.
-    runs-on: macos-26
+    # GitHub's macOS 14 runner uses Apple Silicon with the latest Xcode toolchain.
+    runs-on: macos-14
 
     steps:
       - name: Checkout repository
@@ -56,7 +54,7 @@ jobs:
           npx cap sync ios
 
           cd ios/App
-          pod install --repo-update
+          pod install || pod install --repo-update
 
       - name: Verify iOS App Icon
         run: |
@@ -175,24 +173,24 @@ jobs:
           </plist>
           EOF
 
-          /usr/libexec/PlistBuddy \
-            -c "Add :ITSAppUsesNonExemptEncryption bool false" \
-            App/Info.plist || true
-
           BUILD_NUM=$(date "+%Y%m%d%H%M")
-          agvtool new-version -all "$BUILD_NUM"
 
           # Determine marketing version: from workflow input, package.json, or fallback to 1.0.3
           APP_VERSION="${{ inputs.version }}"
           if [ -z "$APP_VERSION" ]; then
             APP_VERSION=$(node -p "require('../../package.json').version" 2>/dev/null || echo "1.0.3")
           fi
-          if [ "$APP_VERSION" = "0.0.0" ] || [ -z "$APP_VERSION" ] || [ "$APP_VERSION" = "1.0.2" ]; then
+          if [ "$APP_VERSION" = "0.0.0" ] || [ -z "$APP_VERSION" ]; then
             APP_VERSION="1.0.3"
           fi
 
           echo "Setting Marketing Version to: $APP_VERSION (Build: $BUILD_NUM)"
-          agvtool new-marketing-version "$APP_VERSION"
+          agvtool new-version -all "$BUILD_NUM" || true
+          agvtool new-marketing-version "$APP_VERSION" || true
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" App/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" App/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" App/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" App/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" App/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" App/Info.plist || true
 
           if [ -f "App.xcworkspace/contents.xcworkspacedata" ]; then
             echo "Resolving Swift Package dependencies..."
@@ -213,7 +211,9 @@ jobs:
               CODE_SIGN_STYLE=Manual \
               CODE_SIGN_IDENTITY="Apple Distribution" \
               PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
-              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}"
+              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}" \
+              MARKETING_VERSION="${APP_VERSION}" \
+              CURRENT_PROJECT_VERSION="${BUILD_NUM}"
           else
             echo "Archiving project..."
             xcodebuild \
@@ -227,7 +227,9 @@ jobs:
               CODE_SIGN_STYLE=Manual \
               CODE_SIGN_IDENTITY="Apple Distribution" \
               PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
-              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}"
+              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}" \
+              MARKETING_VERSION="${APP_VERSION}" \
+              CURRENT_PROJECT_VERSION="${BUILD_NUM}"
           fi
 
           echo "Exporting IPA..."
@@ -256,18 +258,23 @@ jobs:
         run: |
           set -e
 
+          if [ -z "$API_KEY_ID" ] || [ -z "$API_ISSUER_ID" ] || [ -z "$API_PRIVATE_KEY" ]; then
+            echo "::error::Thiếu thông tin secrets: APPSTORE_API_KEY_ID, APPSTORE_ISSUER_ID, hoặc APPSTORE_API_PRIVATE_KEY trong GitHub repository Secrets."
+            exit 1
+          fi
+
           mkdir -p "$HOME/.appstoreconnect/private_keys"
-          printf '%s' "$API_PRIVATE_KEY" \
-            > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
+          printf '%s\n' "$API_PRIVATE_KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
 
           IPA_PATH=$(find ios/App/output -name "*.ipa" -print -quit)
 
           if [ -z "$IPA_PATH" ]; then
-            echo "ERROR: IPA file not found."
+            echo "::error::Không tìm thấy file .ipa trong thư mục ios/App/output."
             exit 1
           fi
 
-          echo "Uploading: $IPA_PATH"
+          echo "Bắt đầu tải lên TestFlight: $IPA_PATH"
 
           xcrun altool \
             --upload-app \

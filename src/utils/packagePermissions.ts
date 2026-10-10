@@ -99,11 +99,12 @@ export const checkStoreTabPermission = (
 
   const store = currentUser?.store;
   const packageId = store?.subscription?.packageId || 'trial';
+  const list = Array.isArray(packagesList) ? packagesList : [];
   
   // Locate package
-  let currentPkg = packagesList.find(p => p.id === packageId);
+  let currentPkg = list.find(p => p?.id === packageId);
   if (!currentPkg && (packageId === 'trial' || store?.subscription?.status === 'trial')) {
-    currentPkg = packagesList.find(p => p.id === 'trial');
+    currentPkg = list.find(p => p?.id === 'trial');
   }
 
   return isTabAllowedInPackage(tabId, currentPkg);

@@ -4222,7 +4222,7 @@ export default function App() {
           </div>
         </div>
       )}
-      {showUpgradeModal && <SubscriptionModal store={currentUser.store} onClose={() => setShowUpgradeModal(false)} />}
+      {showUpgradeModal && <SubscriptionModal store={currentUser?.store} onClose={() => setShowUpgradeModal(false)} />}
       {selectedTable && (
         <MenuOrdering 
           selectedTable={selectedTable} 
