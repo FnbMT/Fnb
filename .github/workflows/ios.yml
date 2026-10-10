@@ -34,7 +34,7 @@ jobs:
       - name: Install Dependencies
         run: |
           node -v
-          npm ci
+          npm ci || npm install
 
       - name: Generate Mobile Assets
         run: |
