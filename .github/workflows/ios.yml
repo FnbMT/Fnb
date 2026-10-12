@@ -247,47 +247,8 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
 
           # Cấu hình Code Signing CHỈ cho App target trong project.pbxproj
-          # Tuyệt đối không truyền PROVISIONING_PROFILE_SPECIFIER trên dòng lệnh xcodebuild vì sẽ ghi đè lên Pods-App gây lỗi code 65
           echo "Áp dụng cấu hình Code Signing vào App.xcodeproj/project.pbxproj..."
-          python3 -c "
-import re
-pbxproj = 'App.xcodeproj/project.pbxproj'
-with open(pbxproj, 'r') as f:
-    content = f.read()
-
-team_id = '${DEVELOPMENT_TEAM}'
-profile_name = '${PROFILE_NAME}'
-bundle_id = '${BUNDLE_ID}'
-
-# 1. Cập nhật App target Release (ID: 504EC3181FED79650016851F)
-target_pattern = r'(504EC3181FED79650016851F /\* Release \*/ = \{[\s\S]*?buildSettings = \{)([\s\S]*?)(\};\s*name = Release;)'
-def repl_target(m):
-    h, s, f = m.group(1), m.group(2), m.group(3)
-    s = re.sub(r'CODE_SIGN_STYLE\s*=\s*[^;]+;\n?', '', s)
-    s = re.sub(r'DEVELOPMENT_TEAM\s*=\s*[^;]+;\n?', '', s)
-    s = re.sub(r'PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;\n?', '', s)
-    s = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*[^;]+;\n?', '', s)
-    s = re.sub(r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*[^;]+;\n?', '', s)
-    new_s = f'\n\t\t\t\tCODE_SIGN_IDENTITY = \"Apple Distribution\";\n\t\t\t\tCODE_SIGN_STYLE = Manual;\n\t\t\t\tDEVELOPMENT_TEAM = {team_id};\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = {bundle_id};\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = \"{profile_name}\";' + s
-    return h + new_s + f
-
-content = re.sub(target_pattern, repl_target, content)
-
-# 2. Cập nhật Project-level Release (ID: 504EC3151FED79650016851F)
-proj_pattern = r'(504EC3151FED79650016851F /\* Release \*/ = \{[\s\S]*?buildSettings = \{)([\s\S]*?)(\};\s*name = Release;)'
-def repl_proj(m):
-    h, s, f = m.group(1), m.group(2), m.group(3)
-    s = re.sub(r'DEVELOPMENT_TEAM\s*=\s*[^;]+;\n?', '', s)
-    s = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*[^;]+;\n?', '', s)
-    new_s = f'\n\t\t\t\tCODE_SIGN_IDENTITY = \"Apple Distribution\";\n\t\t\t\tDEVELOPMENT_TEAM = {team_id};' + s
-    return h + new_s + f
-
-content = re.sub(proj_pattern, repl_proj, content)
-
-with open(pbxproj, 'w') as f:
-    f.write(content)
-print('Đã cấu hình Signing cho App target thành công trong project.pbxproj!')
-"
+          python3 configure-signing.py
 
           if [ -f "App.xcworkspace/contents.xcworkspacedata" ]; then
             echo "Resolving Swift Package dependencies..."
