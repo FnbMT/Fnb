@@ -24,18 +24,28 @@ jobs:
           echo "Danh sách các phiên bản Xcode có sẵn trên runner:"
           ls -d /Applications/Xcode*.app || true
 
-          # Tự động chọn bản Xcode 16.x mới nhất có sẵn
-          for XCODE_PATH in /Applications/Xcode_16.2.app /Applications/Xcode_16.1.app /Applications/Xcode_16.0.app /Applications/Xcode_16.app; do
+          # Ưu tiên Xcode 16.1 / 16.0 (các bản có sẵn iOS simulator runtime trên macos-15)
+          # Fallback sang Xcode 16.2 / các phiên bản Xcode 16 khác nếu không có
+          SELECTED_XCODE=""
+          for XCODE_PATH in /Applications/Xcode_16.1.app /Applications/Xcode_16.0.app /Applications/Xcode_16.2.app /Applications/Xcode_16.app; do
             if [ -d "$XCODE_PATH" ]; then
-              echo "Kích hoạt Xcode tại: $XCODE_PATH"
-              sudo xcode-select -s "$XCODE_PATH"
+              SELECTED_XCODE="$XCODE_PATH"
               break
             fi
           done
 
+          if [ -n "$SELECTED_XCODE" ]; then
+            echo "Kích hoạt Xcode tại: $SELECTED_XCODE"
+            sudo xcode-select -s "$SELECTED_XCODE"
+          fi
+
           echo "Phiên bản Xcode đang kích hoạt:"
           xcodebuild -version
           sw_vers
+
+          # Kích hoạt core components và kiểm tra runtime có sẵn
+          sudo xcodebuild -runFirstLaunch || true
+          xcrun simctl list runtimes || true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -46,7 +56,8 @@ jobs:
       - name: Install Dependencies
         run: |
           node -v
-          npm ci || npm install
+          # Sử dụng nghiêm ngặt npm ci từ package-lock.json để bảo đảm 100% nhất quán phiên bản
+          npm ci
 
       - name: Check Mobile Assets
         run: |
@@ -71,7 +82,13 @@ jobs:
           npx cap sync ios
 
           cd ios/App
-          pod install || pod install --repo-update
+          if [ -f "Podfile.lock" ]; then
+            echo "Đã tìm thấy Podfile.lock, tiến hành cài đặt cố định theo lockfile..."
+            pod install || pod install --repo-update
+          else
+            echo "Chưa có Podfile.lock trên repo, tiến hành cài đặt và sinh Podfile.lock..."
+            pod install || pod install --repo-update
+          fi
 
       - name: Verify iOS App Icon
         run: |
@@ -263,6 +280,7 @@ jobs:
               -workspace App.xcworkspace \
               -scheme App \
               -configuration Release \
+              -destination 'generic/platform=iOS' \
               -archivePath App.xcarchive \
               clean archive \
               -skipPackagePluginValidation \
@@ -288,6 +306,7 @@ jobs:
               -project App.xcodeproj \
               -scheme App \
               -configuration Release \
+              -destination 'generic/platform=iOS' \
               -archivePath App.xcarchive \
               clean archive \
               -skipPackagePluginValidation \
@@ -327,12 +346,14 @@ jobs:
 
           ls -lah output
 
-      - name: Upload IPA artifact
+      - name: Upload IPA and Lockfile artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ios-app-release
-          path: ios/App/output/*.ipa
-          if-no-files-found: error
+          path: |
+            ios/App/output/*.ipa
+            ios/App/Podfile.lock
+          if-no-files-found: warn
 
       - name: Upload app to App Store Connect / TestFlight
         env:

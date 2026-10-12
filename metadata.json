@@ -1,6 +1,6 @@
 {
-  "name": "Fnb Master - POS",
-  "description": "Hệ thống quản lý bán hàng và gọi món F&B chuyên nghiệp",
+  "name": "Remix Fnb Master - POS",
+  "description": "Hệ thống quản lý nhà hàng chuyên nghiệp",
   "requestFramePermissions": [
     "camera",
     "geolocation"
