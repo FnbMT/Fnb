@@ -18,7 +18,7 @@ export const PACKAGE_TABS = [
   { 
     id: 'inventory', 
     label: 'Kho hàng', 
-    icon: PackageIcon, 
+    icon: PackageIcon,
     description: 'Quản lý nguyên liệu, định lượng món, nhập/xuất kho và kiểm kê' 
   },
   { 

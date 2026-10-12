@@ -12,7 +12,7 @@ on:
 
 jobs:
   build_ios:
-    # GitHub's macOS 14 runner uses Apple Silicon with the latest Xcode toolchain.
+    # GitHub's macOS 14 runner uses Apple Silicon with modern Xcode
     runs-on: macos-14
 
     steps:
@@ -36,9 +36,14 @@ jobs:
           node -v
           npm ci || npm install
 
-      - name: Generate Mobile Assets
+      - name: Check Mobile Assets
         run: |
-          npx @capacitor/assets generate
+          if [ -d "assets" ]; then
+            echo "Generating assets from assets/ directory..."
+            npx @capacitor/assets generate || true
+          else
+            echo "No root assets/ directory found. Using existing xcassets in ios/App."
+          fi
 
       - name: Build Web App
         run: npm run build
@@ -75,12 +80,6 @@ jobs:
             exit 1
           fi
 
-          echo "Checking image files:"
-          find "$ICON_DIR" -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" \) -print0 |
-          while IFS= read -r -d '' file; do
-            file "$file"
-          done
-
       - name: Install Apple Certificate and Provisioning Profile
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
@@ -90,43 +89,62 @@ jobs:
         run: |
           set -e
 
+          if [ -z "$BUILD_CERTIFICATE_BASE64" ]; then
+            echo "::error::Thiếu secret IOS_CERTIFICATE_P12_BASE64 trong GitHub repository secrets!"
+            exit 1
+          fi
+
+          if [ -z "$BUILD_PROVISION_PROFILE_BASE64" ]; then
+            echo "::error::Thiếu secret IOS_PROVISION_PROFILE_BASE64 trong GitHub repository secrets!"
+            exit 1
+          fi
+
           CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
           PP_PATH="$RUNNER_TEMP/build_pp.mobileprovision"
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
 
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
-          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode > "$PP_PATH"
+          # Sử dụng mật khẩu tạm cho keychain runner (không phụ thuộc vào secret KEYCHAIN_PASSWORD)
+          KEYCHAIN_PWD="${KEYCHAIN_PASSWORD:-RunnerSigningKeychainPass123!}"
 
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Làm sạch khoảng trắng/xuống dòng do copy-paste trước khi decode base64
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d '\r\n ' | base64 --decode > "$CERTIFICATE_PATH" 2>/dev/null || \
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d '\r\n ' | base64 -D > "$CERTIFICATE_PATH"
+
+          printf '%s' "$BUILD_PROVISION_PROFILE_BASE64" | tr -d '\r\n ' | base64 --decode > "$PP_PATH" 2>/dev/null || \
+          printf '%s' "$BUILD_PROVISION_PROFILE_BASE64" | tr -d '\r\n ' | base64 -D > "$PP_PATH"
+
+          # Chuẩn hóa mật khẩu P12 (loại bỏ khoảng trắng / ký tự xuống dòng thừa)
+          CLEAN_P12_PWD=$(printf '%s' "$P12_PASSWORD" | tr -d '\r\n')
+
+          # Khởi tạo Keychain tạm
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
-          # Thử import trực tiếp, nếu lỗi do chuẩn mã hóa PKCS12 trên macOS runner thì tự động chuyển đổi qua OpenSSL
-          if ! security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH" 2>/dev/null; then
-            echo "Direct security import failed, attempting PKCS12 compatibility conversion with OpenSSL..."
-            openssl pkcs12 -in "$CERTIFICATE_PATH" -nodes -passin env:P12_PASSWORD -out "$RUNNER_TEMP/cert_bundle.pem"
-            openssl pkcs12 -export -in "$RUNNER_TEMP/cert_bundle.pem" -passout env:P12_PASSWORD -out "$RUNNER_TEMP/cert_legacy.p12" -legacy
-            security import "$RUNNER_TEMP/cert_legacy.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-            rm -f "$RUNNER_TEMP/cert_bundle.pem" "$RUNNER_TEMP/cert_legacy.p12"
+          # Import chứng chỉ vào keychain
+          echo "Đang import chứng chỉ .p12 vào Keychain..."
+          if ! security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$CLEAN_P12_PWD" -T /usr/bin/codesign -T /usr/bin/security -A 2>&1; then
+            echo "Lần import đầu tiên chưa thành công, thử tương thích định dạng..."
+            if openssl pkcs12 -in "$CERTIFICATE_PATH" -nodes -passin pass:"$CLEAN_P12_PWD" -out "$RUNNER_TEMP/cert_bundle.pem" 2>/dev/null; then
+              openssl pkcs12 -export -in "$RUNNER_TEMP/cert_bundle.pem" -passout pass:"$CLEAN_P12_PWD" -out "$RUNNER_TEMP/cert_clean.p12"
+              security import "$RUNNER_TEMP/cert_clean.p12" -k "$KEYCHAIN_PATH" -P "$CLEAN_P12_PWD" -T /usr/bin/codesign -T /usr/bin/security -A
+              rm -f "$RUNNER_TEMP/cert_bundle.pem" "$RUNNER_TEMP/cert_clean.p12"
+            else
+              echo "::error::Mật khẩu P12 không khớp hoặc file p12 bị hỏng khi decode. Vui lòng kiểm tra IOS_CERTIFICATE_PASSWORD."
+              exit 1
+            fi
           fi
 
+          # Phân quyền cho codesign truy cập private key mà không hỏi popup UI
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
             -s \
-            -k "$KEYCHAIN_PASSWORD" \
-            "$KEYCHAIN_PATH"
+            -k "$KEYCHAIN_PWD" \
+            "$KEYCHAIN_PATH" || true
 
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/"
-
-      - name: Extract Profile UUID and Name
-        id: profile_info
-        run: |
-          set -e
-
-          PP_PATH="$RUNNER_TEMP/build_pp.mobileprovision"
+          # Trích xuất thông tin Provisioning Profile
           security cms -D -i "$PP_PATH" > "$RUNNER_TEMP/profile.plist"
 
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" "$RUNNER_TEMP/profile.plist")
@@ -140,10 +158,17 @@ jobs:
           echo "TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
           echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
 
+          echo "----------------------------------------"
           echo "Provisioning profile: $PROFILE_NAME"
           echo "Team ID: $TEAM_ID"
           echo "Bundle ID: $BUNDLE_ID"
           echo "Profile UUID: $PROFILE_UUID"
+          echo "----------------------------------------"
+
+          # QUAN TRỌNG: Xcode tìm profile theo tên <UUID>.mobileprovision trong thư mục này
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
+          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/build_pp.mobileprovision"
 
       - name: Build and Archive iOS App
         working-directory: ios/App
@@ -169,15 +194,19 @@ jobs:
                   <key>${BUNDLE_ID}</key>
                   <string>${PROFILE_NAME}</string>
               </dict>
+              <key>signingCertificate</key>
+              <string>Apple Distribution</string>
               <key>signingStyle</key>
               <string>manual</string>
+              <key>manageAppVersionAndBuildNumber</key>
+              <false/>
           </dict>
           </plist>
           EOF
 
           BUILD_NUM=$(date "+%Y%m%d%H%M")
 
-          # Determine marketing version: from workflow input, package.json, or fallback to 1.0.3
+          # Xác định version: ưu tiên input workflow -> package.json -> fallback 1.0.3
           APP_VERSION="${{ inputs.version }}"
           if [ -z "$APP_VERSION" ]; then
             APP_VERSION=$(node -p "require('../../package.json').version" 2>/dev/null || echo "1.0.3")
@@ -265,9 +294,17 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$HOME/.appstoreconnect/private_keys"
-          printf '%s\n' "$API_PRIVATE_KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
-          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
+          mkdir -p "$HOME/.appstoreconnect/private_keys" "$HOME/.private_keys"
+
+          # Hỗ trợ cả private key raw hoặc base64
+          if echo "$API_PRIVATE_KEY" | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s\n' "$API_PRIVATE_KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
+          else
+            echo "$API_PRIVATE_KEY" | base64 --decode > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8" 2>/dev/null || printf '%s\n' "$API_PRIVATE_KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
+          fi
+
+          cp "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8" "$HOME/.private_keys/"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8" "$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8"
 
           IPA_PATH=$(find ios/App/output -name "*.ipa" -print -quit)
 
@@ -283,4 +320,5 @@ jobs:
             -f "$IPA_PATH" \
             -t ios \
             --apiKey "$API_KEY_ID" \
-            --apiIssuer "$API_ISSUER_ID"
+            --apiIssuer "$API_ISSUER_ID" \
+            --show-progress
