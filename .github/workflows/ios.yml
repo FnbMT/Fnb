@@ -101,12 +101,14 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          security import "$CERTIFICATE_PATH" \
-            -P "$P12_PASSWORD" \
-            -A \
-            -t cert \
-            -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
+          # Thử import trực tiếp, nếu lỗi do chuẩn mã hóa PKCS12 trên macOS runner thì tự động chuyển đổi qua OpenSSL
+          if ! security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH" 2>/dev/null; then
+            echo "Direct security import failed, attempting PKCS12 compatibility conversion with OpenSSL..."
+            openssl pkcs12 -in "$CERTIFICATE_PATH" -nodes -passin env:P12_PASSWORD -out "$RUNNER_TEMP/cert_bundle.pem"
+            openssl pkcs12 -export -in "$RUNNER_TEMP/cert_bundle.pem" -passout env:P12_PASSWORD -out "$RUNNER_TEMP/cert_legacy.p12" -legacy
+            security import "$RUNNER_TEMP/cert_legacy.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            rm -f "$RUNNER_TEMP/cert_bundle.pem" "$RUNNER_TEMP/cert_legacy.p12"
+          fi
 
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \

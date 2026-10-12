@@ -60,17 +60,31 @@ app.post('/api/sepay/webhook', async (req, res) => {
 
     const content = (data.content || '').toUpperCase();
     
-    // Check if the content includes GIAHAN
+    // Clean and normalize transfer content
+    // VietinBank requires SEVQR prefix: e.g. "SEVQR STORECODE GIAHAN PRO 12"
     if (content.includes('GIAHAN')) {
-      const match = content.match(/([A-Z0-9_-]+)\s+GIAHAN(?:\s+([A-Z0-9_-]+)\s+([0-9]+))?/i);
+      const match = content.match(/(?:SEVQR\s+)?([A-Z0-9_-]+)\s+GIAHAN(?:\s+([A-Z0-9_-]+)\s+([0-9]+))?/i);
       if (match && match[1]) {
-        const storeCode = match[1].toLowerCase();
+        let rawStoreCode = match[1].trim();
+        if (rawStoreCode.toUpperCase() === 'SEVQR' && match[2]) {
+          rawStoreCode = match[2].trim();
+        }
+        const storeCode = rawStoreCode.toLowerCase();
         console.log(`Found store code in transfer content: ${storeCode}`);
 
         // Search for store by code in Firestore
         const storesRef = collection(db, 'stores');
-        const q = query(storesRef, where('code', '==', storeCode));
-        const snapshot = await getDocs(q);
+        let snapshot = await getDocs(query(storesRef, where('code', '==', storeCode)));
+        if (snapshot.empty) {
+          snapshot = await getDocs(query(storesRef, where('code', '==', storeCode.toUpperCase())));
+        }
+        if (snapshot.empty) {
+          const allStores = await getDocs(storesRef);
+          const found = allStores.docs.find(d => (d.data().code || '').toLowerCase() === storeCode);
+          if (found) {
+            snapshot = { empty: false, docs: [found] } as any;
+          }
+        }
 
         if (!snapshot.empty) {
           const storeDoc = snapshot.docs[0];

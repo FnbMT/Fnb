@@ -4908,6 +4908,18 @@ const Header = ({
                         );
                       })}
                     </div>
+                    <div className="mt-3 pt-3 border-t border-black/10 dark:border-white/10 flex flex-col gap-2">
+                      <button
+                        onClick={() => {
+                          setShowPackageInfo(false);
+                          onShowUpgrade();
+                        }}
+                        className="w-full py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Shield className="w-3.5 h-3.5" />
+                        <span>Nâng cấp / Gia hạn gói</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
