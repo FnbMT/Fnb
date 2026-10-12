@@ -223,14 +223,19 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" App/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" App/Info.plist || true
           /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" App/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" App/Info.plist || true
 
+          # Kiểm tra signing identities khả dụng trong Keychain
+          echo "Kiểm tra Signing Identities trong Keychain:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+
           if [ -f "App.xcworkspace/contents.xcworkspacedata" ]; then
             echo "Resolving Swift Package dependencies..."
             xcodebuild \
               -resolvePackageDependencies \
               -workspace App.xcworkspace \
-              -scheme App
+              -scheme App || true
 
             echo "Archiving workspace..."
+            set +e
             xcodebuild \
               -workspace App.xcworkspace \
               -scheme App \
@@ -244,9 +249,20 @@ jobs:
               PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
               DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}" \
               MARKETING_VERSION="${APP_VERSION}" \
-              CURRENT_PROJECT_VERSION="${BUILD_NUM}"
+              CURRENT_PROJECT_VERSION="${BUILD_NUM}" \
+              2>&1 | tee xcodebuild_archive.log
+            ARCHIVE_STATUS=${PIPESTATUS[0]}
+            set -e
+
+            if [ $ARCHIVE_STATUS -ne 0 ]; then
+              echo "::error::xcodebuild archive thất bại với mã lỗi $ARCHIVE_STATUS!"
+              echo "=== 100 DÒNG LỖI CUỐI TỪ XCODEBUILD LOG ==="
+              tail -n 100 xcodebuild_archive.log
+              exit $ARCHIVE_STATUS
+            fi
           else
             echo "Archiving project..."
+            set +e
             xcodebuild \
               -project App.xcodeproj \
               -scheme App \
@@ -260,17 +276,37 @@ jobs:
               PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
               DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}" \
               MARKETING_VERSION="${APP_VERSION}" \
-              CURRENT_PROJECT_VERSION="${BUILD_NUM}"
+              CURRENT_PROJECT_VERSION="${BUILD_NUM}" \
+              2>&1 | tee xcodebuild_archive.log
+            ARCHIVE_STATUS=${PIPESTATUS[0]}
+            set -e
+
+            if [ $ARCHIVE_STATUS -ne 0 ]; then
+              echo "::error::xcodebuild archive thất bại với mã lỗi $ARCHIVE_STATUS!"
+              echo "=== 100 DÒNG LỖI CUỐI TỪ XCODEBUILD LOG ==="
+              tail -n 100 xcodebuild_archive.log
+              exit $ARCHIVE_STATUS
+            fi
           fi
 
           echo "Exporting IPA..."
           rm -rf output
 
+          set +e
           xcodebuild \
             -exportArchive \
             -archivePath App.xcarchive \
             -exportOptionsPlist exportOptions.plist \
-            -exportPath output
+            -exportPath output \
+            2>&1 | tee xcodebuild_export.log
+          EXPORT_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ $EXPORT_STATUS -ne 0 ]; then
+            echo "::error::xcodebuild export thất bại với mã lỗi $EXPORT_STATUS!"
+            tail -n 80 xcodebuild_export.log
+            exit $EXPORT_STATUS
+          fi
 
           ls -lah output
 
