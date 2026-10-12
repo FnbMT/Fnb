@@ -12,18 +12,30 @@ on:
 
 jobs:
   build_ios:
-    # GitHub's macOS 14 runner uses Apple Silicon with modern Xcode
-    runs-on: macos-14
+    # Sử dụng macOS 15 runner (mặc định Xcode 16+, phù hợp với Capacitor 8)
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check macOS and Xcode
+      - name: Select and Verify Xcode 16
         run: |
-          sw_vers
+          echo "Danh sách các phiên bản Xcode có sẵn trên runner:"
+          ls -d /Applications/Xcode*.app || true
+
+          # Tự động chọn bản Xcode 16.x mới nhất có sẵn
+          for XCODE_PATH in /Applications/Xcode_16.2.app /Applications/Xcode_16.1.app /Applications/Xcode_16.0.app /Applications/Xcode_16.app; do
+            if [ -d "$XCODE_PATH" ]; then
+              echo "Kích hoạt Xcode tại: $XCODE_PATH"
+              sudo xcode-select -s "$XCODE_PATH"
+              break
+            fi
+          done
+
+          echo "Phiên bản Xcode đang kích hoạt:"
           xcodebuild -version
-          xcodebuild -showsdks
+          sw_vers
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -157,12 +169,15 @@ jobs:
           echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
           echo "TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
           echo "BUNDLE_ID=$BUNDLE_ID" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PWD=$KEYCHAIN_PWD" >> "$GITHUB_ENV"
 
           echo "----------------------------------------"
           echo "Provisioning profile: $PROFILE_NAME"
           echo "Team ID: $TEAM_ID"
           echo "Bundle ID: $BUNDLE_ID"
           echo "Profile UUID: $PROFILE_UUID"
+          echo "Keychain Path: $KEYCHAIN_PATH"
           echo "----------------------------------------"
 
           # QUAN TRỌNG: Xcode tìm profile theo tên <UUID>.mobileprovision trong thư mục này
@@ -223,9 +238,56 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" App/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" App/Info.plist || true
           /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" App/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" App/Info.plist || true
 
-          # Kiểm tra signing identities khả dụng trong Keychain
+          # Đảm bảo Keychain tạm mở khóa và nằm trong search list
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH" 2>/dev/null || true
+          security default-keychain -s "$KEYCHAIN_PATH" 2>/dev/null || true
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user 2>/dev/null | tr -d '"') 2>/dev/null || true
+
           echo "Kiểm tra Signing Identities trong Keychain:"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+
+          # Cấu hình Code Signing CHỈ cho App target trong project.pbxproj
+          # Tuyệt đối không truyền PROVISIONING_PROFILE_SPECIFIER trên dòng lệnh xcodebuild vì sẽ ghi đè lên Pods-App gây lỗi code 65
+          echo "Áp dụng cấu hình Code Signing vào App.xcodeproj/project.pbxproj..."
+          python3 -c "
+import re
+pbxproj = 'App.xcodeproj/project.pbxproj'
+with open(pbxproj, 'r') as f:
+    content = f.read()
+
+team_id = '${DEVELOPMENT_TEAM}'
+profile_name = '${PROFILE_NAME}'
+bundle_id = '${BUNDLE_ID}'
+
+# 1. Cập nhật App target Release (ID: 504EC3181FED79650016851F)
+target_pattern = r'(504EC3181FED79650016851F /\* Release \*/ = \{[\s\S]*?buildSettings = \{)([\s\S]*?)(\};\s*name = Release;)'
+def repl_target(m):
+    h, s, f = m.group(1), m.group(2), m.group(3)
+    s = re.sub(r'CODE_SIGN_STYLE\s*=\s*[^;]+;\n?', '', s)
+    s = re.sub(r'DEVELOPMENT_TEAM\s*=\s*[^;]+;\n?', '', s)
+    s = re.sub(r'PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;\n?', '', s)
+    s = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*[^;]+;\n?', '', s)
+    s = re.sub(r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*[^;]+;\n?', '', s)
+    new_s = f'\n\t\t\t\tCODE_SIGN_IDENTITY = \"Apple Distribution\";\n\t\t\t\tCODE_SIGN_STYLE = Manual;\n\t\t\t\tDEVELOPMENT_TEAM = {team_id};\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = {bundle_id};\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = \"{profile_name}\";' + s
+    return h + new_s + f
+
+content = re.sub(target_pattern, repl_target, content)
+
+# 2. Cập nhật Project-level Release (ID: 504EC3151FED79650016851F)
+proj_pattern = r'(504EC3151FED79650016851F /\* Release \*/ = \{[\s\S]*?buildSettings = \{)([\s\S]*?)(\};\s*name = Release;)'
+def repl_proj(m):
+    h, s, f = m.group(1), m.group(2), m.group(3)
+    s = re.sub(r'DEVELOPMENT_TEAM\s*=\s*[^;]+;\n?', '', s)
+    s = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*[^;]+;\n?', '', s)
+    new_s = f'\n\t\t\t\tCODE_SIGN_IDENTITY = \"Apple Distribution\";\n\t\t\t\tDEVELOPMENT_TEAM = {team_id};' + s
+    return h + new_s + f
+
+content = re.sub(proj_pattern, repl_proj, content)
+
+with open(pbxproj, 'w') as f:
+    f.write(content)
+print('Đã cấu hình Signing cho App target thành công trong project.pbxproj!')
+"
 
           if [ -f "App.xcworkspace/contents.xcworkspacedata" ]; then
             echo "Resolving Swift Package dependencies..."
@@ -244,10 +306,6 @@ jobs:
               clean archive \
               -skipPackagePluginValidation \
               ENABLE_USER_SCRIPT_SANDBOXING=NO \
-              CODE_SIGN_STYLE=Manual \
-              CODE_SIGN_IDENTITY="Apple Distribution" \
-              PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
-              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}" \
               MARKETING_VERSION="${APP_VERSION}" \
               CURRENT_PROJECT_VERSION="${BUILD_NUM}" \
               2>&1 | tee xcodebuild_archive.log
@@ -256,10 +314,10 @@ jobs:
 
             if [ $ARCHIVE_STATUS -ne 0 ]; then
               echo "::error::xcodebuild archive thất bại với mã lỗi $ARCHIVE_STATUS!"
-              echo "=== CÁC LỖI CỤ THỂ ĐƯỢC TÌM THẤY TRONG LOG ==="
-              grep -E "error:|fatal error:|\(3 failures\)|\(failures\)|failed with a nonzero exit code" xcodebuild_archive.log -B 2 -A 4 || true
-              echo "=== 120 DÒNG CUỐI CỦA LOG ==="
-              tail -n 120 xcodebuild_archive.log
+              echo "=== CÁC LỖI CỤ THỂ TRONG LOG ==="
+              grep -E "error:|fatal error:|\(failures\)|failed with a nonzero exit code" xcodebuild_archive.log -B 2 -A 4 || true
+              echo "=== 150 DÒNG CUỐI CỦA LOG ==="
+              tail -n 150 xcodebuild_archive.log
               exit $ARCHIVE_STATUS
             fi
           else
@@ -273,10 +331,6 @@ jobs:
               clean archive \
               -skipPackagePluginValidation \
               ENABLE_USER_SCRIPT_SANDBOXING=NO \
-              CODE_SIGN_STYLE=Manual \
-              CODE_SIGN_IDENTITY="Apple Distribution" \
-              PROVISIONING_PROFILE_SPECIFIER="${PROFILE_NAME}" \
-              DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}" \
               MARKETING_VERSION="${APP_VERSION}" \
               CURRENT_PROJECT_VERSION="${BUILD_NUM}" \
               2>&1 | tee xcodebuild_archive.log
@@ -285,8 +339,8 @@ jobs:
 
             if [ $ARCHIVE_STATUS -ne 0 ]; then
               echo "::error::xcodebuild archive thất bại với mã lỗi $ARCHIVE_STATUS!"
-              echo "=== 100 DÒNG LỖI CUỐI TỪ XCODEBUILD LOG ==="
-              tail -n 100 xcodebuild_archive.log
+              echo "=== 150 DÒNG LỖI CUỐI TỪ XCODEBUILD LOG ==="
+              tail -n 150 xcodebuild_archive.log
               exit $ARCHIVE_STATUS
             fi
           fi
