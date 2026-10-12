@@ -256,8 +256,10 @@ jobs:
 
             if [ $ARCHIVE_STATUS -ne 0 ]; then
               echo "::error::xcodebuild archive thất bại với mã lỗi $ARCHIVE_STATUS!"
-              echo "=== 100 DÒNG LỖI CUỐI TỪ XCODEBUILD LOG ==="
-              tail -n 100 xcodebuild_archive.log
+              echo "=== CÁC LỖI CỤ THỂ ĐƯỢC TÌM THẤY TRONG LOG ==="
+              grep -E "error:|fatal error:|\(3 failures\)|\(failures\)|failed with a nonzero exit code" xcodebuild_archive.log -B 2 -A 4 || true
+              echo "=== 120 DÒNG CUỐI CỦA LOG ==="
+              tail -n 120 xcodebuild_archive.log
               exit $ARCHIVE_STATUS
             fi
           else
