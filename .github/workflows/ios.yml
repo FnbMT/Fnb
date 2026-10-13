@@ -12,27 +12,31 @@ on:
 
 jobs:
   build_ios:
-    # Sử dụng macOS 15 runner (mặc định Xcode 16+, phù hợp với Capacitor 8)
+    # Sử dụng macOS 15 runner với Xcode 26 / iOS 26 SDK phù hợp với Capacitor 8 và quy định của Apple
     runs-on: macos-15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select and Verify Xcode 16
+      - name: Select and Verify Xcode 26 (iOS 26 SDK)
         run: |
           echo "Danh sách các phiên bản Xcode có sẵn trên runner:"
           ls -d /Applications/Xcode*.app || true
 
-          # Ưu tiên Xcode 16.1 / 16.0 (các bản có sẵn iOS simulator runtime trên macos-15)
-          # Fallback sang Xcode 16.2 / các phiên bản Xcode 16 khác nếu không có
+          # Kích hoạt Xcode 26 (bắt buộc theo quy định Apple SDK từ 28/04/2026)
           SELECTED_XCODE=""
-          for XCODE_PATH in /Applications/Xcode_16.1.app /Applications/Xcode_16.0.app /Applications/Xcode_16.2.app /Applications/Xcode_16.app; do
+          for XCODE_PATH in /Applications/Xcode_26*.app /Applications/Xcode_26.app; do
             if [ -d "$XCODE_PATH" ]; then
               SELECTED_XCODE="$XCODE_PATH"
               break
             fi
           done
+
+          # Fallback tự động tìm bản Xcode 26.x hoặc phiên bản mới nhất trên runner
+          if [ -z "$SELECTED_XCODE" ]; then
+            SELECTED_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
+          fi
 
           if [ -n "$SELECTED_XCODE" ]; then
             echo "Kích hoạt Xcode tại: $SELECTED_XCODE"
@@ -43,8 +47,10 @@ jobs:
           xcodebuild -version
           sw_vers
 
-          # Kích hoạt core components và kiểm tra runtime có sẵn
+          # Khởi chạy các thành phần ban đầu của Xcode và tải iOS platform/simulator runtime nếu cần
           sudo xcodebuild -runFirstLaunch || true
+          echo "Kiểm tra và nạp iOS Platform components..."
+          sudo xcodebuild -downloadPlatform iOS || true
           xcrun simctl list runtimes || true
 
       - name: Setup Node.js
