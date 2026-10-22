@@ -1,0 +1,102 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. VÙNG BẢO MẬT TỐI MẬT (Chỉ Server / Admin SDK mới có quyền truy cập)
+    // Chứa salt, hash mật khẩu scrypt và mã hóa AES-256 hai chiều của Quán
+    // Client (Web/iOS/Android) tuyệt đối KHÔNG THỂ đọc hay ghi trực tiếp
+    match /user_secrets/{userId} {
+      allow read, write: if false;
+    }
+
+    // Lịch sử giao dịch SePay chống gian lận & Replay Attack (Chỉ Webhook Server ghi)
+    match /processed_transactions/{txId} {
+      allow read, write: if false;
+    }
+
+    // 2. CÀI ĐẶT HỆ THỐNG VÀ GÓI CƯỚC (Công khai đọc cho applet, cho phép SuperAdmin quản trị cấu hình)
+    match /system/{docId} {
+      allow read, write: if true;
+    }
+
+    match /app_settings/{docId} {
+      allow read, write: if true;
+    }
+
+    match /packages/{packageId} {
+      allow read, write: if true;
+    }
+
+    // 3. THÔNG TIN QUÁN VÀ TÀI KHOẢN NGƯỜI DÙNG
+    match /stores/{storeId} {
+      allow read: if true;
+      allow create: if request.resource.data.code is string;
+      allow update, delete: if true;
+    }
+
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if true;
+    }
+
+    // 4. DỮ LIỆU TỔNG HỢP SIÊU TỐC (Doanh thu ngày / tháng / năm)
+    match /daily_stats/{statId} {
+      allow read, write: if true;
+    }
+
+    // 5. DỮ LIỆU VẬN HÀNH BÁN HÀNG CỦA QUÁN (Thực đơn, Bàn, Hóa đơn, Kho, Thu chi...)
+    // Cho phép ứng dụng đọc/ghi mượt mà phục vụ order, thanh toán, in bill
+    match /menu/{menuId} {
+      allow read, write: if true;
+    }
+
+    match /tables/{tableId} {
+      allow read, write: if true;
+    }
+
+    match /table_groups/{groupId} {
+      allow read, write: if true;
+    }
+
+    match /invoices/{invoiceId} {
+      allow read, write: if true;
+    }
+
+    match /inventory_logs/{logId} {
+      allow read, write: if true;
+    }
+
+    match /inventory_audits/{auditId} {
+      allow read, write: if true;
+    }
+
+    match /stock_card/{cardId} {
+      allow read, write: if true;
+    }
+
+    match /customers/{customerId} {
+      allow read, write: if true;
+    }
+
+    match /cash_transactions/{txId} {
+      allow read, write: if true;
+    }
+
+    match /settings/{settingId} {
+      allow read, write: if true;
+    }
+
+    match /attendance_records/{attId} {
+      allow read, write: if true;
+    }
+
+    match /payroll_records/{payrollId} {
+      allow read, write: if true;
+    }
+
+    match /shifts/{shiftId} {
+      allow read, write: if true;
+    }
+  }
+}
