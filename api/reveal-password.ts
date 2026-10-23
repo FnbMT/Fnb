@@ -1,5 +1,6 @@
-import { adminDb, adminAuth } from './_firebaseAdmin';
+import { adminDb } from './_firebaseAdmin';
 import { decryptAes } from './_crypto';
+import { getAuthenticatedCaller } from './_token';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
@@ -7,36 +8,11 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    // 1. Kiểm tra quyền của người gọi API: CHỈ Superadmin mới được phép truy cập
-    let authHeader = req.headers.authorization || '';
-    if (Array.isArray(authHeader)) authHeader = authHeader[0] || '';
-    let token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : '';
-    if (!token && req.body?.token) {
-      token = req.body.token;
-    }
-
-    let isAuthorizedSuperAdmin = false;
-
-    // Hỗ trợ kiểm tra qua token Firebase hoặc mật khẩu superadmin khẩn cấp
-    if (token) {
-      const expectedSuperPass = process.env.SUPERADMIN_PASSWORD || 'superadmin';
-      if (token === expectedSuperPass || token === 'superadmin' || token.startsWith('dev_token_superadmin')) {
-        isAuthorizedSuperAdmin = true;
-      } else {
-        try {
-          const decoded = await adminAuth.verifyIdToken(token);
-          if (decoded.role === 'superadmin' || decoded.isSuperAdmin === true || decoded.uid === 'superadmin') {
-            isAuthorizedSuperAdmin = true;
-          }
-        } catch (tokenErr) {
-          // Token không hợp lệ
-        }
-      }
-    }
-
-    if (!isAuthorizedSuperAdmin) {
+    // 1. Kiểm tra xác thực nghiêm ngặt bằng Token có chữ ký số (Loại bỏ hoàn toàn backdoor token cứng)
+    const caller = await getAuthenticatedCaller(req);
+    if (!caller || !caller.isSuperAdmin) {
       return res.status(403).json({ 
-        error: 'Từ chối truy cập: Chỉ Quản trị viên tối cao (Super Admin) mới có quyền xem lại mật khẩu quản lý của các quán.' 
+        error: 'Từ chối truy cập: Chỉ Quản trị viên tối cao (Super Admin) đã xác thực mới có quyền thực hiện thao tác này.' 
       });
     }
 
@@ -89,18 +65,15 @@ export default async function handler(req: any, res: any) {
       if (secretDoc && secretDoc.exists && secretDoc.data()?.encryptedPassword) {
         plainPassword = decryptAes(secretDoc.data().encryptedPassword);
       }
-    } catch (secErr) {
-      // Bỏ qua nếu user_secrets chưa có quyền đọc ở dev
-    }
+    } catch (secErr) {}
 
     if (!plainPassword && adminUserData.password) {
-      // Fallback nếu tài khoản cũ chưa di chuyển hoặc môi trường dev
       plainPassword = adminUserData.password;
     }
 
     if (!plainPassword) {
       return res.status(404).json({ 
-        error: 'Mật khẩu của quán này chưa có bản lưu giải mã hoặc đã được đặt lại không thể khôi phục.' 
+        error: 'Mật khẩu của quán này chưa có bản lưu giải mã. Vui lòng sử dụng tính năng Đặt lại mật khẩu.' 
       });
     }
 

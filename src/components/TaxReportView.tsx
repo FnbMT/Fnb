@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx';
 import { format, parseISO, isSameDay, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameYear } from 'date-fns';
 import { db } from '../lib/firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
+import { getVietnamBusinessDate } from '../utils/firestoreDateHelper';
 
 // Bộ nhớ đệm ngoài component để tránh gọi Firestore lại khi rời tab và quay lại TaxReportView
 const taxStatsCache = new Map<string, { stats: DailyStats[], timestamp: number }>();
@@ -109,91 +110,60 @@ export const TaxReportView = ({ invoices, currentUser, onPrint }: {
 
   // Gộp dailyStats với hóa đơn live hôm nay nếu đang xem năm hiện tại để số liệu luôn chính xác thời gian thực
   const mergedDailyStats = useMemo(() => {
-    if (selectedYear !== new Date().getFullYear()) return dailyStats;
-    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const todayStr = getVietnamBusinessDate();
+    const todayYear = parseInt(todayStr.slice(0, 4), 10);
+    if (selectedYear !== todayYear) return dailyStats;
+    
     const todayLiveRevenue = invoices.reduce((sum, inv) => sum + (inv.total || 0), 0);
+    const todayLiveCash = invoices.filter(inv => inv.paymentMethod === 'cash' || !inv.paymentMethod).reduce((sum, inv) => sum + (inv.total || 0), 0);
+    const todayLiveTransfer = invoices.filter(inv => inv.paymentMethod === 'transfer').reduce((sum, inv) => sum + (inv.total || 0), 0);
+    const todayLiveDiscount = invoices.reduce((sum, inv) => sum + (inv.discount || 0), 0);
     
     const map = new Map<string, DailyStats>();
     dailyStats.forEach(s => map.set(s.date, s));
     
-    if (todayLiveRevenue > 0) {
-      const existing = map.get(todayStr);
-      map.set(todayStr, {
-        id: existing?.id || `live_${todayStr}`,
-        storeId: currentUser?.storeId || '',
-        date: todayStr,
-        year: selectedYear,
-        month: todayStr.slice(0, 7),
-        totalRevenue: Math.max(existing?.totalRevenue || 0, todayLiveRevenue),
-        totalCash: existing?.totalCash || 0,
-        totalTransfer: existing?.totalTransfer || 0,
-        invoiceCount: Math.max(existing?.invoiceCount || 0, invoices.length),
-        totalDiscount: existing?.totalDiscount || 0
-      });
-    }
+    // Luôn ghi đè bản ghi hôm nay bằng live state (ngay cả khi invoices.length === 0 sau khi hủy hết đơn)
+    const existing = map.get(todayStr);
+    map.set(todayStr, {
+      id: existing?.id || `live_${todayStr}`,
+      storeId: currentUser?.storeId || '',
+      date: todayStr,
+      year: selectedYear,
+      month: todayStr.slice(0, 7),
+      totalRevenue: todayLiveRevenue,
+      totalCash: todayLiveCash,
+      totalTransfer: todayLiveTransfer,
+      invoiceCount: invoices.length,
+      totalDiscount: todayLiveDiscount
+    });
     return Array.from(map.values());
   }, [dailyStats, invoices, selectedYear, currentUser?.storeId]);
 
-  // Calculate Quarter revenues (ưu tiên từ mergedDailyStats, fallback sang effectiveInvoices)
-  const q1Revenue = useMemo(() => {
-    if (mergedDailyStats.length > 0) {
-      return mergedDailyStats
-        .filter(s => {
-          const m = parseInt(s.date.split('-')[1], 10);
-          return m >= 1 && m <= 3;
-        })
-        .reduce((sum, s) => sum + (s.totalRevenue || 0), 0);
-    }
-    return effectiveInvoices.filter(inv => {
-      const d = new Date(inv.date);
-      return d.getFullYear() === selectedYear && d.getMonth() >= 0 && d.getMonth() <= 2;
-    }).reduce((sum, inv) => sum + inv.total, 0);
-  }, [mergedDailyStats, effectiveInvoices, selectedYear]);
+  // Cờ kiểm tra xem có dữ liệu daily_stats từ DB không (tránh việc chỉ có 1 doc synthetic hôm nay làm bỏ qua fallback lịch sử)
+  const hasDailyStatsDb = dailyStats.length > 0;
 
-  const q2Revenue = useMemo(() => {
-    if (mergedDailyStats.length > 0) {
+  // Helper tính doanh thu quý (ưu tiên từ mergedDailyStats khi DB có stats, fallback sang effectiveInvoices khi chưa có stats)
+  const getQuarterRevenue = (startMonth: number, endMonth: number) => {
+    if (hasDailyStatsDb) {
       return mergedDailyStats
         .filter(s => {
           const m = parseInt(s.date.split('-')[1], 10);
-          return m >= 4 && m <= 6;
+          return m >= startMonth && m <= endMonth;
         })
         .reduce((sum, s) => sum + (s.totalRevenue || 0), 0);
     }
     return effectiveInvoices.filter(inv => {
-      const d = new Date(inv.date);
-      return d.getFullYear() === selectedYear && d.getMonth() >= 3 && d.getMonth() <= 5;
+      const invBDate = inv.businessDate || getVietnamBusinessDate(inv.date);
+      const invYear = inv.businessYear || parseInt(invBDate.slice(0, 4), 10);
+      const invMonth = parseInt(invBDate.slice(5, 7), 10);
+      return invYear === selectedYear && invMonth >= startMonth && invMonth <= endMonth;
     }).reduce((sum, inv) => sum + inv.total, 0);
-  }, [mergedDailyStats, effectiveInvoices, selectedYear]);
+  };
 
-  const q3Revenue = useMemo(() => {
-    if (mergedDailyStats.length > 0) {
-      return mergedDailyStats
-        .filter(s => {
-          const m = parseInt(s.date.split('-')[1], 10);
-          return m >= 7 && m <= 9;
-        })
-        .reduce((sum, s) => sum + (s.totalRevenue || 0), 0);
-    }
-    return effectiveInvoices.filter(inv => {
-      const d = new Date(inv.date);
-      return d.getFullYear() === selectedYear && d.getMonth() >= 6 && d.getMonth() <= 8;
-    }).reduce((sum, inv) => sum + inv.total, 0);
-  }, [mergedDailyStats, effectiveInvoices, selectedYear]);
-
-  const q4Revenue = useMemo(() => {
-    if (mergedDailyStats.length > 0) {
-      return mergedDailyStats
-        .filter(s => {
-          const m = parseInt(s.date.split('-')[1], 10);
-          return m >= 10 && m <= 12;
-        })
-        .reduce((sum, s) => sum + (s.totalRevenue || 0), 0);
-    }
-    return effectiveInvoices.filter(inv => {
-      const d = new Date(inv.date);
-      return d.getFullYear() === selectedYear && d.getMonth() >= 9 && d.getMonth() <= 11;
-    }).reduce((sum, inv) => sum + inv.total, 0);
-  }, [mergedDailyStats, effectiveInvoices, selectedYear]);
+  const q1Revenue = useMemo(() => getQuarterRevenue(1, 3), [hasDailyStatsDb, mergedDailyStats, effectiveInvoices, selectedYear]);
+  const q2Revenue = useMemo(() => getQuarterRevenue(4, 6), [hasDailyStatsDb, mergedDailyStats, effectiveInvoices, selectedYear]);
+  const q3Revenue = useMemo(() => getQuarterRevenue(7, 9), [hasDailyStatsDb, mergedDailyStats, effectiveInvoices, selectedYear]);
+  const q4Revenue = useMemo(() => getQuarterRevenue(10, 12), [hasDailyStatsDb, mergedDailyStats, effectiveInvoices, selectedYear]);
 
   // Calculate 6-month revenues
   const firstHalfRevenue = useMemo(() => {
@@ -219,17 +189,19 @@ export const TaxReportView = ({ invoices, currentUser, onPrint }: {
       const dayStr = format(day, 'yyyy-MM-dd');
       
       let revenue = 0;
-      if (mergedDailyStats.length > 0) {
-        const stat = mergedDailyStats.find(s => s.date === dayStr);
-        revenue = stat?.totalRevenue || 0;
+      const stat = mergedDailyStats.find(s => s.date === dayStr);
+      if (stat && typeof stat.totalRevenue === 'number' && (stat.invoiceCount !== undefined || stat.totalRevenue > 0)) {
+        revenue = stat.totalRevenue;
       } else {
         const dailyInvoices = effectiveInvoices.filter(inv => {
-          const invDate = new Date(inv.date);
-          return invDate.getDate() === day.getDate() && 
-                 invDate.getMonth() === day.getMonth() && 
-                 invDate.getFullYear() === day.getFullYear();
+          const invBDate = inv.businessDate || getVietnamBusinessDate(inv.date);
+          return invBDate === dayStr;
         });
-        revenue = dailyInvoices.reduce((sum, inv) => sum + inv.total, 0);
+        if (dailyInvoices.length > 0) {
+          revenue = dailyInvoices.reduce((sum, inv) => sum + inv.total, 0);
+        } else {
+          revenue = stat?.totalRevenue || 0;
+        }
       }
 
       return {

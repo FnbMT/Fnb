@@ -3,44 +3,77 @@
  * Computes exact Vietnam timezone (UTC+7) ISO boundaries for queries
  */
 
-export const getVietnamStartOfTodayIso = (): string => {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat('en-CA', {
+/**
+ * Lấy ngày kinh doanh theo giờ Việt Nam (Asia/Ho_Chi_Minh, UTC+7) định dạng YYYY-MM-DD
+ * Xử lý chính xác cả chuỗi ISO UTC và Date object, loại bỏ lỗi lệch ngày lúc sáng sớm (trước 07:00)
+ */
+export const getVietnamBusinessDate = (isoStringOrDate?: string | Date): string => {
+  if (!isoStringOrDate) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(new Date());
+  }
+
+  const d = typeof isoStringOrDate === 'string' ? new Date(isoStringOrDate) : isoStringOrDate;
+  if (isNaN(d.getTime())) {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(new Date());
+  }
+
+  return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Ho_Chi_Minh',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'
-  });
-  const [year, month, day] = formatter.format(now).split('-');
-  return new Date(`${year}-${month}-${day}T00:00:00+07:00`).toISOString();
+  }).format(d);
+};
+
+/**
+ * Trả về cận bắt đầu (00:00:00+07:00) và cận kết thúc mở (00:00:00+07:00 ngày hôm sau) dưới dạng ISO UTC
+ * Cho phép dùng where('date', '>=', startIso) và where('date', '<', endExclusiveIso)
+ */
+export const getVietnamDayBoundariesIso = (businessDateStr: string) => {
+  let cleanDateStr = (businessDateStr || '').trim();
+  if (cleanDateStr.length > 10) {
+    cleanDateStr = cleanDateStr.slice(0, 10);
+  }
+  if (!cleanDateStr || cleanDateStr.length !== 10) {
+    cleanDateStr = getVietnamBusinessDate();
+  }
+
+  const startDate = new Date(`${cleanDateStr}T00:00:00+07:00`);
+  const endDate = new Date(startDate.getTime() + 24 * 60 * 60 * 1000);
+
+  return {
+    startIso: startDate.toISOString(),
+    endExclusiveIso: endDate.toISOString()
+  };
+};
+
+export const getVietnamStartOfTodayIso = (): string => {
+  const todayVn = getVietnamBusinessDate();
+  return new Date(`${todayVn}T00:00:00+07:00`).toISOString();
 };
 
 export const getVietnamEndOfTodayIso = (): string => {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Ho_Chi_Minh',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  });
-  const [year, month, day] = formatter.format(now).split('-');
-  return new Date(`${year}-${month}-${day}T23:59:59.999+07:00`).toISOString();
+  const todayVn = getVietnamBusinessDate();
+  return new Date(`${todayVn}T23:59:59.999+07:00`).toISOString();
 };
 
 export const getDateRangeIso = (dateStr: string, type: 'day' | 'month' | 'year') => {
-  const now = new Date();
-  const todayVn = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Ho_Chi_Minh',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).format(now); // 'YYYY-MM-DD'
+  const todayVn = getVietnamBusinessDate();
 
   let validDateStr = (dateStr || '').trim();
   if (!validDateStr) validDateStr = todayVn;
 
   if (type === 'day') {
-    // Chuẩn hóa sang YYYY-MM-DD an toàn tuyệt đối
     if (validDateStr.length === 7) {
       validDateStr = `${validDateStr}-01`;
     } else if (validDateStr.length === 4) {
@@ -48,26 +81,30 @@ export const getDateRangeIso = (dateStr: string, type: 'day' | 'month' | 'year')
     } else if (validDateStr.length > 10) {
       validDateStr = validDateStr.slice(0, 10);
     }
-    const startIso = new Date(`${validDateStr}T00:00:00+07:00`).toISOString();
-    const endIso = new Date(`${validDateStr}T23:59:59.999+07:00`).toISOString();
-    return { startIso, endIso };
+    const { startIso, endExclusiveIso } = getVietnamDayBoundariesIso(validDateStr);
+    return { startIso, endIso: endExclusiveIso, endExclusiveIso };
   }
 
   if (type === 'month') {
     let year = validDateStr.slice(0, 4);
     let month = validDateStr.length >= 7 ? validDateStr.slice(5, 7) : todayVn.slice(5, 7);
-    const y = parseInt(year, 10) || now.getFullYear();
-    const m = parseInt(month, 10) || (now.getMonth() + 1);
+    const y = parseInt(year, 10) || new Date().getFullYear();
+    const m = parseInt(month, 10) || (new Date().getMonth() + 1);
     const mStr = String(m).padStart(2, '0');
-    const lastDay = new Date(y, m, 0).getDate();
+    
+    // Ngày đầu tháng
     const startIso = new Date(`${y}-${mStr}-01T00:00:00+07:00`).toISOString();
-    const endIso = new Date(`${y}-${mStr}-${String(lastDay).padStart(2, '0')}T23:59:59.999+07:00`).toISOString();
-    return { startIso, endIso };
+    // Ngày đầu tháng kế tiếp (exclusive)
+    const nextMonth = m === 12 ? 1 : m + 1;
+    const nextYear = m === 12 ? y + 1 : y;
+    const endExclusiveIso = new Date(`${nextYear}-${String(nextMonth).padStart(2, '0')}-01T00:00:00+07:00`).toISOString();
+    
+    return { startIso, endIso: endExclusiveIso, endExclusiveIso };
   }
 
   // year
-  const year = parseInt(validDateStr.slice(0, 4), 10) || now.getFullYear();
+  const year = parseInt(validDateStr.slice(0, 4), 10) || new Date().getFullYear();
   const startIso = new Date(`${year}-01-01T00:00:00+07:00`).toISOString();
-  const endIso = new Date(`${year}-12-31T23:59:59.999+07:00`).toISOString();
-  return { startIso, endIso };
+  const endExclusiveIso = new Date(`${year + 1}-01-01T00:00:00+07:00`).toISOString();
+  return { startIso, endIso: endExclusiveIso, endExclusiveIso };
 };

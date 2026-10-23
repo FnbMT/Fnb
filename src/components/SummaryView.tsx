@@ -5,8 +5,8 @@ import { format, isSameDay, isSameMonth, isSameYear, parseISO, startOfMonth, end
 import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { getDateRangeIso } from '../utils/firestoreDateHelper';
+import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot } from 'firebase/firestore';
+import { getDateRangeIso, getVietnamBusinessDate } from '../utils/firestoreDateHelper';
 
 // Bộ nhớ đệm ngoài component để tránh gọi Firestore lại khi rời tab và quay lại SummaryView
 interface SummaryPeriodCacheItem {
@@ -14,6 +14,8 @@ interface SummaryPeriodCacheItem {
   invoices?: Invoice[];
   cash?: CashTransaction[];
   logs?: InventoryTransaction[];
+  hasMoreInvoices?: boolean;
+  lastInvoiceDoc?: QueryDocumentSnapshot;
   timestamp: number;
 }
 const summaryPeriodCache = new Map<string, SummaryPeriodCacheItem>();
@@ -145,6 +147,9 @@ export const SummaryView = ({
   const [historicalCash, setHistoricalCash] = useState<CashTransaction[]>([]);
   const [historicalLogs, setHistoricalLogs] = useState<InventoryTransaction[]>([]);
   const [isLoadingHistorical, setIsLoadingHistorical] = useState(false);
+  const [hasMoreInvoices, setHasMoreInvoices] = useState(false);
+  const [lastInvoiceDoc, setLastInvoiceDoc] = useState<QueryDocumentSnapshot | null>(null);
+  const [isLoadingMoreInvoices, setIsLoadingMoreInvoices] = useState(false);
 
   // Request ID guard để chống đua lệnh (race condition / abort) khi người dùng đổi ngày/kỳ nhanh
   const activeRequestId = useRef(0);
@@ -171,7 +176,135 @@ export const SummaryView = ({
     return Array.from(map.values());
   }, [inventoryLogs, historicalLogs]);
 
-  // Tải dữ liệu toàn vẹn (DailyStats + Hóa đơn + Sổ quỹ + Kho) với bộ nhớ đệm
+  // Kiểm tra xem kỳ đang xem có chứa ngày hôm nay không
+  const isViewingCurrentPeriod = useMemo(() => {
+    const todayStr = businessDate || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    if (filterType === 'day') return dateFilter.slice(0, 10) === todayStr;
+    if (filterType === 'month') return dateFilter.slice(0, 7) === todayStr.slice(0, 7);
+    return dateFilter.slice(0, 4) === todayStr.slice(0, 4);
+  }, [dateFilter, filterType, businessDate]);
+
+  const isViewingTodayOnly = useMemo(() => {
+    const todayStr = businessDate || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    return filterType === 'day' && dateFilter.slice(0, 10) === todayStr;
+  }, [dateFilter, filterType, businessDate]);
+
+  const [loadingInvoiceDetailId, setLoadingInvoiceDetailId] = useState<string | null>(null);
+
+  // Lazy-load chi tiết hóa đơn on-demand khi bấm con mắt 👁️ (tiết kiệm triệt để reads, chỉ đọc đúng 1 doc khi cần)
+  const handleViewInvoice = async (inv: Invoice) => {
+    if (inv.items && inv.items.length > 0) {
+      setViewingInvoice(inv);
+      return;
+    }
+    setLoadingInvoiceDetailId(inv.id);
+    try {
+      const snap = await getDoc(doc(db, 'invoices', inv.id));
+      if (snap.exists()) {
+        const fullInv = { ...(snap.data() as any), id: snap.id } as Invoice;
+        setViewingInvoice(fullInv);
+        setHistoricalInvoices(prev => prev.map(x => x.id === inv.id ? fullInv : x));
+      } else {
+        setViewingInvoice(inv);
+      }
+    } catch (err) {
+      console.warn('Lỗi tải chi tiết hóa đơn:', err);
+      setViewingInvoice(inv);
+    } finally {
+      setLoadingInvoiceDetailId(null);
+    }
+  };
+
+  const handlePrintInvoice = async (inv: Invoice) => {
+    let fullInv = inv;
+    if (!inv.items || inv.items.length === 0) {
+      try {
+        const snap = await getDoc(doc(db, 'invoices', inv.id));
+        if (snap.exists()) {
+          fullInv = { ...(snap.data() as any), id: snap.id } as Invoice;
+        }
+      } catch (err) {
+        console.warn('Lỗi tải items khi in HĐ:', err);
+      }
+    }
+    onPrint({
+      type: 'bill',
+      tableName: fullInv.tableName,
+      items: fullInv.items || [],
+      total: fullInv.total,
+      subtotal: fullInv.subtotal,
+      discount: fullInv.discount,
+      vat: fullInv.vat,
+      staffName: fullInv.staffName,
+      timeIn: fullInv.timeIn,
+      timeOut: fullInv.date,
+      note: fullInv.note
+    });
+  };
+
+  // Phân trang Cursor Firestore (startAfter) - Tải thêm hóa đơn khi người dùng có nhu cầu xem sâu
+  const handleLoadMoreInvoices = async () => {
+    if (!currentUser?.storeId || !lastInvoiceDoc || isLoadingMoreInvoices) return;
+    setIsLoadingMoreInvoices(true);
+    try {
+      const storeId = currentUser.storeId;
+      let nextQuery;
+      if (filterType === 'day') {
+        nextQuery = query(
+          collection(db, 'invoices'),
+          where('storeId', '==', storeId),
+          where('businessDate', '==', dateFilter.slice(0, 10)),
+          startAfter(lastInvoiceDoc),
+          limit(30)
+        );
+      } else if (filterType === 'month') {
+        nextQuery = query(
+          collection(db, 'invoices'),
+          where('storeId', '==', storeId),
+          where('businessMonth', '==', dateFilter.slice(0, 7)),
+          startAfter(lastInvoiceDoc),
+          limit(30)
+        );
+      } else {
+        nextQuery = query(
+          collection(db, 'invoices'),
+          where('storeId', '==', storeId),
+          where('businessYear', '==', parseInt(dateFilter.slice(0, 4), 10) || new Date().getFullYear()),
+          startAfter(lastInvoiceDoc),
+          limit(30)
+        );
+      }
+      const snap = await getDocs(nextQuery);
+      if (!snap.empty) {
+        const moreDocs = snap.docs
+          .map(d => ({ ...(d.data() as any), id: d.id } as Invoice))
+          .sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date));
+        const newLastDoc = snap.docs[snap.docs.length - 1];
+        const newHasMore = snap.docs.length >= 30;
+        setHistoricalInvoices(prev => {
+          const combined = [...prev, ...moreDocs];
+          const cacheKey = `${storeId}_${dateFilter}_${filterType}`;
+          const cached = summaryPeriodCache.get(cacheKey);
+          if (cached) {
+            cached.invoices = combined;
+            cached.lastInvoiceDoc = newLastDoc;
+            cached.hasMoreInvoices = newHasMore;
+          }
+          return combined;
+        });
+        setLastInvoiceDoc(newLastDoc);
+        setHasMoreInvoices(newHasMore);
+      } else {
+        setHasMoreInvoices(false);
+      }
+    } catch (err) {
+      console.warn('Lỗi tải thêm hóa đơn:', err);
+    } finally {
+      setIsLoadingMoreInvoices(false);
+    }
+  };
+
+  // Kiến trúc 2 tầng (Two-Tier Architecture): Tầng 1 chỉ nạp daily_stats; Tầng 2 chỉ nạp chứng từ theo Tab on-demand
   useEffect(() => {
     if (!currentUser?.storeId) return;
     const storeId = currentUser.storeId;
@@ -183,27 +316,40 @@ export const SummaryView = ({
     const cached = summaryPeriodCache.get(cacheKey);
 
     // Kiểm tra cache xem kỳ này đã tải và còn hiệu lực không (TTL 5 phút)
-    const isCacheFresh = cached && Date.now() - cached.timestamp < 5 * 60 * 1000;
-    if (isCacheFresh && cached.dailyStats && cached.invoices && cached.cash) {
+    const isCacheFresh = cached && (Date.now() - cached.timestamp < 5 * 60 * 1000);
+    if (isCacheFresh && cached.dailyStats) {
       setDailyStats(cached.dailyStats);
-      setHistoricalInvoices(cached.invoices);
-      setHistoricalCash(cached.cash);
+      if (cached.invoices) setHistoricalInvoices(cached.invoices);
+      if (cached.cash) setHistoricalCash(cached.cash);
       if (cached.logs) setHistoricalLogs(cached.logs);
+      setHasMoreInvoices(Boolean(cached.hasMoreInvoices));
+      setLastInvoiceDoc(cached.lastInvoiceDoc || null);
 
-      if (activeTab !== 'inventory' || cached.logs) {
+      const hasTabData = 
+        (activeTab === 'sales' && (isViewingTodayOnly || cached.invoices)) ||
+        (activeTab === 'cash' && (isViewingTodayOnly || cached.cash)) ||
+        (activeTab === 'inventory' && cached.logs) ||
+        (activeTab === 'items' && (isViewingTodayOnly || cached.invoices)) ||
+        (activeTab === 'financial' && (isViewingTodayOnly || (cached.cash && cached.invoices)));
+
+      if (hasTabData) {
         setIsLoadingHistorical(false);
         return; // Đã có đủ dữ liệu từ cache, 0 reads Firestore!
       }
+    }
+
+    if (cached && !isCacheFresh) {
+      summaryPeriodCache.delete(cacheKey);
     }
 
     setIsLoadingHistorical(true);
 
     const loadPeriodData = async () => {
       try {
-        const { startIso, endIso } = getDateRangeIso(dateFilter, filterType);
+        const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
         const currentEntry: SummaryPeriodCacheItem = summaryPeriodCache.get(cacheKey) || { timestamp: Date.now() };
 
-        // 1. Tải daily_stats cho ngày / tháng / năm (Đảm bảo số tổng hợp Doanh thu, Tiền mặt, Chuyển khoản tức thì & toàn vẹn)
+        // 1. TẦNG 1: Luôn tải daily_stats (Chỉ 1 - 31 reads cho cả kỳ, phục vụ tức thì 100% KPI & biểu đồ)
         let loadedStats: DailyStats[] = currentEntry.dailyStats || [];
         if (!currentEntry.dailyStats) {
           try {
@@ -238,60 +384,105 @@ export const SummaryView = ({
           }
         }
 
-        // 2. Tải hóa đơn chi tiết của cửa hàng theo kỳ
+        // 2. TẦNG 2: Danh sách hóa đơn chi tiết nạp khi mở tab 'sales', 'items' hoặc 'financial'
+        // NẾU LÀ HÔM NAY: 0 READS (dùng trực tiếp live invoices từ props.invoices)
         let loadedInvoices: Invoice[] = currentEntry.invoices || [];
-        if (!currentEntry.invoices) {
+        if (!isViewingTodayOnly && (activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial') && !currentEntry.invoices) {
           try {
-            const invQuery = query(
-              collection(db, 'invoices'),
-              where('storeId', '==', storeId)
-            );
+            let invQuery;
+            if (filterType === 'day') {
+              invQuery = query(
+                collection(db, 'invoices'),
+                where('storeId', '==', storeId),
+                where('businessDate', '==', dateFilter.slice(0, 10)),
+                limit(30)
+              );
+            } else if (filterType === 'month') {
+              invQuery = query(
+                collection(db, 'invoices'),
+                where('storeId', '==', storeId),
+                where('businessMonth', '==', dateFilter.slice(0, 7)),
+                limit(30)
+              );
+            } else {
+              invQuery = query(
+                collection(db, 'invoices'),
+                where('storeId', '==', storeId),
+                where('businessYear', '==', parseInt(dateFilter.slice(0, 4), 10) || new Date().getFullYear()),
+                limit(30)
+              );
+            }
             const invSnap = await getDocs(invQuery);
             loadedInvoices = invSnap.docs
               .map(d => ({ ...(d.data() as any), id: d.id } as Invoice))
-              .filter(inv => inv.date >= startIso && inv.date <= endIso)
               .sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date));
             currentEntry.invoices = loadedInvoices;
+            currentEntry.lastInvoiceDoc = invSnap.docs[invSnap.docs.length - 1] || null;
+            currentEntry.hasMoreInvoices = invSnap.docs.length >= 30;
           } catch (err) {
             console.warn('Lỗi tải hóa đơn cửa hàng:', err);
+            loadedInvoices = [];
+            currentEntry.invoices = [];
+            currentEntry.lastInvoiceDoc = null;
+            currentEntry.hasMoreInvoices = false;
           }
         }
 
-        // 3. Tải sổ quỹ của cửa hàng (đảm bảo thẻ TIỀN MẶT và CHUYỂN KHOẢN luôn có số liệu chính xác ở mọi tab)
+        // 3. TẦNG 2: Sổ quỹ nạp khi mở tab 'cash' hoặc 'financial'
         let loadedCash: CashTransaction[] = currentEntry.cash || [];
-        if (!currentEntry.cash) {
+        if (!isViewingTodayOnly && (activeTab === 'cash' || activeTab === 'financial') && !currentEntry.cash) {
           try {
-            const cashQuery = query(
-              collection(db, 'cash_transactions'),
-              where('storeId', '==', storeId)
-            );
+            let cashQuery;
+            if (filterType === 'day') {
+              cashQuery = query(
+                collection(db, 'cash_transactions'),
+                where('storeId', '==', storeId),
+                where('businessDate', '==', dateFilter.slice(0, 10))
+              );
+            } else if (filterType === 'month') {
+              cashQuery = query(
+                collection(db, 'cash_transactions'),
+                where('storeId', '==', storeId),
+                where('businessMonth', '==', dateFilter.slice(0, 7))
+              );
+            } else {
+              cashQuery = query(
+                collection(db, 'cash_transactions'),
+                where('storeId', '==', storeId),
+                where('businessYear', '==', parseInt(dateFilter.slice(0, 4), 10) || new Date().getFullYear())
+              );
+            }
             const cashSnap = await getDocs(cashQuery);
             loadedCash = cashSnap.docs
               .map(d => ({ ...(d.data() as any), id: d.id } as CashTransaction))
-              .filter(c => c.date >= startIso && c.date <= endIso)
               .sort((a, b) => b.date.localeCompare(a.date));
             currentEntry.cash = loadedCash;
           } catch (err) {
             console.warn('Lỗi tải sổ quỹ:', err);
+            loadedCash = [];
+            currentEntry.cash = [];
           }
         }
 
-        // 4. Tải nhật ký kho nếu ở tab Nhập xuất kho ('inventory')
+        // 4. TẦNG 2: Nhật ký kho chỉ nạp khi mở tab 'inventory'
         let loadedLogs: InventoryTransaction[] = currentEntry.logs || [];
         if (activeTab === 'inventory' && !currentEntry.logs) {
           try {
             const logQuery = query(
               collection(db, 'inventory_logs'),
-              where('storeId', '==', storeId)
+              where('storeId', '==', storeId),
+              where('date', '>=', startIso),
+              where('date', '<', endExclusiveIso),
+              orderBy('date', 'desc'),
+              limit(50)
             );
             const logSnap = await getDocs(logQuery);
-            loadedLogs = logSnap.docs
-              .map(d => ({ ...(d.data() as any), id: d.id } as InventoryTransaction))
-              .filter(l => l.date >= startIso && l.date <= endIso)
-              .sort((a, b) => b.date.localeCompare(a.date));
+            loadedLogs = logSnap.docs.map(d => ({ ...(d.data() as any), id: d.id } as InventoryTransaction));
             currentEntry.logs = loadedLogs;
           } catch (err) {
             console.warn('Lỗi tải nhật ký kho:', err);
+            loadedLogs = [];
+            currentEntry.logs = [];
           }
         }
 
@@ -300,9 +491,17 @@ export const SummaryView = ({
 
         if (currentReq === activeRequestId.current && isMounted) {
           setDailyStats(loadedStats);
-          setHistoricalInvoices(loadedInvoices);
-          setHistoricalCash(loadedCash);
-          if (loadedLogs.length > 0) setHistoricalLogs(loadedLogs);
+          if (activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial') {
+            setHistoricalInvoices(loadedInvoices);
+          }
+          if (activeTab === 'cash' || activeTab === 'financial') {
+            setHistoricalCash(loadedCash);
+          }
+          if (activeTab === 'inventory') {
+            setHistoricalLogs(loadedLogs);
+          }
+          setHasMoreInvoices(Boolean(currentEntry.hasMoreInvoices));
+          setLastInvoiceDoc(currentEntry.lastInvoiceDoc || null);
         }
       } catch (err) {
         console.warn('Lỗi tổng hợp dữ liệu báo cáo từ Firestore:', err);
@@ -318,12 +517,24 @@ export const SummaryView = ({
     return () => {
       isMounted = false;
     };
-  }, [currentUser?.storeId, dateFilter, filterType, activeTab]);
+  }, [currentUser?.storeId, dateFilter, filterType, activeTab, isViewingTodayOnly]);
 
   const filteredInvoices = useMemo(() => {
-    const { startIso, endIso } = getDateRangeIso(dateFilter, filterType);
+    const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
+    const targetDay = dateFilter.slice(0, 10);
+    const targetMonth = dateFilter.slice(0, 7);
+    const targetYear = dateFilter.slice(0, 4);
+
     return allInvoices.filter(inv => {
-      const matchDate = inv.date >= startIso && inv.date <= endIso;
+      let matchDate = false;
+      const invBDate = inv.businessDate || getVietnamBusinessDate(inv.date);
+      if (filterType === 'day') {
+        matchDate = invBDate === targetDay || (inv.date >= startIso && inv.date < endExclusiveIso);
+      } else if (filterType === 'month') {
+        matchDate = invBDate.slice(0, 7) === targetMonth || (inv.date >= startIso && inv.date < endExclusiveIso);
+      } else {
+        matchDate = invBDate.slice(0, 4) === targetYear || (inv.date >= startIso && inv.date < endExclusiveIso);
+      }
       if (!matchDate) return false;
 
       if (invoiceSearch.trim()) {
@@ -338,18 +549,45 @@ export const SummaryView = ({
   }, [allInvoices, dateFilter, filterType, invoiceSearch]);
 
   const filteredLogs = useMemo(() => {
-    const { startIso, endIso } = getDateRangeIso(dateFilter, filterType);
+    const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
+    const targetDay = dateFilter.slice(0, 10);
+    const targetMonth = dateFilter.slice(0, 7);
+    const targetYear = dateFilter.slice(0, 4);
+
     return allInventoryLogs.filter(log => {
-      return log.date >= startIso && log.date <= endIso;
+      const lDateStr = getVietnamBusinessDate(log.date);
+      let matchDate = false;
+      if (filterType === 'day') {
+        matchDate = lDateStr === targetDay || (log.date >= startIso && log.date < endExclusiveIso);
+      } else if (filterType === 'month') {
+        matchDate = lDateStr.slice(0, 7) === targetMonth || (log.date >= startIso && log.date < endExclusiveIso);
+      } else {
+        matchDate = lDateStr.slice(0, 4) === targetYear || (log.date >= startIso && log.date < endExclusiveIso);
+      }
+      return matchDate;
     }).sort((a, b) => b.date.localeCompare(a.date));
   }, [allInventoryLogs, dateFilter, filterType]);
 
   const filteredCash = useMemo(() => {
-    const { startIso, endIso } = getDateRangeIso(dateFilter, filterType);
+    const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
+    const targetDay = dateFilter.slice(0, 10);
+    const targetMonth = dateFilter.slice(0, 7);
+    const targetYear = dateFilter.slice(0, 4);
+
     return allCashTransactions.filter(t => {
       const isAuto = t.category === 'Bán hàng' || t.category === 'Nhập hàng' || t.category === 'Trả hàng';
       if (!isAdminOrManager && (t.staffId !== currentUser?.id || isAuto)) return false;
-      return t.date >= startIso && t.date <= endIso;
+
+      const tDateStr = getVietnamBusinessDate(t.date);
+      let matchDate = false;
+      if (filterType === 'day') {
+        matchDate = tDateStr === targetDay || (t.date >= startIso && t.date < endExclusiveIso);
+      } else if (filterType === 'month') {
+        matchDate = tDateStr.slice(0, 7) === targetMonth || (t.date >= startIso && t.date < endExclusiveIso);
+      } else {
+        matchDate = tDateStr.slice(0, 4) === targetYear || (t.date >= startIso && t.date < endExclusiveIso);
+      }
+      return matchDate;
     }).sort((a, b) => b.date.localeCompare(a.date));
   }, [allCashTransactions, dateFilter, filterType, isAdminOrManager, currentUser]);
 
@@ -370,17 +608,86 @@ export const SummaryView = ({
 
   const sortedItemSales = itemSales;
 
-  // Cash Book Stats - Tính toán chuẩn xác, thuần túy và không bị ảnh hưởng bởi thứ tự click màn hình
+  // Tổng hợp dữ liệu từ bảng daily_stats cho Ngày / Tháng / Năm (Tối ưu hóa tức thì, 100% toàn vẹn)
+  const statsAggregates = useMemo(() => {
+    let totalRevenue = 0;
+    let totalCash = 0;
+    let totalTransfer = 0;
+    let invoiceCount = 0;
+    let hasData = false;
+
+    const todayStr = businessDate || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+
+    if (dailyStats && dailyStats.length > 0) {
+      dailyStats.forEach(s => {
+        // Nếu là hôm nay và đang ở kỳ hiện tại, chỉ bỏ qua khi danh sách hóa đơn live đã nạp
+        if (s.date === todayStr && isViewingCurrentPeriod && invoices.length > 0) return;
+        totalRevenue += s.totalRevenue || 0;
+        totalCash += s.totalCash || 0;
+        totalTransfer += s.totalTransfer || 0;
+        invoiceCount += s.invoiceCount || 0;
+        if (s.totalRevenue !== undefined || s.invoiceCount !== undefined) {
+          hasData = true;
+        }
+      });
+    }
+
+    if (isViewingCurrentPeriod && invoices.length > 0) {
+      // Kết hợp các hóa đơn realtime hôm nay từ live listener của App
+      invoices.forEach(inv => {
+        totalRevenue += inv.total || 0;
+        if (inv.paymentMethod === 'cash' || !inv.paymentMethod) totalCash += inv.total || 0;
+        else totalTransfer += inv.total || 0;
+        invoiceCount += 1;
+        hasData = true;
+      });
+    }
+
+    // Nếu xem lịch sử nhưng cửa hàng cũ chưa có daily_stats
+    if (!hasData && historicalInvoices.length > 0) {
+      filteredInvoices.forEach(inv => {
+        totalRevenue += inv.total || 0;
+        if (inv.paymentMethod === 'cash' || !inv.paymentMethod) totalCash += inv.total || 0;
+        else totalTransfer += inv.total || 0;
+        invoiceCount += 1;
+        hasData = true;
+      });
+    }
+
+    return hasData ? { totalRevenue, totalCash, totalTransfer, invoiceCount } : null;
+  }, [dailyStats, isViewingCurrentPeriod, invoices, businessDate, historicalInvoices, filteredInvoices]);
+
+  // Cash Book Stats - Tính toán chuẩn xác từ nguồn daily_stats đầy đủ (không bị cắt bởi limit chứng từ)
   const cashStats = useMemo(() => {
     const filterDate = parseISO(dateFilter);
-    const totalIncome = filteredCash.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
-    const totalExpense = filteredCash.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
+    const nonSaleCashIncome = filteredCash
+      .filter(t => t.type === 'income' && t.category !== 'Bán hàng' && (t.paymentMethod === 'cash' || !t.paymentMethod))
+      .reduce((sum, t) => sum + t.amount, 0);
 
-    const periodCashIncome = filteredCash.filter(t => t.type === 'income' && (t.paymentMethod === 'cash' || !t.paymentMethod)).reduce((sum, t) => sum + t.amount, 0);
+    const nonSaleBankIncome = filteredCash
+      .filter(t => t.type === 'income' && t.category !== 'Bán hàng' && t.paymentMethod === 'transfer')
+      .reduce((sum, t) => sum + t.amount, 0);
+
+    const filteredCashSalesInTx = filteredCash
+      .filter(t => t.type === 'income' && t.category === 'Bán hàng' && (t.paymentMethod === 'cash' || !t.paymentMethod))
+      .reduce((sum, t) => sum + t.amount, 0);
+
+    const filteredBankSalesInTx = filteredCash
+      .filter(t => t.type === 'income' && t.category === 'Bán hàng' && t.paymentMethod === 'transfer')
+      .reduce((sum, t) => sum + t.amount, 0);
+
+    // Ưu tiên nguồn daily_stats đầy đủ 100% của toàn kỳ cho bán hàng
+    const cashSalesAmount = statsAggregates ? statsAggregates.totalCash : filteredCashSalesInTx;
+    const bankSalesAmount = statsAggregates ? statsAggregates.totalTransfer : filteredBankSalesInTx;
+
+    const periodCashIncome = nonSaleCashIncome + cashSalesAmount;
+    const periodBankIncome = nonSaleBankIncome + bankSalesAmount;
+
     const periodCashExpense = filteredCash.filter(t => t.type === 'expense' && (t.paymentMethod === 'cash' || !t.paymentMethod)).reduce((sum, t) => sum + t.amount, 0);
-
-    const periodBankIncome = filteredCash.filter(t => t.type === 'income' && t.paymentMethod === 'transfer').reduce((sum, t) => sum + t.amount, 0);
     const periodBankExpense = filteredCash.filter(t => t.type === 'expense' && t.paymentMethod === 'transfer').reduce((sum, t) => sum + t.amount, 0);
+
+    const totalIncome = periodCashIncome + periodBankIncome;
+    const totalExpense = periodCashExpense + periodBankExpense;
 
     // Tiền đầu ca / đầu ngày xác định chính xác theo ca làm việc của ngày đó:
     let openingCash = 0;
@@ -399,7 +706,7 @@ export const SummaryView = ({
     const bankBalance = periodBankIncome - periodBankExpense;
 
     return { openingBalance, totalIncome, totalExpense, closingBalance, cashBalance, bankBalance };
-  }, [filteredCash, dateFilter, filterType, shifts, activeShift]);
+  }, [filteredCash, statsAggregates, dateFilter, filterType, shifts, activeShift]);
 
   const renderedCashTransactions = useMemo(() => {
     if (cashFilterType === 'all') return filteredCash;
@@ -464,50 +771,9 @@ export const SummaryView = ({
     URL.revokeObjectURL(url);
   };
 
-  // Kiểm tra xem kỳ đang xem có chứa ngày hôm nay không
-  const isViewingCurrentPeriod = useMemo(() => {
-    const todayStr = businessDate || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-    if (filterType === 'day') return dateFilter.slice(0, 10) === todayStr;
-    if (filterType === 'month') return dateFilter.slice(0, 7) === todayStr.slice(0, 7);
-    return dateFilter.slice(0, 4) === todayStr.slice(0, 4);
-  }, [dateFilter, filterType, businessDate]);
-
-  // Tổng hợp dữ liệu từ bảng daily_stats cho Ngày / Tháng / Năm (Tối ưu hóa tức thì, 100% toàn vẹn)
-  const statsAggregates = useMemo(() => {
-    if (dailyStats.length === 0) return null;
-
-    let totalRevenue = 0;
-    let totalCash = 0;
-    let totalTransfer = 0;
-    let invoiceCount = 0;
-
-    const todayStr = businessDate || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-
-    dailyStats.forEach(s => {
-      // Nếu là hôm nay và đang ở kỳ hiện tại, bỏ qua doc hôm nay trong daily_stats để lấy live invoices
-      if (s.date === todayStr && isViewingCurrentPeriod) return;
-      totalRevenue += s.totalRevenue || 0;
-      totalCash += s.totalCash || 0;
-      totalTransfer += s.totalTransfer || 0;
-      invoiceCount += s.invoiceCount || 0;
-    });
-
-    if (isViewingCurrentPeriod) {
-      // Kết hợp các hóa đơn realtime hôm nay
-      invoices.forEach(inv => {
-        totalRevenue += inv.total || 0;
-        if (inv.paymentMethod === 'cash' || !inv.paymentMethod) totalCash += inv.total || 0;
-        else totalTransfer += inv.total || 0;
-        invoiceCount += 1;
-      });
-    }
-
-    return { totalRevenue, totalCash, totalTransfer, invoiceCount };
-  }, [dailyStats, isViewingCurrentPeriod, invoices, businessDate]);
-
   const invoicesSum = filteredInvoices.reduce((sum, inv) => sum + inv.total, 0);
-  const totalSales = statsAggregates ? Math.max(statsAggregates.totalRevenue, invoicesSum) : invoicesSum;
-  const totalInvoicesCount = statsAggregates ? Math.max(statsAggregates.invoiceCount, filteredInvoices.length) : filteredInvoices.length;
+  const totalSales = statsAggregates ? statsAggregates.totalRevenue : invoicesSum;
+  const totalInvoicesCount = statsAggregates ? statsAggregates.invoiceCount : filteredInvoices.length;
 
   const sampleSales = filteredInvoices.reduce((sum, inv) => sum + inv.total, 0);
   const sampleCost = filteredInvoices.reduce((sum, inv) => {
@@ -536,7 +802,7 @@ export const SummaryView = ({
 
   let totalPayroll = monthlyPayrolls.reduce((sum, p) => sum + (p.totalSalary || 0), 0);
   
-  const allExpenses = renderedCashTransactions.filter(t => t.type === 'expense');
+  const allExpenses = filteredCash.filter(t => t.type === 'expense');
   let rentCost = 0;
   let otherOperatingCost = 0;
   
@@ -576,9 +842,9 @@ export const SummaryView = ({
 
   // Tự động liên kết số liệu thu chi theo bộ lọc (ngày, tháng, năm) để đối soát TIỀN MẶT và CHUYỂN KHOẢN
   const storePaymentStats = useMemo(() => {
-    const { startIso, endIso } = getDateRangeIso(dateFilter, filterType);
+    const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
     const periodTxs = allCashTransactions.filter(t => {
-      return t.date >= startIso && t.date <= endIso;
+      return t.date >= startIso && t.date < endExclusiveIso;
     });
 
     const isTransferPayment = (method: string | undefined) => 
@@ -596,9 +862,10 @@ export const SummaryView = ({
     const filteredCashSales = filteredInvoices
       .filter(inv => inv.paymentMethod === 'cash' || !inv.paymentMethod)
       .reduce((sum, inv) => sum + (inv.total || 0), 0);
-    const invoiceCashSales = Math.max(statsAggregates?.totalCash || 0, filteredCashSales);
 
-    const cashIncome = nonSaleCashIncome + Math.max(autoCashSalesInTx, invoiceCashSales);
+    // Ưu tiên nguồn daily_stats đầy đủ 100% của toàn kỳ cho bán hàng
+    const cashSalesAmount = statsAggregates ? statsAggregates.totalCash : (filteredCashSales > 0 ? filteredCashSales : autoCashSalesInTx);
+    const cashIncome = nonSaleCashIncome + cashSalesAmount;
 
     const cashExpense = periodTxs
       .filter(t => t.type === 'expense' && (t.paymentMethod === 'cash' || !t.paymentMethod))
@@ -618,9 +885,10 @@ export const SummaryView = ({
     const filteredTransferSales = filteredInvoices
       .filter(inv => isTransferPayment(inv.paymentMethod))
       .reduce((sum, inv) => sum + (inv.total || 0), 0);
-    const invoiceTransferSales = Math.max(statsAggregates?.totalTransfer || 0, filteredTransferSales);
 
-    const transferIncome = nonSaleTransferIncome + Math.max(autoTransferSalesInTx, invoiceTransferSales);
+    // Ưu tiên nguồn daily_stats đầy đủ 100% của toàn kỳ cho bán hàng
+    const transferSalesAmount = statsAggregates ? statsAggregates.totalTransfer : (filteredTransferSales > 0 ? filteredTransferSales : autoTransferSalesInTx);
+    const transferIncome = nonSaleTransferIncome + transferSalesAmount;
 
     const transferExpense = periodTxs
       .filter(t => t.type === 'expense' && isTransferPayment(t.paymentMethod))
@@ -1072,21 +1340,7 @@ export const SummaryView = ({
                           <div className="flex items-center justify-end gap-1.5">
                             <button 
                               title="In hóa đơn cho khách"
-                              onClick={() => {
-                                onPrint({
-                                  type: 'bill',
-                                  tableName: inv.tableName,
-                                  items: inv.items,
-                                  total: inv.total,
-                                  subtotal: inv.subtotal,
-                                  discount: inv.discount,
-                                  vat: inv.vat,
-                                  staffName: inv.staffName,
-                                  timeIn: inv.timeIn,
-                                  timeOut: inv.date,
-                                  note: inv.note
-                                });
-                              }}
+                              onClick={() => handlePrintInvoice(inv)}
                               className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
                             >
                               <Printer className="w-3.5 h-3.5" />
@@ -1094,10 +1348,15 @@ export const SummaryView = ({
                             </button>
                             <button 
                               title="Xem chi tiết hóa đơn"
-                              onClick={() => setViewingInvoice(inv)}
-                              className="p-1.5 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-all cursor-pointer"
+                              onClick={() => handleViewInvoice(inv)}
+                              disabled={loadingInvoiceDetailId === inv.id}
+                              className="p-1.5 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-all cursor-pointer disabled:opacity-50"
                             >
-                              <Eye className="w-4 h-4" />
+                              {loadingInvoiceDetailId === inv.id ? (
+                                <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />
+                              ) : (
+                                <Eye className="w-4 h-4" />
+                              )}
                             </button>
                             {isAdmin && (
                               <button 
@@ -1132,6 +1391,28 @@ export const SummaryView = ({
                   className="p-2 rounded-lg bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 disabled:opacity-30"
                 >
                   <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+            {hasMoreInvoices && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 text-xs mt-3">
+                <span className="text-gray-500">
+                  Đang hiển thị <strong className="text-gray-900 dark:text-white font-mono">{filteredInvoices.length}</strong> hóa đơn gần nhất trong kỳ. Còn hóa đơn cũ hơn trên hệ thống.
+                </span>
+                <button
+                  type="button"
+                  disabled={isLoadingMoreInvoices}
+                  onClick={handleLoadMoreInvoices}
+                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
+                >
+                  {isLoadingMoreInvoices ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Đang nạp thêm...</span>
+                    </>
+                  ) : (
+                    <span>Tải thêm 30 hóa đơn cũ hơn</span>
+                  )}
                 </button>
               </div>
             )}
@@ -1291,6 +1572,13 @@ export const SummaryView = ({
           </div>
         ) : activeTab === 'items' ? (
           <div className="space-y-4">
+            {hasMoreInvoices && (
+              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-700 dark:text-amber-400 flex items-center justify-between gap-3">
+                <span>
+                  ℹ️ Báo cáo món bán chạy đang được tổng hợp từ <strong>{filteredInvoices.length}</strong> hóa đơn gần nhất. Để có danh sách đầy đủ hơn của kỳ này, bạn có thể nhấn nút <strong>"Tải thêm 50 hóa đơn cũ hơn"</strong> ở tab Hóa đơn.
+                </span>
+              </div>
+            )}
             <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl overflow-hidden overflow-x-auto custom-scrollbar">
               <table className="w-full text-left border-collapse min-w-[700px]">
                 <thead>
@@ -1462,7 +1750,12 @@ export const SummaryView = ({
               </div>
 
               <div className="border-t border-black/5 dark:border-white/5 pt-4 space-y-3">
-                {viewingInvoice.items.map((item, i) => (
+                {(!viewingInvoice.items || viewingInvoice.items.length === 0) ? (
+                  <div className="text-center py-4 text-xs text-gray-500 italic">
+                    Không có chi tiết món hoặc hóa đơn tóm tắt
+                  </div>
+                ) : (
+                  viewingInvoice.items.map((item, i) => (
                   <div key={i} className="space-y-1">
                     <div className="flex justify-between text-sm">
                       <div className="flex gap-2">
@@ -1482,8 +1775,9 @@ export const SummaryView = ({
                       </div>
                     )}
                   </div>
-                ))}
-              </div>
+                ))
+              )}
+            </div>
 
               <div className="border-t border-black/5 dark:border-white/5 pt-4 space-y-2">
                 <div className="flex justify-between text-sm">
@@ -1626,17 +1920,24 @@ export const SummaryView = ({
                   setIsDeletingInvoice(true);
                   try {
                     const deletedId = confirmDeleteInvoice.id;
+                    const invDateStr = confirmDeleteInvoice.businessDate || getVietnamBusinessDate(confirmDeleteInvoice.date);
                     await onDeleteInvoice(deletedId);
                     setHistoricalInvoices(prev => prev.filter(inv => inv.id !== deletedId));
                     setHistoricalCash(prev => prev.filter(c => (c as any).invoiceId !== deletedId));
-                    if (currentUser?.storeId) {
-                      const cacheKey = `${currentUser.storeId}_${dateFilter}_${filterType}`;
-                      const cached = summaryPeriodCache.get(cacheKey);
-                      if (cached) {
-                        if (cached.invoices) cached.invoices = cached.invoices.filter(i => i.id !== deletedId);
-                        if (cached.cash) cached.cash = cached.cash.filter(c => (c as any).invoiceId !== deletedId);
+                    setDailyStats(prev => prev.map(s => {
+                      if (s.date === invDateStr) {
+                        return {
+                          ...s,
+                          totalRevenue: Math.max(0, (s.totalRevenue || 0) - confirmDeleteInvoice.total),
+                          totalCash: Math.max(0, (s.totalCash || 0) - (confirmDeleteInvoice.paymentMethod === 'cash' ? confirmDeleteInvoice.total : 0)),
+                          totalTransfer: Math.max(0, (s.totalTransfer || 0) - (confirmDeleteInvoice.paymentMethod === 'transfer' ? confirmDeleteInvoice.total : 0)),
+                          invoiceCount: Math.max(0, (s.invoiceCount || 0) - 1),
+                          totalDiscount: Math.max(0, (s.totalDiscount || 0) - (confirmDeleteInvoice.discount || 0))
+                        };
                       }
-                    }
+                      return s;
+                    }));
+                    summaryPeriodCache.clear();
                     setConfirmDeleteInvoice(null);
                   } catch (err) {
                     console.error(err);

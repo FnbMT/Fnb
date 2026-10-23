@@ -9,6 +9,7 @@ import saveUserHandler from "./api/save-user";
 import changePasswordHandler from "./api/change-password";
 import deleteUserHandler from "./api/delete-user";
 import registerStoreHandler from "./api/register-store";
+import resetPasswordHandler from "./api/reset-password";
 
 const app = express();
 const PORT = 3000;
@@ -20,6 +21,7 @@ app.use(express.urlencoded({ extended: true }));
 // Backend API Endpoints (cùng chung logic với Vercel Serverless Functions)
 app.post('/api/login', (req, res) => loginHandler(req, res));
 app.post('/api/reveal-password', (req, res) => revealPasswordHandler(req, res));
+app.post('/api/reset-password', (req, res) => resetPasswordHandler(req, res));
 app.post('/api/sepay-webhook', (req, res) => sepayWebhookHandler(req, res));
 // Alias tương thích ngược cho endpoint cũ
 app.post('/api/sepay/webhook', (req, res) => sepayWebhookHandler(req, res));

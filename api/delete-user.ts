@@ -1,12 +1,21 @@
 import type { Request, Response } from 'express';
 import { adminDb } from './_firebaseAdmin';
+import { getAuthenticatedCaller } from './_token';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { userId, caller } = req.body || {};
+  // 1. XÁC THỰC DANH TÍNH BẰNG TOKEN (Zero-Trust Guard)
+  const caller = await getAuthenticatedCaller(req);
+  if (!caller) {
+    return res.status(401).json({
+      error: 'Yêu cầu đăng nhập: Phiên làm việc không hợp lệ hoặc đã hết hạn.'
+    });
+  }
+
+  const { userId } = req.body || {};
 
   if (!userId) {
     return res.status(400).json({ error: 'Vui lòng cung cấp mã người dùng (userId) cần xóa' });
@@ -26,23 +35,21 @@ export default async function handler(req: any, res: any) {
     const targetStoreId = userData.storeId || '';
     const targetRole = userData.role || 'order';
 
-    // PHÂN QUYỀN API (P2 Security Guard):
-    if (caller) {
-      const isSuperAdmin = caller.role === 'superadmin';
-      const isStoreAdmin = caller.role === 'admin' && String(caller.storeId || '').trim() === targetStoreId;
+    // 2. PHÂN QUYỀN API
+    const isSuperAdmin = caller.isSuperAdmin || caller.role === 'superadmin';
+    const isStoreAdmin = caller.role === 'admin' && String(caller.storeId || '').trim() === targetStoreId;
 
-      if (!isSuperAdmin && !isStoreAdmin) {
-        return res.status(403).json({
-          error: 'Từ chối quyền truy cập: Chỉ Quản lý (Admin) của quán hoặc SuperAdmin mới có quyền xóa nhân sự.'
-        });
-      }
+    if (!isSuperAdmin && !isStoreAdmin) {
+      return res.status(403).json({
+        error: 'Từ chối quyền truy cập: Chỉ Quản lý (Admin) của quán hoặc SuperAdmin mới có quyền xóa nhân sự.'
+      });
+    }
 
-      // Admin của quán không được tự xóa tài khoản Admin qua API này
-      if (targetRole === 'admin' && !isSuperAdmin) {
-        return res.status(403).json({
-          error: 'Không thể xóa tài khoản Quản trị viên (Admin) của quán qua thao tác này.'
-        });
-      }
+    // Admin của quán không được tự xóa tài khoản Admin qua API này
+    if (targetRole === 'admin' && !isSuperAdmin) {
+      return res.status(403).json({
+        error: 'Không thể xóa tài khoản Quản trị viên (Admin) của quán qua thao tác này.'
+      });
     }
 
     // Xóa trong collection users

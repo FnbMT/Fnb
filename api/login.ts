@@ -1,6 +1,8 @@
 import type { Request, Response } from 'express';
 import { adminDb, adminAuth } from './_firebaseAdmin';
 import { hashPassword, verifyPassword, encryptAes, decryptAes } from './_crypto';
+import { generateAuthToken } from './_token';
+import { FieldValue } from 'firebase-admin/firestore';
 
 // Bộ nhớ đệm tạm thời cho Rate Limit đăng nhập sai (chống brute-force)
 const loginFailAttempts = new Map<string, { count: number; lockedUntil: number }>();
@@ -36,14 +38,20 @@ export default async function handler(req: any, res: any) {
 
   try {
     // 1. Kiểm tra tài khoản Quản trị viên tối cao (Superadmin)
-    // Đọc an toàn từ biến môi trường Vercel, không hardcode trong mã nguồn client
     const expectedSuperUser = process.env.SUPERADMIN_USERNAME || 'superadmin';
     const expectedSuperPass = process.env.SUPERADMIN_PASSWORD || 'superadmin';
 
     if (cleanStoreCode === 'admin' && cleanUsername === expectedSuperUser) {
       if (cleanPassword === expectedSuperPass) {
-        // Xóa bộ đếm sai nếu đăng nhập thành công
         loginFailAttempts.delete(rateLimitKey);
+
+        const sessionToken = generateAuthToken({
+          uid: 'superadmin',
+          username: expectedSuperUser,
+          role: 'superadmin',
+          storeId: 'superadmin',
+          isSuperAdmin: true
+        });
 
         const customToken = await adminAuth.createCustomToken('superadmin', {
           role: 'superadmin',
@@ -53,13 +61,15 @@ export default async function handler(req: any, res: any) {
 
         return res.status(200).json({
           success: true,
+          token: sessionToken,
           customToken,
           user: {
             id: 'superadmin',
             username: expectedSuperUser,
             name: 'Super Admin',
             role: 'superadmin',
-            storeId: 'superadmin'
+            storeId: 'superadmin',
+            token: sessionToken
           }
         });
       } else {
@@ -103,17 +113,21 @@ export default async function handler(req: any, res: any) {
     const userData = userDoc.data();
     const userId = userDoc.id;
 
-    // 4. Xác thực mật khẩu và cơ chế Lazy Migration an toàn
+    // 4. Xác thực mật khẩu theo chuẩn Zero-Trust:
+    // Ưu tiên bản băm bảo mật trong user_secrets.
+    // NGUYÊN TẮC: Nếu đã có bản băm trong user_secrets, TUYỆT ĐỐI KHÔNG quay về kiểm tra mật khẩu rõ nếu băm sai!
     let isPasswordValid = false;
     let secretDoc: any = null;
     try {
       const secretRef = adminDb.collection('user_secrets').doc(userId);
       secretDoc = await secretRef.get();
     } catch (e) {
-      // Bỏ qua nếu user_secrets chưa phân quyền ở dev
+      // Xử lý nếu user_secrets chưa cấp quyền
     }
 
-    if (secretDoc && secretDoc.exists) {
+    const hasStoredHash = Boolean(secretDoc && secretDoc.exists && (secretDoc.data()?.passwordHash || secretDoc.data()?.encryptedPassword));
+
+    if (hasStoredHash) {
       const secretData = secretDoc.data() || {};
       if (secretData.passwordHash) {
         isPasswordValid = verifyPassword(cleanPassword, secretData.passwordHash);
@@ -121,30 +135,45 @@ export default async function handler(req: any, res: any) {
         const decrypted = decryptAes(secretData.encryptedPassword);
         isPasswordValid = decrypted === cleanPassword;
       }
-    }
+      // ĐÃ CÓ BẢN BĂM: Nếu sai, dừng lại ngay lập tức (không fallback)
+      if (!isPasswordValid) {
+        recordFailedAttempt(rateLimitKey);
+        return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
+      }
+    } else {
+      // CHỈ TÀI KHOẢN CHUYỂN TIẾP (chưa có bản băm trong user_secrets) mới được kiểm tra đối chiếu mật khẩu cũ
+      if (userData.password && String(userData.password).trim() === cleanPassword) {
+        isPasswordValid = true;
 
-    // Nếu user_secrets chưa có hoặc chưa khớp, thử đối chiếu với mật khẩu thô trong document users
-    if (!isPasswordValid && userData.password && String(userData.password).trim() === cleanPassword) {
-      isPasswordValid = true;
+        // DI CHUYỂN NGAY LẬP TỨC VÀO VÙNG BẢO MẬT & XÓA BẢN RÕ KHỎI USERS
+        try {
+          const passwordHash = hashPassword(cleanPassword);
+          const secretPayload: Record<string, any> = {
+            userId,
+            storeId,
+            role: userData.role,
+            passwordHash,
+            updatedAt: new Date().toISOString()
+          };
 
-      // TỰ ĐỘNG CHUYỂN ĐỔI (MIGRATION) NGAY LẦN ĐĂNG NHẬP ĐẦU (nếu ghi được):
-      try {
-        const passwordHash = hashPassword(cleanPassword);
-        const secretPayload: Record<string, any> = {
-          userId,
-          storeId,
-          role: userData.role,
-          passwordHash,
-          updatedAt: new Date().toISOString()
-        };
+          if (userData.role === 'admin') {
+            secretPayload.encryptedPassword = encryptAes(cleanPassword);
+          }
 
-        if (userData.role === 'admin') {
-          secretPayload.encryptedPassword = encryptAes(cleanPassword);
+          await adminDb.collection('user_secrets').doc(userId).set(secretPayload);
+          // Xóa ngay trường password thô khỏi bảng users để triệt tiêu rủi ro lộ mật khẩu
+          try {
+            await adminDb.collection('users').doc(userId).update({
+              password: FieldValue.delete(),
+              isLegacy: FieldValue.delete()
+            });
+          } catch (delErr) {}
+        } catch (migErr) {
+          console.warn("[Auth] Migration warning:", migErr);
         }
-
-        await adminDb.collection('user_secrets').doc(userId).set(secretPayload);
-      } catch (migErr) {
-        // Không chặn đăng nhập nếu ghi user_secrets gặp hạn chế rules
+      } else {
+        recordFailedAttempt(rateLimitKey);
+        return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
       }
     }
 
@@ -161,11 +190,18 @@ export default async function handler(req: any, res: any) {
       await adminDb.collection('users').doc(userId).update({
         lastLogin: new Date().toISOString()
       });
-    } catch (e) {
-      // Không chặn luồng nếu cập nhật lastLogin gặp sự cố
-    }
+    } catch (e) {}
 
-    // 5. Cấp Firebase Custom Token mang Custom Claims (storeId, role)
+    // 5. Cấp Session Token có chữ ký số bí mật HMAC-SHA256
+    const sessionToken = generateAuthToken({
+      uid: userId,
+      username: cleanUsername,
+      role: userData.role,
+      storeId,
+      isSuperAdmin: false
+    });
+
+    // 6. Cấp Firebase Custom Token mang Custom Claims (storeId, role)
     const customToken = await adminAuth.createCustomToken(userId, {
       storeId,
       role: userData.role,
@@ -177,9 +213,11 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({
       success: true,
+      token: sessionToken,
       customToken,
       user: {
         id: userId,
+        token: sessionToken,
         ...sanitizedUserData,
         store: storeData
       }

@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { adminDb } from './_firebaseAdmin';
 import { hashPassword, encryptAes } from './_crypto';
+import { getAuthenticatedCaller } from './_token';
 import { FieldValue } from 'firebase-admin/firestore';
 
 export default async function handler(req: any, res: any) {
@@ -8,7 +9,15 @@ export default async function handler(req: any, res: any) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { userId, newPassword, caller } = req.body || {};
+  // 1. XÁC THỰC DANH TÍNH BẮT BUỘC BẰNG TOKEN (Zero-Trust Guard)
+  const caller = await getAuthenticatedCaller(req);
+  if (!caller) {
+    return res.status(401).json({
+      error: 'Yêu cầu đăng nhập: Phiên làm việc không hợp lệ hoặc đã hết hạn.'
+    });
+  }
+
+  const { userId, newPassword } = req.body || {};
 
   if (!userId || !newPassword || String(newPassword).trim().length < 1) {
     return res.status(400).json({ error: 'Vui lòng cung cấp mã người dùng (userId) và mật khẩu mới' });
@@ -29,27 +38,25 @@ export default async function handler(req: any, res: any) {
     const role = userData.role || 'order';
     const storeId = userData.storeId || '';
 
-    // PHÂN QUYỀN API (P2 Security Guard):
-    if (caller) {
-      const isSelf = String(caller.id || '').trim() === cleanUserId;
-      const isSuperAdmin = caller.role === 'superadmin';
-      const isStoreAdmin = caller.role === 'admin' && String(caller.storeId || '').trim() === storeId;
+    // 2. KIỂM SOÁT PHÂN QUYỀN ĐỔI MẬT KHẨU
+    const isSelf = caller.uid === cleanUserId;
+    const isSuperAdmin = caller.isSuperAdmin || caller.role === 'superadmin';
+    const isStoreAdmin = caller.role === 'admin' && String(caller.storeId || '').trim() === storeId;
 
-      if (!isSelf && !isSuperAdmin && !isStoreAdmin) {
-        return res.status(403).json({
-          error: 'Từ chối quyền truy cập: Bạn không có quyền đổi mật khẩu cho tài khoản này.'
-        });
-      }
-
-      // Admin của quán không được đổi mật khẩu của Admin khác nếu không phải chính mình hoặc SuperAdmin
-      if (role === 'admin' && !isSelf && !isSuperAdmin) {
-        return res.status(403).json({
-          error: 'Chỉ SuperAdmin hoặc chính chủ tài khoản Admin mới có thể đổi mật khẩu này.'
-        });
-      }
+    if (!isSelf && !isSuperAdmin && !isStoreAdmin) {
+      return res.status(403).json({
+        error: 'Từ chối quyền truy cập: Bạn không có quyền đổi mật khẩu cho tài khoản này.'
+      });
     }
 
-    // Băm mật khẩu một chiều scrypt
+    // Admin quán không được đổi mật khẩu của Admin khác trừ khi là chính mình hoặc SuperAdmin
+    if (role === 'admin' && !isSelf && !isSuperAdmin) {
+      return res.status(403).json({
+        error: 'Chỉ SuperAdmin hoặc chính chủ tài khoản Admin mới có thể đổi mật khẩu này.'
+      });
+    }
+
+    // 3. BĂM MẬT KHẨU MỘT CHIỀU SCRYPT
     const passwordHash = hashPassword(cleanPassword);
 
     const secretPayload: Record<string, any> = {
@@ -60,31 +67,30 @@ export default async function handler(req: any, res: any) {
       updatedAt: new Date().toISOString()
     };
 
-    // Nếu là Admin (Chủ quán): Lưu bản mã hóa AES-256 để Superadmin hỗ trợ khi chủ quán quên
-    // Nếu là Nhân viên: KHÔNG lưu mã hóa 2 chiều, chỉ lưu hash scrypt (Chủ quán không xem được)
     if (role === 'admin') {
       secretPayload.encryptedPassword = encryptAes(cleanPassword);
     } else {
       secretPayload.encryptedPassword = FieldValue.delete();
     }
 
-    // Cập nhật collection bảo mật user_secrets
+    // 4. LƯU VÀO VÙNG BẢO MẬT USER_SECRETS (Nếu thất bại, dừng ngay lập tức)
     try {
       await adminDb.collection('user_secrets').doc(cleanUserId).set(secretPayload, { merge: true });
-      try {
-        await userDocRef.update({
-          password: FieldValue.delete(),
-          passwordUpdatedAt: new Date().toISOString()
-        });
-      } catch (e) {}
     } catch (secErr) {
-      // Fallback nếu không ghi được user_secrets (môi trường dev không có service account)
-      try {
-        await userDocRef.update({
-          password: cleanPassword,
-          passwordUpdatedAt: new Date().toISOString()
-        });
-      } catch (e) {}
+      return res.status(500).json({
+        error: 'Lỗi hệ thống: Không thể lưu mật khẩu vào vùng bảo mật. Đổi mật khẩu thất bại.'
+      });
+    }
+
+    // 5. XÓA TRIỆT ĐỂ BẢN RÕ VÀ CỜ LEGACY TRONG USERS
+    try {
+      await userDocRef.update({
+        password: FieldValue.delete(),
+        isLegacy: FieldValue.delete(),
+        passwordUpdatedAt: new Date().toISOString()
+      });
+    } catch (e) {
+      console.warn("Could not clean plaintext password in users:", e);
     }
 
     return res.status(200).json({

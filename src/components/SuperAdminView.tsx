@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Store, Settings, LogOut, Package as PackageIcon, Edit2, CheckCircle2, XCircle, Search, Trash2, QrCode, Download, Brush as Broom, Smartphone, UploadCloud, ChefHat, Users, BarChart3, FileText, PieChart, Check, Lock, Key, Eye, Copy, X } from 'lucide-react';
+import { Store, Settings, LogOut, Package as PackageIcon, Edit2, CheckCircle2, XCircle, Search, Trash2, QrCode, Download, Brush as Broom, Smartphone, UploadCloud, ChefHat, Users, BarChart3, FileText, PieChart, Check, Lock, Key, Eye, Copy, X, RotateCcw } from 'lucide-react';
 import { db, storage } from '../lib/firebase';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { CurrencyInput } from './CurrencyInput';
@@ -102,13 +102,28 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
   const [revealLoadingId, setRevealLoadingId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState(false);
 
+  const getSuperAdminToken = (): string => {
+    try {
+      const raw = localStorage.getItem('fnb_master_user');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return parsed.token || '';
+      }
+    } catch (e) {}
+    return '';
+  };
+
   const handleRevealPassword = async (store: StoreTenant) => {
     setRevealLoadingId(store.id);
     try {
+      const token = getSuperAdminToken();
       const resp = await fetch('/api/reveal-password', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storeId: store.id, token: 'superadmin' })
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ storeId: store.id })
       });
       const data = await resp.json();
       if (resp.ok && data.success) {
@@ -119,12 +134,50 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
           password: data.password
         });
       } else {
-        alert(data.error || data.message || 'Không thể tra cứu mật khẩu của quán này.');
+        alert(data.error || data.message || 'Không thể tra cứu mật khẩu của quán này. Hãy dùng chức năng Đặt lại mật khẩu.');
       }
     } catch (err: any) {
       alert('Lỗi kết nối khi tra cứu mật khẩu: ' + err.message);
     } finally {
       setRevealLoadingId(null);
+    }
+  };
+
+  const handleResetPassword = async (store: StoreTenant) => {
+    const newPass = prompt(`Nhập mật khẩu mới cho Quản trị viên quán "${store.name}":`, '12345678');
+    if (newPass === null) return;
+    if (newPass.trim().length < 6) {
+      alert('Mật khẩu mới phải có độ dài từ 6 ký tự trở lên.');
+      return;
+    }
+    try {
+      const userQ = query(collection(db, 'users'), where('storeId', '==', store.id), where('role', '==', 'admin'));
+      const snap = await getDocs(userQ);
+      if (snap.empty) {
+        alert('Không tìm thấy tài khoản Quản trị viên của cửa hàng này.');
+        return;
+      }
+      const adminId = snap.docs[0].id;
+      const token = getSuperAdminToken();
+      const resp = await fetch('/api/reset-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          userId: adminId,
+          newPassword: newPass.trim()
+        })
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        alert(`Đã đặt lại mật khẩu thành công cho quán ${store.name}!\nMật khẩu mới: ${newPass.trim()}`);
+      } else {
+        alert(data.error || 'Đặt lại mật khẩu thất bại.');
+      }
+    } catch (e: any) {
+      alert('Lỗi khi đặt lại mật khẩu: ' + e.message);
     }
   };
 
@@ -444,22 +497,20 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
 
         if (editingStoreAdmin.password && editingStoreAdmin.password.trim().length > 0) {
           try {
-            await fetch('/api/change-password', {
+            const token = getSuperAdminToken();
+            await fetch('/api/reset-password', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 
+                'Content-Type': 'application/json',
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+              },
               body: JSON.stringify({
                 userId: editingStoreAdmin.id,
-                newPassword: editingStoreAdmin.password.trim(),
-                role: 'admin',
-                storeId: editingStore.id,
-                caller: {
-                  id: 'superadmin',
-                  role: 'superadmin'
-                }
+                newPassword: editingStoreAdmin.password.trim()
               })
             });
           } catch (pwErr) {
-            console.error("Error updating admin password via API:", pwErr);
+            console.error("Error resetting admin password via API:", pwErr);
           }
         }
       }
@@ -895,6 +946,13 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                           disabled={revealLoadingId === store.id}
                         >
                           <Key className={`w-4 h-4 ${revealLoadingId === store.id ? 'animate-spin' : ''}`} />
+                        </button>
+                        <button 
+                          onClick={() => handleResetPassword(store)} 
+                          className="p-2 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 rounded-lg cursor-pointer" 
+                          title="Đặt lại mật khẩu quản trị viên quán (chỉ Super Admin)"
+                        >
+                          <RotateCcw className="w-4 h-4" />
                         </button>
                         <button onClick={() => handleEditStore(store)} className="p-2 text-blue-600 dark:text-blue-500 hover:bg-blue-500/10 rounded-lg cursor-pointer" title="Chỉnh sửa">
                           <Edit2 className="w-4 h-4" />

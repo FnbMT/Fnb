@@ -100,4 +100,11 @@ Kế hoạch tối ưu triệt để lượt đọc/ghi Cloud Firestore nhằm �
    - **Rà soát & Hoàn thiện Firestore Rules**: Cập nhật `firestore.rules` khóa chặt vùng tối mật `user_secrets` và `processed_transactions`, bổ sung quyền cho collection hạt nhân `daily_stats`, cho phép SuperAdmin quản trị cấu hình hệ thống, gói cước và APK an toàn.
    - **Phân quyền API Backend (API Authorization)**: Tích hợp Caller Guard vào `/api/save-user`, `/api/delete-user`, `/api/change-password`. Ngăn chặn việc nhân viên tự đổi quyền, tự sửa mức lương hoặc xóa người dùng khác. Đảm bảo cách ly đa quán (`storeId` isolation).
    - **Bảo mật SuperAdmin**: SuperAdmin có đầy đủ quyền quản lý quán, tra cứu mật khẩu admin (AES-256), gia hạn/khóa quán tức thì, phân quyền thao tác chặt chẽ theo từng vai trò (`kitchen`, `order`, `cashier`, `admin`, `superadmin`).
+6. **Giai đoạn 6 (Đã hoàn thành - Theo yêu cầu người dùng)**: Kiến trúc 2 tầng (Two-Tier Architecture) & Lazy-Loading On-Demand cho Tab Tổng kết:
+   - **Tầng 1 (Luôn nạp & siêu nhẹ)**: Chỉ nạp `daily_stats` (1 read cho ngày, <=31 cho tháng, <=365 cho năm). Dữ liệu thẻ KPI & biểu đồ được tính tức thì, đầy đủ 100%. Nếu là hôm nay, kết hợp trực tiếp `invoices` từ live listener (0 reads).
+   - **Tầng 2 (Chỉ nạp khi mở tab tương ứng - On-Demand)**:
+     - Nếu xem Hôm nay: Dùng trực tiếp dữ liệu trong RAM từ `App.tsx` (0 reads), hiển thị đầy đủ 100% hóa đơn hôm nay khớp với thẻ KPI.
+     - Nếu xem Lịch sử: Chỉ nạp trang đầu tiên (30 hóa đơn) khi mở tab 'sales'; chỉ nạp sổ quỹ khi mở tab 'cash'; chỉ nạp kho khi mở tab 'inventory'.
+     - Khi xem chi tiết hóa đơn (icon con mắt 👁️): Chỉ đọc đúng 1 document chi tiết khi người dùng bấm vào (Lazy-loading on-demand), lưu cache cục bộ trong session.
+   - **Khắc phục lỗi lệch múi giờ**: Sử dụng `businessDate || getVietnamBusinessDate(inv.date)` đồng bộ linh hoạt, đảm bảo các hóa đơn thanh toán sáng sớm (trước 07:00 AM) được nhận diện chính xác 100%, không bị cắt hay thiếu.
 

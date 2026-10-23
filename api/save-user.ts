@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { adminDb } from './_firebaseAdmin';
 import { hashPassword, encryptAes } from './_crypto';
+import { getAuthenticatedCaller } from './_token';
 import { FieldValue } from 'firebase-admin/firestore';
 
 export default async function handler(req: any, res: any) {
@@ -8,7 +9,16 @@ export default async function handler(req: any, res: any) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { user, caller } = req.body || {};
+  // 1. XÁC THỰC DANH TÍNH BẰNG TOKEN (Zero-Trust Guard)
+  // Bắt buộc xác minh qua Bearer Token có chữ ký số hoặc Firebase ID Token
+  const caller = await getAuthenticatedCaller(req);
+  if (!caller) {
+    return res.status(401).json({
+      error: 'Yêu cầu đăng nhập: Phiên làm việc không hợp lệ hoặc đã hết hạn.'
+    });
+  }
+
+  const { user } = req.body || {};
 
   if (!user) {
     return res.status(400).json({ error: 'Dữ liệu người dùng không hợp lệ' });
@@ -23,24 +33,21 @@ export default async function handler(req: any, res: any) {
     return res.status(400).json({ error: 'Vui lòng cung cấp đầy đủ Tên đăng nhập, Họ tên và Mã cửa hàng' });
   }
 
-  // PHÂN QUYỀN API (P2 Security Guard):
-  // Chỉ Admin của chính cửa hàng này hoặc SuperAdmin mới có quyền tạo / sửa nhân viên
-  if (caller) {
-    const isSuperAdmin = caller.role === 'superadmin';
-    const isStoreAdmin = caller.role === 'admin' && String(caller.storeId || '').trim() === cleanStoreId;
+  // 2. KIỂM SOÁT PHÂN QUYỀN CHẶT CHẼ
+  const isSuperAdmin = caller.isSuperAdmin || caller.role === 'superadmin';
+  const isStoreAdmin = caller.role === 'admin' && String(caller.storeId || '').trim() === cleanStoreId;
 
-    if (!isSuperAdmin && !isStoreAdmin) {
-      return res.status(403).json({
-        error: 'Từ chối quyền truy cập: Chỉ Quản trị viên (Admin) của cửa hàng hoặc SuperAdmin mới có quyền tạo hoặc chỉnh sửa nhân sự.'
-      });
-    }
+  if (!isSuperAdmin && !isStoreAdmin) {
+    return res.status(403).json({
+      error: 'Từ chối quyền truy cập: Bạn không có quyền quản lý nhân sự của cửa hàng này.'
+    });
+  }
 
-    // Nhân viên không thể tự nâng role của mình lên Admin
-    if (role === 'admin' && !isSuperAdmin && caller.role !== 'admin') {
-      return res.status(403).json({
-        error: 'Từ chối quyền truy cập: Không thể chỉ định vai trò Admin.'
-      });
-    }
+  // Chỉ SuperAdmin mới có quyền tạo hoặc nâng quyền Admin
+  if (role === 'admin' && !isSuperAdmin) {
+    return res.status(403).json({
+      error: 'Từ chối quyền truy cập: Chỉ Quản trị viên tối cao mới có quyền chỉ định tài khoản Admin.'
+    });
   }
 
   try {
@@ -64,7 +71,7 @@ export default async function handler(req: any, res: any) {
       const cleanPassword = String(user.password).trim();
       const passwordHash = hashPassword(cleanPassword);
 
-      // Tạo document users TRƯỚC (tuyệt đối KHÔNG lưu plaintext password)
+      // 1. Tạo document users TUYỆT ĐỐI KHÔNG chứa trường password rõ
       const userDocData: Record<string, any> = {
         storeId: cleanStoreId,
         username: cleanUsername,
@@ -83,15 +90,13 @@ export default async function handler(req: any, res: any) {
       const newUserDocRef = await adminDb.collection('users').add(userDocData);
       const newUserId = newUserDocRef.id;
 
-      // Lưu mật khẩu vào collection bảo mật user_secrets
-      // NGUYÊN TẮC BẢO MẬT:
-      // - role === 'admin' (Chủ quán): Lưu passwordHash + encryptedPassword (AES-256) để Super Admin có thể tra cứu khi chủ quán quên
-      // - role !== 'admin' (Nhân viên): CHỈ lưu passwordHash (scrypt 1 chiều), KHÔNG mã hóa 2 chiều (Chủ quán không xem được mật khẩu nhân viên)
+      // 2. Lưu thông tin băm vào vùng tối mật user_secrets
       const secretPayload: Record<string, any> = {
         userId: newUserId,
         storeId: cleanStoreId,
         role: role,
         passwordHash,
+        createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
@@ -102,9 +107,13 @@ export default async function handler(req: any, res: any) {
       try {
         await adminDb.collection('user_secrets').doc(newUserId).set(secretPayload);
       } catch (secErr) {
+        // NGUYÊN TẮC AN TOÀN: Nếu lưu mật khẩu thất bại, lập tức rollback xóa user vừa tạo
         try {
-          await adminDb.collection('users').doc(newUserId).update({ password: cleanPassword });
-        } catch (uErr) {}
+          await adminDb.collection('users').doc(newUserId).delete();
+        } catch (_) {}
+        return res.status(500).json({
+          error: 'Lỗi hệ thống: Không thể lưu trữ thông tin xác thực an toàn. Tạo tài khoản thất bại.'
+        });
       }
 
       return res.status(200).json({
@@ -140,9 +149,7 @@ export default async function handler(req: any, res: any) {
       updatedAt: new Date().toISOString()
     };
 
-    await userDocRef.update(updates);
-
-    // Nếu có gửi mật khẩu mới thì tiến hành cập nhật vào user_secrets
+    // Nếu có gửi mật khẩu mới, cập nhật vào user_secrets và xóa mật khẩu rõ
     if (user.password && String(user.password).trim().length > 0) {
       const cleanPassword = String(user.password).trim();
       const passwordHash = hashPassword(cleanPassword);
@@ -163,17 +170,18 @@ export default async function handler(req: any, res: any) {
 
       try {
         await adminDb.collection('user_secrets').doc(userId).set(secretPayload, { merge: true });
-        // Tự động dọn dẹp trường password thô nếu ghi user_secrets thành công
-        try {
-          await userDocRef.update({ password: FieldValue.delete() });
-        } catch (delErr) {}
       } catch (secErr) {
-        // Fallback lưu password thô nếu không ghi được user_secrets
-        try {
-          await userDocRef.update({ password: cleanPassword });
-        } catch (uErr) {}
+        return res.status(500).json({
+          error: 'Lỗi hệ thống: Không thể cập nhật mật khẩu vào vùng bảo mật.'
+        });
       }
+
+      // Xóa triệt để trường password rõ và cờ legacy khỏi collection users
+      updates.password = FieldValue.delete();
+      updates.isLegacy = FieldValue.delete();
     }
+
+    await userDocRef.update(updates);
 
     return res.status(200).json({
       success: true,

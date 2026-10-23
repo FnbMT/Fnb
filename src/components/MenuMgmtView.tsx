@@ -674,69 +674,95 @@ export const MenuMgmtView = ({
                 className="fixed inset-0 z-30"
                 onClick={() => setShowCategoryDropdown(false)}
               ></div>
-              <div className="absolute top-full mt-2 left-0 w-full md:w-96 bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-xl shadow-xl z-40 p-2 flex flex-col gap-1 max-h-[60vh] overflow-y-auto custom-scrollbar">
+              <div className="absolute top-full mt-2 left-0 w-full sm:w-[380px] md:w-[420px] max-w-[95vw] bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl shadow-2xl z-40 p-2 flex flex-col gap-1 max-h-[65vh] overflow-y-auto custom-scrollbar">
                 {categories.map((cat, idx) => (
-                  <div key={cat} className="relative group/cat flex items-center">
-                    {idx > 1 && onUpdateCategories && (
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); moveCategory(idx, 'left'); }}
-                        className="absolute left-2 top-1/2 -translate-y-1/2 z-10 w-7 h-7 bg-white dark:bg-[#151619] border border-black/20 dark:border-white/20 text-gray-900 dark:text-white rounded-full flex items-center justify-center opacity-0 group-hover/cat:opacity-100 transition-all hover:bg-emerald-500 hover:text-white cursor-pointer shadow-md"
-                        title="Di chuyển lên"
-                      >
-                        <ArrowUp className="w-4 h-4" />
-                      </button>
+                  <div 
+                    key={cat} 
+                    className={cn(
+                      "flex items-center justify-between gap-1 p-1 rounded-xl transition-all",
+                      activeCategory === cat
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-bold" 
+                        : "hover:bg-black/5 dark:hover:bg-white/5 text-gray-700 dark:text-gray-300"
                     )}
+                  >
+                    {/* Tên nhóm món & Checkmark */}
                     <button
+                      type="button"
                       onClick={() => {
                         setActiveCategory(cat);
                         setShowCategoryDropdown(false);
                       }}
-                      className={cn(
-                        "w-full px-4 py-3 rounded-lg text-left text-sm transition-all cursor-pointer relative",
-                        activeCategory === cat
-                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-bold" 
-                          : "text-gray-700 dark:text-gray-300 hover:bg-black/5 dark:hover:bg-white/5"
-                      )}
+                      className="flex items-center gap-2 flex-1 min-w-0 py-2 px-2 text-left text-sm cursor-pointer"
                     >
-                      <span className="pl-6 group-hover/cat:pl-10 transition-all duration-300 inline-block">{cat}</span>
-                      {activeCategory === cat && (
-                        <Check className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2" />
+                      {activeCategory === cat ? (
+                        <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                      ) : (
+                        <div className="w-4 h-4 shrink-0" />
                       )}
+                      <span className="truncate">{cat}</span>
                     </button>
-                    {idx > 0 && idx < categories.length - 1 && onUpdateCategories && (
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); moveCategory(idx, 'right'); }}
-                        className="absolute right-18 top-1/2 -translate-y-1/2 z-10 w-7 h-7 bg-white dark:bg-[#151619] border border-black/20 dark:border-white/20 text-gray-900 dark:text-white rounded-full flex items-center justify-center opacity-0 group-hover/cat:opacity-100 transition-all hover:bg-emerald-500 hover:text-white cursor-pointer shadow-md"
-                        title="Di chuyển xuống"
-                      >
-                        <ArrowDown className="w-4 h-4" />
-                      </button>
-                    )}
-                    {cat !== 'Tất cả' && onRenameCategory && (
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingCategory(cat);
-                          setEditingCategoryName(cat);
-                          setEditingCategoryError('');
-                        }}
-                        className="absolute right-10 top-1/2 -translate-y-1/2 w-7 h-7 bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-lg flex items-center justify-center opacity-0 group-hover/cat:opacity-100 transition-all hover:bg-blue-500 hover:text-white cursor-pointer z-20 shadow-sm"
-                        title="Sửa tên nhóm"
-                      >
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+
+                    {/* Cụm nút thao tác: Luôn hiển thị rõ ràng trên cả mobile & desktop */}
                     {cat !== 'Tất cả' && (
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteCategory(cat);
-                        }}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 bg-rose-500/10 text-rose-600 dark:text-rose-500 rounded-lg flex items-center justify-center opacity-0 group-hover/cat:opacity-100 transition-all hover:bg-rose-500 hover:text-white cursor-pointer z-20"
-                        title="Xóa nhóm"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1 shrink-0 pr-1">
+                        {/* Di chuyển lên */}
+                        {idx > 1 && onUpdateCategories && (
+                          <button 
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); moveCategory(idx, 'left'); }}
+                            className="w-7 h-7 rounded-lg bg-black/5 dark:bg-white/10 hover:bg-emerald-500 hover:text-white text-gray-600 dark:text-gray-300 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95"
+                            title="Di chuyển lên"
+                            aria-label="Di chuyển lên"
+                          >
+                            <ArrowUp className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+
+                        {/* Di chuyển xuống */}
+                        {idx > 0 && idx < categories.length - 1 && onUpdateCategories && (
+                          <button 
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); moveCategory(idx, 'right'); }}
+                            className="w-7 h-7 rounded-lg bg-black/5 dark:bg-white/10 hover:bg-emerald-500 hover:text-white text-gray-600 dark:text-gray-300 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95"
+                            title="Di chuyển xuống"
+                            aria-label="Di chuyển xuống"
+                          >
+                            <ArrowDown className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+
+                        {/* Sửa tên nhóm (Cây bút) */}
+                        {onRenameCategory && (
+                          <button 
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingCategory(cat);
+                              setEditingCategoryName(cat);
+                              setEditingCategoryError('');
+                            }}
+                            className="w-7 h-7 rounded-lg bg-blue-500/15 hover:bg-blue-500 hover:text-white text-blue-600 dark:text-blue-400 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95"
+                            title="Sửa tên nhóm"
+                            aria-label="Sửa tên nhóm"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+
+                        {/* Xóa nhóm (Thùng rác) */}
+                        <button 
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteCategory(cat);
+                          }}
+                          className="w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500 hover:text-white text-rose-600 dark:text-rose-400 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-95"
+                          title="Xóa nhóm"
+                          aria-label="Xóa nhóm"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}

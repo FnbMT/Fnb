@@ -98,7 +98,7 @@ export default async function handler(req: any, res: any) {
 
     const storeId = storeRef.id;
 
-    // 5. Tạo tài khoản Admin chủ quán (Tuyệt đối KHÔNG lưu plaintext password trong users)
+    // 5. Tạo tài khoản Admin chủ quán (Tuyệt đối KHÔNG lưu mật khẩu rõ)
     const adminUserRef = await adminDb.collection('users').add({
       username: cleanPhone,
       name: 'Quản trị viên',
@@ -110,8 +110,7 @@ export default async function handler(req: any, res: any) {
 
     const adminUserId = adminUserRef.id;
 
-    // 6. Lưu mật khẩu đã mã hóa và băm vào user_secrets
-    // Chủ quán: lưu hash scrypt + AES-256 để Superadmin hỗ trợ khi chủ quán quên
+    // 6. Lưu mật khẩu đã mã hóa và băm vào vùng tối mật user_secrets
     const passwordHash = hashPassword(cleanPassword);
     const encryptedPassword = encryptAes(cleanPassword);
 
@@ -126,9 +125,14 @@ export default async function handler(req: any, res: any) {
         updatedAt: new Date().toISOString()
       });
     } catch (secErr) {
+      // Rollback hủy quán và user vừa tạo nếu không ghi được mật khẩu an toàn
       try {
-        await adminDb.collection('users').doc(adminUserId).update({ password: cleanPassword });
-      } catch (uErr) {}
+        await adminDb.collection('users').doc(adminUserId).delete();
+        await adminDb.collection('stores').doc(storeId).delete();
+      } catch (_) {}
+      return res.status(500).json({
+        error: 'Lỗi hệ thống: Không thể khởi tạo thông tin xác thực an toàn cho tài khoản chủ quán.'
+      });
     }
 
     // 7. Khởi tạo dữ liệu mẫu cho quán (Thực đơn, Bàn, Cài đặt)

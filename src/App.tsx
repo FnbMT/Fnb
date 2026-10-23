@@ -141,7 +141,11 @@ import {
   orderBy,
   increment
 } from 'firebase/firestore';
-import { getVietnamStartOfTodayIso } from './utils/firestoreDateHelper';
+import { 
+  getVietnamStartOfTodayIso, 
+  getVietnamBusinessDate, 
+  getVietnamDayBoundariesIso 
+} from './utils/firestoreDateHelper';
 
 // Import new views
 import { InventoryView } from './components/InventoryView';
@@ -2167,10 +2171,7 @@ export default function App() {
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>([]);
   const [myTodayAttendance, setMyTodayAttendance] = useState<AttendanceRecord[]>([]);
-  const [currentBusinessDate, setCurrentBusinessDate] = useState<string>(() => {
-    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' });
-    return formatter.format(new Date());
-  });
+  const [currentBusinessDate, setCurrentBusinessDate] = useState<string>(() => getVietnamBusinessDate());
 
   // Khóa chống ghi lặp khi thanh toán đa luồng / double-click (P0 Idempotency & Replay Protection)
   const checkoutLockRef = useRef<Set<string>>(new Set());
@@ -2178,8 +2179,7 @@ export default function App() {
   // Tự động kiểm tra và cập nhật ngày kinh doanh (Việt Nam UTC+7) khi qua nửa đêm hoặc khi app resume từ background
   useEffect(() => {
     const checkBusinessDate = () => {
-      const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' });
-      const todayVietnam = formatter.format(new Date());
+      const todayVietnam = getVietnamBusinessDate();
       setCurrentBusinessDate(prev => {
         if (prev !== todayVietnam) {
           console.log(`[Fnb Master] Tự động chuyển ngày kinh doanh: ${prev} -> ${todayVietnam}`);
@@ -2602,13 +2602,117 @@ export default function App() {
     });
     unsubs.push(unsubSettings);
 
-    // 6. User Attendance Status (Chỉ theo dõi điểm danh hôm nay của chính user hiện tại vào state riêng biệt)
-    const todayStr = currentBusinessDate;
+    // 6. Sync Users (Chỉ cho Thu ngân / Quản lý / Admin - Bếp và Order KHÔNG nghe)
+    if (!isKitchenOrOrder) {
+      const usersQuery = query(collection(db, 'users'), where('storeId', '==', storeId));
+      const unsubUsers = onSnapshot(usersQuery, (snapshot) => {
+        const usersData = snapshot.docs.map(doc => {
+          const data = doc.data();
+          const { password, ...safeData } = data as any;
+          return { ...safeData, id: doc.id } as User;
+        });
+        setUsers(usersData);
+      });
+      unsubs.push(unsubUsers);
+    }
+
+    // 7. Sync Shifts
+    // 7a. Nếu là Bếp (kitchen): Tuyệt đối KHÔNG nghe ca làm việc
+    if (currentUser.role === 'kitchen') {
+      // Bếp không cần nghe ca
+    } else if (currentUser.role === 'order') {
+      // 7b. Nhân viên gọi món (order): CHỈ nghe duy nhất ca mở của chính mình (tiết kiệm triệt để reads)
+      const myOpenShiftQuery = query(
+        collection(db, 'shifts'),
+        where('storeId', '==', storeId),
+        where('status', '==', 'open'),
+        where('staffId', '==', currentUser.id)
+      );
+      const unsubMyShift = onSnapshot(myOpenShiftQuery, (snapshot) => {
+        if (!snapshot.empty) {
+          const myShift = { ...snapshot.docs[0].data(), id: snapshot.docs[0].id } as Shift;
+          setActiveShift(myShift);
+          setAllActiveShifts([myShift]);
+        } else {
+          setActiveShift(null);
+          setAllActiveShifts([]);
+        }
+      }, (err) => console.warn('Order staff shift query error:', err));
+      unsubs.push(unsubMyShift);
+    } else {
+      // 7c. Thu ngân / Quản lý / Admin: Nghe tất cả các ca đang mở để quản lý điều phối
+      const openShiftsQuery = query(
+        collection(db, 'shifts'),
+        where('storeId', '==', storeId),
+        where('status', '==', 'open')
+      );
+      const unsubOpenShifts = onSnapshot(openShiftsQuery, (snapshot) => {
+        const openShifts = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
+        setAllActiveShifts(openShifts);
+        const myOpenShift = openShifts.find(s => s.staffId === currentUser?.id);
+        setActiveShift(myOpenShift || null);
+      }, (err) => console.warn('Open shifts query error:', err));
+      unsubs.push(unsubOpenShifts);
+
+      // Ca đã đóng gần nhất trong 3 ngày (Chỉ cho Thu ngân / Quản lý / Admin xem đối soát)
+      const threeDaysAgoIso = subDays(new Date(), 3).toISOString();
+      const closedShiftsQuery = query(
+        collection(db, 'shifts'),
+        where('storeId', '==', storeId),
+        where('status', '==', 'closed'),
+        where('startTime', '>=', threeDaysAgoIso)
+      );
+      const unsubClosedShifts = onSnapshot(closedShiftsQuery, (snapshot) => {
+        const closedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
+        setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
+      }, (err) => {
+        console.warn('Closed shifts query fallback:', err);
+        const fallbackShifts = query(
+          collection(db, 'shifts'),
+          where('storeId', '==', storeId),
+          where('status', '==', 'closed'),
+          limit(30)
+        );
+        const unsubFallback = onSnapshot(fallbackShifts, (snapshot) => {
+          const closedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
+          setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
+        });
+        unsubs.push(unsubFallback);
+      });
+      unsubs.push(unsubClosedShifts);
+    }
+
+    // 8. Sync Customers (Chỉ cho Thu ngân / Quản lý / Admin - Bếp và Order KHÔNG nghe)
+    if (!isKitchenOrOrder) {
+      const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId), limit(100));
+      const unsubCustomers = onSnapshot(customersQuery, (snapshot) => {
+        const customersData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Customer));
+        setCustomers(customersData);
+      });
+      unsubs.push(unsubCustomers);
+    }
+
+    return () => {
+      unsubs.forEach(u => u());
+    };
+  }, [currentUser?.storeId, currentUser?.id, currentUser?.role]);
+
+  // DATE-BOUNDED REALTIME SYNC (Hôm nay theo múi giờ Việt Nam):
+  // Đưa điều kiện ngày trực tiếp vào Firestore query (P0 - Cắt giảm 99% reads tải đầu)
+  // và tách riêng để khi qua nửa đêm chỉ effect này cập nhật, không reload menu/bàn!
+  useEffect(() => {
+    if (!currentUser) return;
+    const storeId = currentUser.storeId;
+    const isKitchen = currentUser.role === 'kitchen';
+    const isOrderOnly = currentUser.role === 'order';
+    const unsubs: (() => void)[] = [];
+
+    // 1. Điểm danh hôm nay của chính user
     const myAttendanceQuery = query(
       collection(db, 'attendance_records'),
       where('storeId', '==', storeId),
       where('userId', '==', currentUser.id),
-      where('date', '==', todayStr)
+      where('date', '==', currentBusinessDate)
     );
     const unsubMyAttendance = onSnapshot(myAttendanceQuery, (snapshot) => {
       const attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
@@ -2616,133 +2720,42 @@ export default function App() {
     }, (err) => console.warn('User today attendance listener error:', err));
     unsubs.push(unsubMyAttendance);
 
-    // =========================================================================
-    // PHÂN TÁCH VAI TRÒ: Màn hình Bếp & Order
-    // =========================================================================
-    
-    // 1. Vai trò Bếp: Chỉ cần xem bàn, thực đơn, cài đặt. Không cần ca, không cần hóa đơn.
-    if (currentUser.role === 'kitchen') {
+    // Bếp và Order không cần nghe hóa đơn hay sổ quỹ
+    if (isKitchen || isOrderOnly) {
       return () => {
         unsubs.forEach(u => u());
       };
     }
 
-    // 2. Vai trò Order: Cần ca đang mở của CHÍNH BẢN THÂN để mở bàn gọi món!
-    // Tuyệt đối không tải lịch sử ca của người khác, không tải hóa đơn/sổ quỹ/lương.
-    if (currentUser.role === 'order') {
-      const myOpenShiftQuery = query(
-        collection(db, 'shifts'),
-        where('storeId', '==', storeId),
-        where('staffId', '==', currentUser.id),
-        where('status', '==', 'open')
-      );
-      const unsubMyOpenShift = onSnapshot(myOpenShiftQuery, (snapshot) => {
-        if (!snapshot.empty) {
-          const shift = { ...snapshot.docs[0].data(), id: snapshot.docs[0].id } as Shift;
-          setActiveShift(shift);
-          setAllActiveShifts([shift]);
-        } else {
-          setActiveShift(null);
-          setAllActiveShifts([]);
-        }
-      }, (err) => console.warn('Order open shift query error:', err));
-      unsubs.push(unsubMyOpenShift);
-
-      return () => {
-        unsubs.forEach(u => u());
-      };
-    }
-
-    // 7. Sync Users (Chỉ cho Thu ngân / Quản lý / Admin)
-    const usersQuery = query(collection(db, 'users'), where('storeId', '==', storeId));
-    const unsubUsers = onSnapshot(usersQuery, (snapshot) => {
-      const usersData = snapshot.docs.map(doc => {
-        const data = doc.data();
-        const { password, ...safeData } = data as any;
-        return { ...safeData, id: doc.id } as User;
-      });
-      setUsers(usersData);
-    });
-    unsubs.push(unsubUsers);
-
-    // 8. Sync Shifts (Cho Thu ngân / Quản lý / Admin)
-    // 8a. Tất cả các ca ĐANG MỞ của quán (không bị giới hạn ngày, đảm bảo không bao giờ bị cắt mất ca mở)
-    const openShiftsQuery = query(
-      collection(db, 'shifts'),
-      where('storeId', '==', storeId),
-      where('status', '==', 'open')
-    );
-    const unsubOpenShifts = onSnapshot(openShiftsQuery, (snapshot) => {
-      const openShifts = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
-      setAllActiveShifts(openShifts);
-      const myOpenShift = openShifts.find(s => s.staffId === currentUser?.id);
-      setActiveShift(myOpenShift || null);
-    }, (err) => console.warn('Open shifts query error:', err));
-    unsubs.push(unsubOpenShifts);
-
-    // 8b. Các ca ĐÃ ĐÓNG gần nhất (trong 3 ngày gần đây để hiển thị lịch sử ca)
-    const threeDaysAgoIso = subDays(new Date(), 3).toISOString();
-    const closedShiftsQuery = query(
-      collection(db, 'shifts'),
-      where('storeId', '==', storeId),
-      where('status', '==', 'closed'),
-      where('startTime', '>=', threeDaysAgoIso)
-    );
-    const unsubClosedShifts = onSnapshot(closedShiftsQuery, (snapshot) => {
-      const closedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
-      setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
-    }, (err) => {
-      console.warn('Closed shifts query fallback:', err);
-      const fallbackShifts = query(
-        collection(db, 'shifts'),
-        where('storeId', '==', storeId),
-        where('status', '==', 'closed'),
-        limit(30)
-      );
-      const unsubFallback = onSnapshot(fallbackShifts, (snapshot) => {
-        const closedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
-        setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
-      });
-      unsubs.push(unsubFallback);
-    });
-    unsubs.push(unsubClosedShifts);
-
-    // 9. Sync Invoices (Lắng nghe hóa đơn thời gian thực theo storeId, lọc ngày hôm nay)
-    const startOfTodayIso = new Date(`${currentBusinessDate}T00:00:00+07:00`).toISOString();
+    // 2. Hóa đơn hôm nay (Lọc chính xác theo businessDate - Tiết kiệm tối đa reads, không đọc lịch sử khi hôm nay rỗng)
     const invoicesQuery = query(
       collection(db, 'invoices'),
-      where('storeId', '==', storeId)
+      where('storeId', '==', storeId),
+      where('businessDate', '==', currentBusinessDate)
     );
+
     const unsubInvoices = onSnapshot(invoicesQuery, (snapshot) => {
-      const allStoreInvoices = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
-      const todayInvoices = allStoreInvoices.filter(inv => inv.date >= startOfTodayIso);
-      setInvoices(todayInvoices);
+      const todayInvoices = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
+      setInvoices(todayInvoices.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
     }, (error) => {
-      console.warn('Invoices realtime sync error:', error);
+      console.warn('Invoices businessDate listener error:', error);
     });
     unsubs.push(unsubInvoices);
 
-    // 10. Sync Cash Transactions (Lắng nghe sổ quỹ thời gian thực theo storeId, lọc ngày hôm nay)
+    // 3. Sổ quỹ hôm nay (Lọc chính xác theo businessDate - Tiết kiệm tối đa reads)
     const cashQuery = query(
       collection(db, 'cash_transactions'),
-      where('storeId', '==', storeId)
+      where('storeId', '==', storeId),
+      where('businessDate', '==', currentBusinessDate)
     );
+
     const unsubCash = onSnapshot(cashQuery, (snapshot) => {
-      const allCash = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
-      const todayCash = allCash.filter(c => c.date >= startOfTodayIso);
+      const todayCash = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
       setCashTransactions(todayCash.sort((a, b) => b.date.localeCompare(a.date)));
     }, (error) => {
-      console.warn('Cash realtime sync error:', error);
+      console.warn('Cash businessDate listener error:', error);
     });
     unsubs.push(unsubCash);
-
-    // 11. Sync Customers (Giới hạn 100 khách hàng)
-    const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId), limit(100));
-    const unsubCustomers = onSnapshot(customersQuery, (snapshot) => {
-      const customersData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Customer));
-      setCustomers(customersData);
-    });
-    unsubs.push(unsubCustomers);
 
     return () => {
       unsubs.forEach(u => u());
@@ -3376,10 +3389,31 @@ export default function App() {
   const handleAddCashTransaction = async (transaction: Omit<CashTransaction, 'id' | 'storeId'>) => {
     if (!currentUser) return;
     
+    const txDate = transaction.date || new Date().toISOString();
+    const vnBDate = getVietnamBusinessDate(txDate);
+    const vnBMonth = vnBDate.slice(0, 7);
+    const vnBYear = parseInt(vnBDate.slice(0, 4), 10);
+
     await addDoc(collection(db, 'cash_transactions'), {
       ...transaction,
+      date: txDate,
+      businessDate: vnBDate,
+      businessMonth: vnBMonth,
+      businessYear: vnBYear,
       storeId: currentUser.storeId
     });
+
+    const dailyStatsRef = doc(db, 'daily_stats', `${currentUser.storeId}_${vnBDate}`);
+    setDoc(dailyStatsRef, {
+      storeId: currentUser.storeId,
+      date: vnBDate,
+      year: vnBYear,
+      month: vnBMonth,
+      totalIncome: increment(transaction.type === 'income' ? transaction.amount : 0),
+      totalExpense: increment(transaction.type === 'expense' ? transaction.amount : 0),
+      cashCount: increment(1),
+      updatedAt: new Date().toISOString()
+    }, { merge: true }).catch(err => console.warn('daily_stats cash increment error:', err));
 
     if (activeShift) {
       const isIncome = transaction.type === 'income';
@@ -3538,7 +3572,7 @@ export default function App() {
       }
 
       // 5. Cập nhật giảm thống kê ngày (daily_stats)
-      const invDateStr = targetInvoice.date.slice(0, 10);
+      const invDateStr = targetInvoice.businessDate || getVietnamBusinessDate(targetInvoice.date);
       const dailyStatsRef = doc(db, 'daily_stats', `${currentUser.storeId}_${invDateStr}`);
       await updateDoc(dailyStatsRef, {
         totalRevenue: increment(-targetInvoice.total),
@@ -3794,11 +3828,16 @@ export default function App() {
 
       const invoiceRef = doc(collection(db, 'invoices'));
       const invoiceId = invoiceRef.id;
+      const invoiceNowIso = new Date().toISOString();
+      const vnBusinessDate = getVietnamBusinessDate(invoiceNowIso);
 
       const invoice: Invoice = {
         id: invoiceId,
-        date: new Date().toISOString(),
-        timeIn: minStartTime || table.startTime || new Date().toISOString(),
+        date: invoiceNowIso,
+        businessDate: vnBusinessDate,
+        businessMonth: vnBusinessDate.slice(0, 7),
+        businessYear: parseInt(vnBusinessDate.slice(0, 4), 10),
+        timeIn: minStartTime || table.startTime || invoiceNowIso,
         items: groupedItems,
         subtotal,
         discount: discountAmount,
@@ -3817,13 +3856,12 @@ export default function App() {
       batch.set(invoiceRef, { ...invoice, storeId: currentUser.storeId });
 
       // Cập nhật thống kê ngày (daily_stats) nguyên tử (atomic increment) - phục vụ báo cáo siêu nhanh & tiết kiệm reads
-      const invoiceDayStr = invoice.date.slice(0, 10);
-      const dailyStatsRef = doc(db, 'daily_stats', `${currentUser.storeId}_${invoiceDayStr}`);
+      const dailyStatsRef = doc(db, 'daily_stats', `${currentUser.storeId}_${vnBusinessDate}`);
       batch.set(dailyStatsRef, {
         storeId: currentUser.storeId,
-        date: invoiceDayStr,
-        year: parseInt(invoiceDayStr.slice(0, 4), 10),
-        month: invoiceDayStr.slice(0, 7),
+        date: vnBusinessDate,
+        year: parseInt(vnBusinessDate.slice(0, 4), 10),
+        month: vnBusinessDate.slice(0, 7),
         totalRevenue: increment(total),
         totalCash: increment(paymentMethod === 'cash' ? total : 0),
         totalTransfer: increment(paymentMethod === 'transfer' ? total : 0),
@@ -3911,7 +3949,10 @@ export default function App() {
         paymentMethod,
         category: 'Bán hàng',
         note: `Thanh toán bàn ${table.name}`,
-        date: new Date().toISOString(),
+        date: invoiceNowIso,
+        businessDate: vnBusinessDate,
+        businessMonth: vnBusinessDate.slice(0, 7),
+        businessYear: parseInt(vnBusinessDate.slice(0, 4), 10),
         staffId: currentUser.id,
         staffName: currentUser.name,
         storeId: currentUser.storeId,
@@ -4126,15 +4167,13 @@ export default function App() {
     try {
       const resp = await fetch('/api/save-user', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+        },
         body: JSON.stringify({
           user: {
             ...user,
-            storeId: currentUser.storeId
-          },
-          caller: {
-            id: currentUser.id,
-            role: currentUser.role,
             storeId: currentUser.storeId
           }
         })
@@ -4145,9 +4184,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Error adding user:', err);
-      // Fallback nếu mất kết nối server (tự động loại bỏ password thô)
-      const { password, ...safeUser } = user;
-      await addDoc(collection(db, 'users'), { ...safeUser, storeId: currentUser.storeId });
+      alert('Không thể kết nối đến máy chủ bảo mật để tạo người dùng. Vui lòng thử lại.');
     }
   };
 
@@ -4156,15 +4193,13 @@ export default function App() {
     try {
       const resp = await fetch('/api/save-user', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+        },
         body: JSON.stringify({
           user: {
             ...user,
-            storeId: currentUser.storeId
-          },
-          caller: {
-            id: currentUser.id,
-            role: currentUser.role,
             storeId: currentUser.storeId
           }
         })
@@ -4175,35 +4210,30 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Error updating user:', err);
-      const { password, ...safeUser } = user;
-      await updateDoc(doc(db, 'users', user.id), { ...safeUser });
+      alert('Không thể kết nối đến máy chủ để cập nhật tài khoản.');
     }
   };
 
   const handleDeleteUser = async (id: string) => {
+    if (!currentUser) return;
     try {
       const resp = await fetch('/api/delete-user', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+        },
         body: JSON.stringify({
-          userId: id,
-          caller: currentUser ? {
-            id: currentUser.id,
-            role: currentUser.role,
-            storeId: currentUser.storeId
-          } : undefined
+          userId: id
         })
       });
       if (!resp.ok) {
         const errData = await resp.json().catch(() => ({}));
-        if (errData.error) {
-          alert(errData.error);
-          return;
-        }
-        await deleteDoc(doc(db, 'users', id));
+        alert(errData.error || 'Có lỗi xảy ra khi xóa tài khoản');
       }
     } catch (err) {
-      await deleteDoc(doc(db, 'users', id));
+      console.error('Error deleting user:', err);
+      alert('Không thể kết nối đến máy chủ để xóa tài khoản.');
     }
   };
 
@@ -4233,17 +4263,13 @@ export default function App() {
     try {
       const resp = await fetch('/api/change-password', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+        },
         body: JSON.stringify({
           userId: currentUser.id,
-          newPassword: newPassword.trim(),
-          role: currentUser.role,
-          storeId: currentUser.storeId,
-          caller: {
-            id: currentUser.id,
-            role: currentUser.role,
-            storeId: currentUser.storeId
-          }
+          newPassword: newPassword.trim()
         })
       });
       const data = await resp.json().catch(() => ({}));
@@ -4284,17 +4310,13 @@ export default function App() {
         try {
           await fetch('/api/change-password', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+              'Content-Type': 'application/json',
+              ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+            },
             body: JSON.stringify({
               userId: currentUser.id,
-              newPassword: settings.adminPassword.trim(),
-              role: currentUser.role,
-              storeId: currentUser.storeId,
-              caller: {
-                id: currentUser.id,
-                role: currentUser.role,
-                storeId: currentUser.storeId
-              }
+              newPassword: settings.adminPassword.trim()
             })
           });
         } catch (pwErr) {

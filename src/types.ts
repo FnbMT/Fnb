@@ -9,6 +9,7 @@ export interface User {
   avatar?: string;
   storeId: string;
   store?: any;
+  token?: string;
   phone?: string;
   cccd?: string;
   address?: string;
@@ -254,6 +255,9 @@ export interface Invoice {
   total: number;
   paymentMethod: 'cash' | 'card' | 'transfer' | 'qr';
   date: string;
+  businessDate?: string; // Định dạng YYYY-MM-DD theo giờ Việt Nam UTC+7
+  businessMonth?: string; // Định dạng YYYY-MM
+  businessYear?: number; // Ví dụ 2026
   timeIn?: string;
   completedAt?: string;
   staffId: string;
@@ -266,6 +270,9 @@ export interface Invoice {
 export interface CashTransaction {
   id: string;
   date: string;
+  businessDate?: string; // Định dạng YYYY-MM-DD theo giờ Việt Nam UTC+7
+  businessMonth?: string; // Định dạng YYYY-MM
+  businessYear?: number; // Ví dụ 2026
   type: 'income' | 'expense';
   amount: number;
   paymentMethod: 'cash' | 'transfer';
