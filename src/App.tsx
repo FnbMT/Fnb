@@ -2556,13 +2556,27 @@ export default function App() {
     });
     unsubs.push(unsubStore);
 
-    // 2. Sync Menu (Thực đơn dùng chung cho Order, Bếp, Thu ngân - cache qua IndexedDB)
-    const menuQuery = query(collection(db, 'menu'), where('storeId', '==', storeId));
-    const unsubMenu = onSnapshot(menuQuery, (snapshot) => {
-      const menuData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as MenuItem));
-      setMenu(menuData);
-    });
-    unsubs.push(unsubMenu);
+    // 2. Sync Menu:
+    // - Bếp (kitchen): KHÔNG nghe menu (chỉ hiển thị vé món theo bàn, tiết kiệm 100% reads)
+    // - Phục vụ (order): CHỈ nghe món bán thực đơn (isInventory == false), không nhận biến động kho nguyên liệu
+    // - Thu ngân / Quản lý / Admin: Nghe đầy đủ để phục vụ thanh toán trừ kho công thức và quản lý tồn kho
+    if (currentUser.role !== 'kitchen') {
+      let menuQuery;
+      if (currentUser.role === 'order') {
+        menuQuery = query(
+          collection(db, 'menu'), 
+          where('storeId', '==', storeId),
+          where('isInventory', '==', false)
+        );
+      } else {
+        menuQuery = query(collection(db, 'menu'), where('storeId', '==', storeId));
+      }
+      const unsubMenu = onSnapshot(menuQuery, (snapshot) => {
+        const menuData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as MenuItem));
+        setMenu(menuData);
+      });
+      unsubs.push(unsubMenu);
+    }
 
     // 3. Sync Tables (Trạng thái bàn & món ăn đang gọi)
     const tablesQuery = query(collection(db, 'tables'), where('storeId', '==', storeId));

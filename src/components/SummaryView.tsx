@@ -191,8 +191,9 @@ export const SummaryView = ({
 
   const [loadingInvoiceDetailId, setLoadingInvoiceDetailId] = useState<string | null>(null);
 
-  // Lazy-load chi tiết hóa đơn on-demand khi bấm con mắt 👁️ (tiết kiệm triệt để reads, chỉ đọc đúng 1 doc khi cần)
+  // Lazy-load chi tiết hóa đơn on-demand khi bấm con mắt 👁️ (chỉ dành riêng cho Admin)
   const handleViewInvoice = async (inv: Invoice) => {
+    if (!isAdmin) return;
     if (inv.items && inv.items.length > 0) {
       setViewingInvoice(inv);
       return;
@@ -1346,18 +1347,20 @@ export const SummaryView = ({
                               <Printer className="w-3.5 h-3.5" />
                               <span>In HĐ</span>
                             </button>
-                            <button 
-                              title="Xem chi tiết hóa đơn"
-                              onClick={() => handleViewInvoice(inv)}
-                              disabled={loadingInvoiceDetailId === inv.id}
-                              className="p-1.5 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-all cursor-pointer disabled:opacity-50"
-                            >
-                              {loadingInvoiceDetailId === inv.id ? (
-                                <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />
-                              ) : (
-                                <Eye className="w-4 h-4" />
-                              )}
-                            </button>
+                            {isAdmin && (
+                              <button 
+                                title="Xem chi tiết hóa đơn"
+                                onClick={() => handleViewInvoice(inv)}
+                                disabled={loadingInvoiceDetailId === inv.id}
+                                className="p-1.5 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                {loadingInvoiceDetailId === inv.id ? (
+                                  <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />
+                                ) : (
+                                  <Eye className="w-4 h-4" />
+                                )}
+                              </button>
+                            )}
                             {isAdmin && (
                               <button 
                                 title="Xóa hóa đơn bán hàng"
