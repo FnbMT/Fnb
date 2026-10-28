@@ -1,0 +1,6 @@
+{
+  "summary":  "Kế hoạch toàn diện tối ưu hóa lượt đọc/ghi Firestore cho Fnb Master:\n- Bật Persistent Local Cache (IndexedDB) giúp tái sử dụng dữ liệu cục bộ\n- Tách biệt hoàn toàn Listener theo vai trò (Bếp/Order chỉ nghe tables và menu)\n- Truy vấn hóa đơn và sổ quỹ giới hạn nghiêm ngặt theo ngày hôm nay (Business Day Asia/Ho_Chi_Minh)\n- Phân trang theo nhu cầu cho lịch sử quá khứ thay vì tải hàng loạt\n- Giảm số lượt đọc Firestore từ hơn 50.000/ngày xuống dưới 2.000 - 5.000/ngày cho 2 quán",
+  "updatedAt":  "2026-10-20T14:45:01.572481942Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
