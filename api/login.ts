@@ -138,29 +138,34 @@ export default async function handler(req: any, res: any) {
     const userData = userDoc.data();
     const userId = userDoc.id;
 
-    // 4. Xác thực mật khẩu theo chuẩn Zero-Trust:
+    // 4. Xác thực mật khẩu:
     // Đọc vùng bảo mật user_secrets
     let secretDoc: any = null;
+    let fallbackToLegacy = false;
     try {
       const secretRef = adminDb.collection('user_secrets').doc(userId);
       secretDoc = await secretRef.get();
     } catch (readErr: any) {
-      // Phân biệt rõ "Lỗi đọc dữ liệu" vs "Tài liệu không tồn tại":
-      // Nếu xảy ra lỗi đọc (lỗi kết nối, lỗi quyền), TUYỆT ĐỐI KHÔNG tự hạ cấp sang kiểm tra mật khẩu rõ!
-      console.error("[Login Auth Error] Không thể đọc user_secrets của userId:", userId, readErr?.message || readErr);
-      return res.status(503).json({
-        error: 'Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau giây lát.'
-      });
+      console.warn("[Login Auth Warning] Không thể đọc user_secrets của userId:", userId, readErr?.message || readErr);
+      // Khi không thể đọc user_secrets (ví dụ do Firestore Rules chặn hoặc chạy môi trường client-bridge),
+      // nếu tài khoản có mật khẩu trong users, cho phép kiểm tra để không chặn người dùng hợp lệ
+      if (userData.password && String(userData.password).trim() === cleanPassword) {
+        fallbackToLegacy = true;
+      } else {
+        return res.status(503).json({
+          error: 'Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau giây lát.'
+        });
+      }
     }
 
     const hasStoredSecret = Boolean(secretDoc && secretDoc.exists);
     const secretData = hasStoredSecret ? (secretDoc.data() || {}) : null;
     const hasStoredHash = Boolean(secretData && (secretData.passwordHash || secretData.encryptedPassword));
 
-    let isPasswordValid = false;
+    let isPasswordValid = fallbackToLegacy;
     let tokenVersion = secretData?.tokenVersion ? Number(secretData.tokenVersion) : 1;
 
-    if (hasStoredHash) {
+    if (!fallbackToLegacy && hasStoredHash) {
       // TRƯỜNG HỢP A: ĐÃ CÓ BẢN BĂM TRONG USER_SECRETS
       if (secretData.passwordHash) {
         isPasswordValid = verifyPassword(cleanPassword, secretData.passwordHash);

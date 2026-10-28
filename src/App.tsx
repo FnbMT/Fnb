@@ -149,7 +149,9 @@ import {
 import { 
   getVietnamStartOfTodayIso, 
   getVietnamBusinessDate, 
-  getVietnamDayBoundariesIso 
+  getVietnamDayBoundariesIso,
+  getVietnamHeaderDateString,
+  getVietnamYesterdayDate
 } from './utils/firestoreDateHelper';
 
 // Import new views
@@ -1994,10 +1996,14 @@ const MenuOrdering = ({
   );
 };
 
-const ReportsView = ({ invoices, activeOrdersCount }: { invoices: Invoice[], activeOrdersCount: number }) => {
-  const today = new Date();
+const ReportsView = ({ invoices, activeOrdersCount, businessDate }: { invoices: Invoice[], activeOrdersCount: number, businessDate?: string }) => {
+  const todayVn = businessDate || getVietnamBusinessDate();
   
-  const todayInvoices = invoices.filter(inv => isSameDay(parseISO(inv.date), today));
+  // Lọc chuẩn theo ngày kinh doanh Việt Nam (hỗ trợ cả schema businessDate và legacy date ISO)
+  const todayInvoices = invoices.filter(inv => {
+    const invDateStr = inv.businessDate || getVietnamBusinessDate(inv.date);
+    return invDateStr === todayVn;
+  });
   const todayRevenue = todayInvoices.reduce((sum, inv) => sum + inv.total, 0);
   const todayOrders = todayInvoices.length;
 
@@ -2005,7 +2011,17 @@ const ReportsView = ({ invoices, activeOrdersCount }: { invoices: Invoice[], act
     const hour = 8 + (i * 2);
     const label = `${hour.toString().padStart(2, '0')}:00`;
     const revenue = todayInvoices.reduce((sum, inv) => {
-      const invHour = parseISO(inv.date).getHours();
+      let invHour = 0;
+      try {
+        const d = new Date(inv.date);
+        invHour = parseInt(new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Ho_Chi_Minh',
+          hour: '2-digit',
+          hour12: false
+        }).format(d), 10);
+      } catch {
+        invHour = parseISO(inv.date).getHours();
+      }
       if (invHour >= hour && invHour < hour + 2) {
         return sum + inv.total;
       }
@@ -2918,36 +2934,134 @@ export default function App() {
       };
     }
 
-    // 2. Hóa đơn hôm nay (Lọc chính xác theo businessDate - Tiết kiệm tối đa reads, không đọc lịch sử khi hôm nay rỗng)
+    // 2. Hóa đơn hôm nay (Hỗ trợ cả schema mới businessDate lẫn schema cũ chưa migrate date ISO)
     setInvoicesReady(false);
-    const invoicesQuery = query(
+    let activeLegacyInvoicesUnsub: (() => void) | null = null;
+
+    const startLegacyInvoicesFallback = () => {
+      if (activeLegacyInvoicesUnsub) return;
+      const fallbackQuery = query(
+        collection(db, 'invoices'),
+        where('storeId', '==', storeId),
+        orderBy('date', 'desc'),
+        limit(100)
+      );
+      activeLegacyInvoicesUnsub = onSnapshot(fallbackQuery, (legacySnap) => {
+        const docs = legacySnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
+        const matched = docs.filter(inv => {
+          const invDate = inv.businessDate || getVietnamBusinessDate(inv.date);
+          return invDate === currentBusinessDate;
+        });
+        setInvoices(matched.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
+        setInvoicesReady(true);
+      }, (err) => {
+        console.warn('Invoices orderBy fallback error (needs index), trying safeQuery:', err);
+        const safeQuery = query(
+          collection(db, 'invoices'),
+          where('storeId', '==', storeId),
+          limit(100)
+        );
+        const unsubSafe = onSnapshot(safeQuery, (safeSnap) => {
+          const docs = safeSnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
+          const matched = docs.filter(inv => {
+            const invDate = inv.businessDate || getVietnamBusinessDate(inv.date);
+            return invDate === currentBusinessDate;
+          });
+          setInvoices(matched.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
+          setInvoicesReady(true);
+        }, () => setInvoicesReady(true));
+        unsubs.push(unsubSafe);
+      });
+      unsubs.push(() => {
+        if (activeLegacyInvoicesUnsub) activeLegacyInvoicesUnsub();
+      });
+    };
+
+    const modernInvoicesQuery = query(
       collection(db, 'invoices'),
       where('storeId', '==', storeId),
       where('businessDate', '==', currentBusinessDate)
     );
 
-    const unsubInvoices = onSnapshot(invoicesQuery, (snapshot) => {
-      const todayInvoices = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
-      setInvoices(todayInvoices.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
-      setInvoicesReady(true);
+    const unsubInvoices = onSnapshot(modernInvoicesQuery, (snapshot) => {
+      if (!snapshot.empty) {
+        if (activeLegacyInvoicesUnsub) {
+          activeLegacyInvoicesUnsub();
+          activeLegacyInvoicesUnsub = null;
+        }
+        const todayInvoices = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
+        setInvoices(todayInvoices.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
+        setInvoicesReady(true);
+      } else {
+        // Nếu không có hóa đơn nào theo businessDate, có thể do hôm nay chưa bán hoặc do dữ liệu cũ chưa có trường businessDate
+        startLegacyInvoicesFallback();
+      }
     }, (error) => {
-      console.warn('Invoices businessDate listener error:', error);
-      setInvoicesReady(false);
+      console.warn('Invoices businessDate listener error, falling back:', error);
+      startLegacyInvoicesFallback();
     });
     unsubs.push(unsubInvoices);
 
-    // 3. Sổ quỹ hôm nay (Lọc chính xác theo businessDate - Tiết kiệm tối đa reads)
-    const cashQuery = query(
+    // 3. Sổ quỹ hôm nay (Hỗ trợ cả schema mới businessDate lẫn schema cũ chưa migrate date ISO)
+    let activeLegacyCashUnsub: (() => void) | null = null;
+
+    const startLegacyCashFallback = () => {
+      if (activeLegacyCashUnsub) return;
+      const fallbackCashQuery = query(
+        collection(db, 'cash_transactions'),
+        where('storeId', '==', storeId),
+        orderBy('date', 'desc'),
+        limit(100)
+      );
+      activeLegacyCashUnsub = onSnapshot(fallbackCashQuery, (legacySnap) => {
+        const docs = legacySnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
+        const matched = docs.filter(c => {
+          const cDate = c.businessDate || getVietnamBusinessDate(c.date);
+          return cDate === currentBusinessDate;
+        });
+        setCashTransactions(matched.sort((a, b) => b.date.localeCompare(a.date)));
+      }, (err) => {
+        console.warn('Cash orderBy fallback error, trying safeCashQuery:', err);
+        const safeCashQuery = query(
+          collection(db, 'cash_transactions'),
+          where('storeId', '==', storeId),
+          limit(100)
+        );
+        const unsubSafeCash = onSnapshot(safeCashQuery, (safeSnap) => {
+          const docs = safeSnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
+          const matched = docs.filter(c => {
+            const cDate = c.businessDate || getVietnamBusinessDate(c.date);
+            return cDate === currentBusinessDate;
+          });
+          setCashTransactions(matched.sort((a, b) => b.date.localeCompare(a.date)));
+        });
+        unsubs.push(unsubSafeCash);
+      });
+      unsubs.push(() => {
+        if (activeLegacyCashUnsub) activeLegacyCashUnsub();
+      });
+    };
+
+    const modernCashQuery = query(
       collection(db, 'cash_transactions'),
       where('storeId', '==', storeId),
       where('businessDate', '==', currentBusinessDate)
     );
 
-    const unsubCash = onSnapshot(cashQuery, (snapshot) => {
-      const todayCash = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
-      setCashTransactions(todayCash.sort((a, b) => b.date.localeCompare(a.date)));
+    const unsubCash = onSnapshot(modernCashQuery, (snapshot) => {
+      if (!snapshot.empty) {
+        if (activeLegacyCashUnsub) {
+          activeLegacyCashUnsub();
+          activeLegacyCashUnsub = null;
+        }
+        const todayCash = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
+        setCashTransactions(todayCash.sort((a, b) => b.date.localeCompare(a.date)));
+      } else {
+        startLegacyCashFallback();
+      }
     }, (error) => {
-      console.warn('Cash businessDate listener error:', error);
+      console.warn('Cash businessDate listener error, falling back:', error);
+      startLegacyCashFallback();
     });
     unsubs.push(unsubCash);
 
@@ -5133,7 +5247,7 @@ export default function App() {
                 !checkStoreTabPermission('reports', currentUser, packages) ? (
                   <LockedTabView title="Báo cáo doanh thu" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <ReportsView invoices={invoices} activeOrdersCount={activeOrdersCount} />
+                  <ReportsView invoices={invoices} activeOrdersCount={activeOrdersCount} businessDate={currentBusinessDate} />
                 )
               )}
               {view === 'kitchen' && (
@@ -5954,8 +6068,8 @@ const Header = ({
         <h2 className="text-lg md:text-xl font-bold text-gray-900 dark:text-white uppercase tracking-wider truncate max-w-[200px] md:max-w-none">
           {titles[view]}
         </h2>
-        <p className="text-xs text-gray-500 mt-0.5 hidden md:block">
-          {format(new Date(), 'eeee, dd MMMM yyyy')} • {currentUser?.name}
+        <p className="text-[11px] md:text-xs text-gray-500 mt-0.5 truncate block">
+          {getVietnamHeaderDateString()} • {currentUser?.name}
         </p>
       </div>
       

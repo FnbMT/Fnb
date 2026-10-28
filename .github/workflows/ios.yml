@@ -10,33 +10,29 @@ on:
         required: false
         default: "1.0.3"
 
+# Tự động hủy build cũ nếu có push mới để tránh nghẽn hàng đợi runner macOS
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build_ios:
-    # Sử dụng macOS 15 runner với Xcode 26 / iOS 26 SDK phù hợp với Capacitor 8 và quy định của Apple
-    runs-on: macos-15
+    # macos-14 (Apple Silicon arm64) có pool máy ảo dồi dào và ổn định nhất trên GitHub Actions hiện nay
+    # macos-15 thường xuyên gặp lỗi thiếu máy ảo (capacity constraint / runner not acquired)
+    runs-on: macos-14
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select and Verify Xcode 26 (iOS 26 SDK)
+      - name: Select and Verify Xcode
         run: |
           echo "Danh sách các phiên bản Xcode có sẵn trên runner:"
           ls -d /Applications/Xcode*.app || true
 
-          # Kích hoạt Xcode 26 (bắt buộc theo quy định Apple SDK từ 28/04/2026)
-          SELECTED_XCODE=""
-          for XCODE_PATH in /Applications/Xcode_26*.app /Applications/Xcode_26.app; do
-            if [ -d "$XCODE_PATH" ]; then
-              SELECTED_XCODE="$XCODE_PATH"
-              break
-            fi
-          done
-
-          # Fallback tự động tìm bản Xcode 26.x hoặc phiên bản mới nhất trên runner
-          if [ -z "$SELECTED_XCODE" ]; then
-            SELECTED_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
-          fi
+          # Tự động tìm bản Xcode mới nhất có sẵn trên runner (Xcode 16.x / 15.x)
+          SELECTED_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
 
           if [ -n "$SELECTED_XCODE" ]; then
             echo "Kích hoạt Xcode tại: $SELECTED_XCODE"

@@ -60,30 +60,53 @@ async function fetchInvoicesForInterval(
   let batchCount = 0;
   const maxBatches = 5; // Tối đa 1.000 hóa đơn cho 1 đoạn thiếu để tránh tràn bộ nhớ
 
-  while (hasMore && batchCount < maxBatches) {
-    batchCount++;
-    const qConstraints: any[] = [
-      where('storeId', '==', storeId),
-      where('date', '>=', startIso),
-      where('date', '<', endExclusiveIso),
-      limit(200)
-    ];
-    if (lastDoc) {
-      qConstraints.push(startAfter(lastDoc));
+  try {
+    while (hasMore && batchCount < maxBatches) {
+      batchCount++;
+      const qConstraints: any[] = [
+        where('storeId', '==', storeId),
+        where('date', '>=', startIso),
+        where('date', '<', endExclusiveIso),
+        limit(200)
+      ];
+      if (lastDoc) {
+        qConstraints.push(startAfter(lastDoc));
+      }
+      const q = query(collection(db, 'invoices'), ...qConstraints);
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        hasMore = false;
+        break;
+      }
+      snap.docs.forEach(d => {
+        results.push({ ...d.data(), id: d.id } as Invoice);
+      });
+      if (snap.docs.length < 200) {
+        hasMore = false;
+      } else {
+        lastDoc = snap.docs[snap.docs.length - 1];
+      }
     }
-    const q = query(collection(db, 'invoices'), ...qConstraints);
-    const snap = await getDocs(q);
-    if (snap.empty) {
-      hasMore = false;
-      break;
-    }
-    snap.docs.forEach(d => {
-      results.push({ ...d.data(), id: d.id } as Invoice);
-    });
-    if (snap.docs.length < 200) {
-      hasMore = false;
-    } else {
-      lastDoc = snap.docs[snap.docs.length - 1];
+  } catch (err: any) {
+    console.warn('Query hóa đơn dải ngày thất bại (thiếu composite index), chạy fallback an toàn theo storeId:', err);
+    try {
+      // Fallback tối thượng không đòi hỏi composite index: lấy các hóa đơn theo storeId và lọc theo múi giờ Việt Nam
+      const safeQ = query(
+        collection(db, 'invoices'),
+        where('storeId', '==', storeId),
+        limit(500)
+      );
+      const safeSnap = await getDocs(safeQ);
+      safeSnap.docs.forEach(d => {
+        const inv = { ...d.data(), id: d.id } as Invoice;
+        const invDate = inv.date || '';
+        const invBDate = inv.businessDate || getVietnamBusinessDate(invDate);
+        if ((invDate >= startIso && invDate < endExclusiveIso) || (invBDate >= startDateStr && invBDate <= endDateStr)) {
+          results.push(inv);
+        }
+      });
+    } catch (fallbackErr) {
+      console.warn('Fallback tải hóa đơn an toàn thất bại:', fallbackErr);
     }
   }
 
@@ -97,9 +120,10 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
   onPrint: (data: any) => void;
 }) => {
   const [taxRevenueType, setTaxRevenueType] = useState<'under_1b' | 'over_1b'>('under_1b');
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  const [fromDate, setFromDate] = useState(() => format(startOfMonth(new Date()), 'yyyy-MM-dd'));
-  const [toDate, setToDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const todayVn = getVietnamBusinessDate();
+  const [selectedYear, setSelectedYear] = useState(() => parseInt(todayVn.slice(0, 4), 10));
+  const [fromDate, setFromDate] = useState(() => `${todayVn.slice(0, 7)}-01`);
+  const [toDate, setToDate] = useState(() => todayVn);
   const [summaryViewMode, setSummaryViewMode] = useState<'quarter' | 'half' | 'year'>('quarter');
   
   // Dữ liệu thống kê ngày (daily_stats) và hóa đơn fallback

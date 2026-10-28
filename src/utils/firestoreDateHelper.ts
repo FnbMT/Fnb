@@ -108,3 +108,36 @@ export const getDateRangeIso = (dateStr: string, type: 'day' | 'month' | 'year')
   const endExclusiveIso = new Date(`${year + 1}-01-01T00:00:00+07:00`).toISOString();
   return { startIso, endIso: endExclusiveIso, endExclusiveIso };
 };
+
+/**
+ * Lấy ngày hôm qua theo giờ Việt Nam (YYYY-MM-DD)
+ */
+export const getVietnamYesterdayDate = (baseDateStr?: string): string => {
+  const base = baseDateStr ? new Date(`${baseDateStr.slice(0, 10)}T12:00:00+07:00`) : new Date();
+  const d = new Date(base.getTime() - 24 * 60 * 60 * 1000);
+  return getVietnamBusinessDate(d);
+};
+
+/**
+ * Kiểm tra xem một đối tượng có ngày/giờ nằm trong ngày nghiệp vụ Việt Nam hay không
+ * Hỗ trợ cả trường businessDate và date ISO string
+ */
+export const isInvoiceInVietnamDay = (item: { date?: string; businessDate?: string }, targetDay: string): boolean => {
+  if (item.businessDate) return item.businessDate === targetDay;
+  if (!item.date) return false;
+  return getVietnamBusinessDate(item.date) === targetDay;
+};
+
+/**
+ * Hiển thị chuỗi ngày tháng ở header theo chuẩn múi giờ Việt Nam (Thứ Năm, 29/10/2026)
+ */
+export const getVietnamHeaderDateString = (date?: Date | string): string => {
+  const d = date ? (typeof date === 'string' ? new Date(date) : date) : new Date();
+  return new Intl.DateTimeFormat('vi-VN', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  }).format(d);
+};

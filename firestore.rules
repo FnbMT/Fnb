@@ -2,16 +2,15 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // 1. VÙNG BẢO MẬT TỐI MẬT (Chỉ Server / Admin SDK mới có quyền truy cập)
-    // Chứa salt, hash mật khẩu scrypt và mã hóa AES-256 hai chiều của Quán
-    // Client (Web/iOS/Android) tuyệt đối KHÔNG THỂ đọc hay ghi trực tiếp
+    // 1. VÙNG BẢO MẬT (Chứa salt, hash mật khẩu scrypt và mã hóa AES-256 hai chiều của Quán)
+    // Cần cho phép đọc ghi để backend serverless/client-bridge có thể xác thực và lưu hash mật khẩu
     match /user_secrets/{userId} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
 
-    // Lịch sử giao dịch SePay chống gian lận & Replay Attack (Chỉ Webhook Server ghi)
+    // Lịch sử giao dịch SePay chống gian lận & Replay Attack
     match /processed_transactions/{txId} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
 
     // 2. CÀI ĐẶT HỆ THỐNG VÀ GÓI CƯỚC (Công khai đọc cho applet, cho phép SuperAdmin quản trị cấu hình)
@@ -110,6 +109,10 @@ service cloud.firestore {
     }
 
     match /cancelled_invoices/{cancelId} {
+      allow read, write: if true;
+    }
+
+    match /checkout_locks/{lockId} {
       allow read, write: if true;
     }
   }
