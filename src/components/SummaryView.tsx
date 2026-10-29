@@ -8,6 +8,7 @@ import { db } from '../lib/firebase';
 import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot } from 'firebase/firestore';
 import { getDateRangeIso, getVietnamBusinessDate, getVietnamYesterdayDate } from '../utils/firestoreDateHelper';
 import { calculateInvoiceCost } from '../utils/costHelper';
+import { isCashPayment, isReconciledDailyStat } from '../utils/reportDataIntegrity';
 
 // Hàm xác định toàn bộ danh sách ngày dự kiến trong kỳ (không lấy ngày tương lai vượt quá hôm nay)
 function getExpectedPeriodDates(dateFilter: string, filterType: 'day' | 'month' | 'year', todayStr: string): string[] {
@@ -252,7 +253,7 @@ export const SummaryView = ({
   shifts?: Shift[],
   activeShift?: Shift | null,
   onAddCashTransaction: (t: Omit<CashTransaction, 'id' | 'storeId'>) => void,
-  onDeleteInvoice?: (invoiceId: string) => Promise<void> | void,
+  onDeleteInvoice?: (invoiceId: string) => Promise<boolean> | boolean,
   currentUser: User | null,
   settings: SystemSettings,
   onUpdateSettings: (s: SystemSettings) => void,
@@ -1394,10 +1395,8 @@ export const SummaryView = ({
 
       // NGUỒN 2: Có bản ghi trong daily_stats
       const stat = statsMap.get(dayStr);
-      if (stat) {
-        if (stat.coverageStatus === 'reconciled' || stat.coverageStatus === 'zero_activity') {
-          reconciledDaysCount++;
-        }
+      if (stat && isReconciledDailyStat(stat)) {
+        reconciledDaysCount++;
 
         const dayRev = stat.totalRevenue || 0;
         const dayInvCount = stat.invoiceCount || 0;
@@ -1495,6 +1494,9 @@ export const SummaryView = ({
       const dayCashTxs = cashByDay.get(dayStr) || [];
 
       if (dayInvs.length > 0 || dayCashTxs.length > 0) {
+        if (dayInvs.length > 0) daysUsingFallbackInvoices++;
+        if (dayCashTxs.length > 0) daysUsingFallbackCash++;
+
         let dayRev = 0;
         let dayCash = 0;
         let dayTransfer = 0;
@@ -1591,18 +1593,22 @@ export const SummaryView = ({
     }
 
     // 4. XÁC ĐỊNH CHUẨN XÁC TRẠNG THÁI GIÁ VỐN TOÀN KỲ:
+    // Nếu dựa vào hóa đơn thô (Nguồn 3) mà hasMoreInvoices = true thì tập dữ liệu CHƯA ĐẦY ĐỦ (chưa exhausted)
+    const isInvoiceDataIncomplete = daysUsingFallbackInvoices > 0 && hasMoreInvoices;
+    const isCashDataIncomplete = daysUsingFallbackCash > 0 && hasMoreCash;
+
     let costStatus: 'complete' | 'estimated' | 'partial' | 'missing' = 'missing';
     if (daysWithSales === 0) {
       // Toàn bộ kỳ không có bán hàng -> Giá vốn 0đ là đầy đủ và chính xác 100%
       costStatus = 'complete';
-    } else if (missingDaysCount > 0 || daysWithMissingCost > 0) {
-      // Có ngày thiếu dữ liệu hoặc ngày bán hàng bị thiếu giá vốn
+    } else if (missingDaysCount > 0 || daysWithMissingCost > 0 || isInvoiceDataIncomplete) {
+      // Có ngày thiếu dữ liệu, ngày bán hàng bị thiếu giá vốn, hoặc mới chỉ tải 1 trang phân trang (hasMoreInvoices = true)
       costStatus = 'partial';
     } else if (daysWithEstimatedCost > 0) {
       // Tất cả ngày có bán hàng đều có giá vốn, nhưng có ngày là ước tính
       costStatus = 'estimated';
     } else if (daysWithCompleteCost === daysWithSales) {
-      // 100% các ngày có bán hàng đều có giá vốn hoàn chỉnh (complete)
+      // 100% các ngày có bán hàng đều có giá vốn hoàn chỉnh (complete) và đã nạp trọn vẹn
       costStatus = 'complete';
     } else {
       costStatus = 'partial';
@@ -1610,8 +1616,14 @@ export const SummaryView = ({
 
     // 5. XÁC ĐỊNH CHUẨN XÁC TRẠNG THÁI TOÀN VẸN TOÀN KỲ (Coverage Status):
     let coverageStatus: 'reconciled' | 'partial' = 'partial';
-    if (missingDaysCount === 0 && (reconciledDaysCount === expectedDays.length || (isViewingCurrentPeriod && (reconciledDaysCount + liveDaysCount === expectedDays.length)))) {
-      coverageStatus = 'reconciled';
+    const isDataFullyExhausted = !isInvoiceDataIncomplete && !isCashDataIncomplete;
+    if (missingDaysCount === 0 && isDataFullyExhausted) {
+      if (reconciledDaysCount === expectedDays.length || (isViewingCurrentPeriod && (reconciledDaysCount + liveDaysCount === expectedDays.length))) {
+        coverageStatus = 'reconciled';
+      } else if (reconciledDaysCount + liveDaysCount + daysUsingFallbackInvoices + zeroActivityDaysCount >= expectedDays.length) {
+        // Toàn bộ các ngày trong kỳ đã được bao phủ và dữ liệu chứng từ đã tải trọn vẹn (exhausted)
+        coverageStatus = 'reconciled';
+      }
     }
 
     const hasAnyData = hasSalesInStats || hasCostInStats || hasExpenseInStats || hasIncomeInStats || (expectedDays.length > 0 && missingDaysCount < expectedDays.length);
@@ -1643,6 +1655,10 @@ export const SummaryView = ({
       daysWithEstimatedCost,
       daysWithMissingCost,
       zeroActivityDaysCount,
+      daysUsingFallbackInvoices,
+      daysUsingFallbackCash,
+      isInvoicePartial: isInvoiceDataIncomplete || missingDaysCount > 0,
+      isCashPartial: isCashDataIncomplete || (missingDaysCount > 0 && !hasExpenseInStats),
       hasSalesInStats,
       hasCostInStats,
       hasExpenseInStats,
@@ -1656,9 +1672,10 @@ export const SummaryView = ({
     cashTransactions,
     businessDate,
     historicalInvoices,
-    filteredInvoices,
-    filteredCash,
+    periodInvoices,
+    periodCash,
     hasMoreInvoices,
+    hasMoreCash,
     filterType,
     dateFilter,
     isViewingTodayOnly
@@ -1837,12 +1854,12 @@ export const SummaryView = ({
     URL.revokeObjectURL(url);
   };
 
-  const invoicesSum = filteredInvoices.reduce((sum, inv) => sum + inv.total, 0);
+  const invoicesSum = periodInvoices.reduce((sum, inv) => sum + inv.total, 0);
   const totalSales = statsAggregates ? statsAggregates.totalRevenue : invoicesSum;
-  const totalInvoicesCount = statsAggregates ? statsAggregates.invoiceCount : filteredInvoices.length;
+  const totalInvoicesCount = statsAggregates ? statsAggregates.invoiceCount : periodInvoices.length;
 
-  const sampleSales = filteredInvoices.reduce((sum, inv) => sum + inv.total, 0);
-  const sampleCost = filteredInvoices.reduce((sum, inv) => {
+  const sampleSales = periodInvoices.reduce((sum, inv) => sum + inv.total, 0);
+  const sampleCost = periodInvoices.reduce((sum, inv) => {
     if (typeof inv.totalCost === 'number') {
       return sum + inv.totalCost;
     }
@@ -1852,6 +1869,7 @@ export const SummaryView = ({
   // CỐ ĐỊNH GIÁ VỐN (COGS) VÀ LỢI NHUẬN: Ưu tiên dùng giá vốn thực tế đã tổng hợp từ daily_stats khi đầy đủ
   let finalCost = 0;
   let isCostEstimated = false;
+  let isCostUnavailable = false;
   let costEstimateReason = '';
 
   // 1. Nếu daily_stats có giá vốn đầy đủ toàn bộ các ngày (costStatus === 'complete' và totalCost là số, kể cả 0đ)
@@ -1868,7 +1886,9 @@ export const SummaryView = ({
   else if (statsAggregates && statsAggregates.costStatus === 'partial' && typeof statsAggregates.totalCost === 'number') {
     finalCost = statsAggregates.totalCost;
     isCostEstimated = true;
-    costEstimateReason = `Kỳ này còn ${(statsAggregates.missingDaysCount || 0) + (statsAggregates.daysWithMissingCost || 0)} ngày chưa đối soát đủ giá vốn`;
+    costEstimateReason = (statsAggregates.isInvoicePartial && hasMoreInvoices)
+      ? `Mới tải ${periodInvoices.length} hóa đơn đầu tiên (chưa tải hết toàn kỳ)`
+      : `Kỳ này còn ${(statsAggregates.missingDaysCount || 0) + (statsAggregates.daysWithMissingCost || 0)} ngày chưa đối soát đủ giá vốn`;
   }
   // 4. Nếu daily_stats có ghi nhận totalCost > 0 nhưng rơi vào status khác (dữ liệu migrate hoặc legacy)
   // TUYỆT ĐỐI KHÔNG VỨT BỎ GIÁ VỐN ĐÃ BIẾT ĐỂ RƠI VỀ 35%!
@@ -1878,9 +1898,9 @@ export const SummaryView = ({
     costEstimateReason = 'Sử dụng tổng giá vốn đã ghi nhận trong hệ thống';
   }
   // 5. Nếu đã tải toàn bộ hóa đơn chi tiết (hoặc đang xem hôm nay), dùng trực tiếp tổng giá vốn từ hóa đơn
-  else if (filteredInvoices.length > 0 && (!hasMoreInvoices || isViewingTodayOnly)) {
+  else if (periodInvoices.length > 0 && (!hasMoreInvoices || isViewingTodayOnly)) {
     finalCost = sampleCost;
-    const items = filteredInvoices.flatMap(i => i.items || []);
+    const items = periodInvoices.flatMap(i => i.items || []);
     const hasAnyEst = items.some(i => !(typeof i.costPrice === 'number' && i.costPrice > 0) && (!i.recipe || i.recipe.length === 0));
     if (hasAnyEst) {
       isCostEstimated = true;
@@ -1892,13 +1912,11 @@ export const SummaryView = ({
     const estimatedCogsRatio = sampleCost / sampleSales;
     finalCost = statsAggregates ? Math.round(totalSales * estimatedCogsRatio) : sampleCost;
     isCostEstimated = true;
-    costEstimateReason = `Ước tính theo mẫu ${filteredInvoices.length} HĐ (${(estimatedCogsRatio * 100).toFixed(1)}%)`;
+    costEstimateReason = `Ước tính theo mẫu ${periodInvoices.length} HĐ (${(estimatedCogsRatio * 100).toFixed(1)}%)`;
   }
-  // 7. Kỳ cũ hoàn toàn không có dữ liệu giá vốn
   else {
-    finalCost = Math.round(totalSales * 0.35);
-    isCostEstimated = true;
-    costEstimateReason = 'Ước tính 35% doanh thu (chưa đủ dữ liệu giá vốn lịch sử)';
+    isCostUnavailable = true;
+    costEstimateReason = 'Chưa có dữ liệu giá vốn đủ để tính lợi nhuận';
   }
   const totalCost = finalCost;
   const totalProfit = totalSales - totalCost;
@@ -2082,12 +2100,12 @@ export const SummaryView = ({
               <p className="text-xs text-gray-500 uppercase font-bold">Doanh thu bán hàng</p>
               {statsAggregates?.coverageStatus === 'partial' && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 font-medium">
-                  Chưa đủ kỳ
+                  {statsAggregates.isInvoicePartial && hasMoreInvoices ? `Chưa tải hết (${periodInvoices.length} HĐ)` : 'Chưa đủ kỳ'}
                 </span>
               )}
             </div>
             <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-emerald-600 dark:text-emerald-500">{totalSales.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</p>
-            <p className="text-xs text-gray-600 dark:text-gray-400">{totalInvoicesCount} hóa đơn {statsAggregates?.missingDaysCount ? `(thiếu ${statsAggregates.missingDaysCount} ngày)` : ''}</p>
+            <p className="text-xs text-gray-600 dark:text-gray-400">{totalInvoicesCount} hóa đơn {hasMoreInvoices && statsAggregates?.isInvoicePartial ? '(còn hóa đơn trên hệ thống)' : statsAggregates?.missingDaysCount ? `(thiếu ${statsAggregates.missingDaysCount} ngày)` : ''}</p>
           </div>
           )}
           {isAdminOrManager && (
@@ -2101,8 +2119,8 @@ export const SummaryView = ({
                     </span>
                   )}
                 </div>
-                <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-blue-600 dark:text-blue-500">{totalProfit.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</p>
-                <p className="text-xs text-gray-600 dark:text-gray-400">Tỷ suất: {totalSales > 0 ? ((totalProfit / totalSales) * 100).toFixed(1) : 0}%</p>
+                <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-blue-600 dark:text-blue-500">{isCostUnavailable ? '—' : `${totalProfit.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ`}</p>
+                <p className="text-xs text-gray-600 dark:text-gray-400">Tỷ suất: {isCostUnavailable ? 'chưa đối soát giá vốn' : `${totalSales > 0 ? ((totalProfit / totalSales) * 100).toFixed(1) : 0}%`}</p>
               </div>
               <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
                 <div className="flex items-center justify-between">
@@ -2110,8 +2128,13 @@ export const SummaryView = ({
                     <Banknote className="w-4 h-4 text-emerald-500" />
                     TIỀN MẶT
                   </p>
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
-                    Thu - Chi
+                  <span className={cn(
+                    "text-[10px] font-semibold px-2 py-0.5 rounded-full",
+                    hasMoreCash && statsAggregates?.isCashPartial 
+                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20" 
+                      : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                  )}>
+                    {hasMoreCash && statsAggregates?.isCashPartial ? 'Chưa tải hết sổ quỹ' : 'Thu - Chi'}
                   </span>
                 </div>
                 <p className={cn(
@@ -2151,12 +2174,16 @@ export const SummaryView = ({
         </div>
       ) : null}
 
-      {statsAggregates?.coverageStatus === 'partial' && (statsAggregates?.missingDaysCount ?? 0) > 0 && (
+      {statsAggregates?.coverageStatus === 'partial' && (
         <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-xs text-amber-700 dark:text-amber-400 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="text-base">⚠️</span>
             <span>
-              <strong>Dữ liệu chưa đối soát đủ:</strong> Kỳ này còn <strong>{statsAggregates.missingDaysCount}</strong> ngày chưa có dữ liệu tổng hợp. Số liệu đang được kết hợp từ chứng từ đã tải.
+              <strong>Dữ liệu chưa đối soát đủ:</strong> {
+                (statsAggregates?.missingDaysCount ?? 0) > 0 
+                  ? <>Kỳ này còn <strong>{statsAggregates.missingDaysCount}</strong> ngày chưa có dữ liệu tổng hợp. Số liệu đang được kết hợp từ chứng từ đã tải.</>
+                  : <>Chứng từ kỳ này chưa tải hết ({statsAggregates?.isInvoicePartial && hasMoreInvoices ? 'còn hóa đơn' : ''}{statsAggregates?.isInvoicePartial && hasMoreInvoices && statsAggregates?.isCashPartial && hasMoreCash ? ', ' : ''}{statsAggregates?.isCashPartial && hasMoreCash ? 'còn sổ quỹ' : ''} trên hệ thống). Số liệu đang tính trên trang đầu tiên.</>
+              }
             </span>
           </div>
           {hasMoreInvoices && (
@@ -2714,7 +2741,7 @@ export const SummaryView = ({
                 <div className="pt-4 border-t border-black/5 dark:border-white/5 flex justify-between items-center">
                   <p className="text-gray-600 dark:text-gray-400">Lợi nhuận gộp ({grossMargin.toFixed(1)}%)</p>
                   <p className={cn("text-xl md:text-2xl lg:text-3xl font-mono font-bold truncate", grossMargin >= 65 ? "text-blue-600 dark:text-blue-500" : "text-amber-600 dark:text-amber-500")}>
-                    {grossProfit.toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ
+                    {isCostUnavailable ? '—' : `${grossProfit.toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ`}
                   </p>
                 </div>
                 {grossMargin < 65 && totalSales > 0 && (
@@ -2751,7 +2778,7 @@ export const SummaryView = ({
                 <div className="pt-4 border-t border-black/5 dark:border-white/5 flex justify-between items-center">
                   <p className="text-gray-600 dark:text-gray-400">Lợi nhuận ròng ({netMargin.toFixed(1)}%)</p>
                   <p className={cn("text-xl md:text-2xl lg:text-3xl font-mono font-bold truncate", netMargin >= 15 ? "text-emerald-600 dark:text-emerald-500" : netMargin > 0 ? "text-amber-600 dark:text-amber-500" : "text-rose-600 dark:text-rose-500")}>
-                    {netProfit.toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ
+                    {isCostUnavailable ? '—' : `${netProfit.toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ`}
                   </p>
                 </div>
                 {laborCostPercentage > 25 && totalSales > 0 && (
@@ -3169,7 +3196,8 @@ export const SummaryView = ({
                   try {
                     const deletedId = confirmDeleteInvoice.id;
                     const invDateStr = confirmDeleteInvoice.businessDate || getVietnamBusinessDate(confirmDeleteInvoice.date);
-                    await onDeleteInvoice(deletedId);
+                    const deleted = await onDeleteInvoice(deletedId);
+                    if (deleted !== true) return;
                     setHistoricalInvoices(prev => prev.filter(inv => inv.id !== deletedId));
                     setHistoricalCash(prev => prev.filter(c => (c as any).invoiceId !== deletedId));
                     setDailyStats(prev => prev.map(s => {

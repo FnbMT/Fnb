@@ -35,3 +35,27 @@ export function calculateInvoiceCost(items: OrderItem[]): number {
   if (!items || !Array.isArray(items)) return 0;
   return items.reduce((total, item) => total + calculateOrderItemCost(item), 0);
 }
+
+
+export interface InvoiceCostSnapshotResult { totalCost: number; isComplete: boolean; }
+export function calculateInvoiceCostSnapshot(items: OrderItem[], getCostSource: (itemId: string) => { costPrice?: number } | undefined): InvoiceCostSnapshotResult {
+  let totalCost = 0; let isComplete = true;
+  for (const item of items || []) {
+    const quantity = item.quantity || 0;
+    if (item.recipe?.length) for (const recipe of item.recipe) {
+      const source = getCostSource(recipe.ingredientId);
+      if (typeof source?.costPrice !== 'number') { isComplete = false; continue; }
+      totalCost += source.costPrice * recipe.quantity * quantity;
+    } else {
+      const source = getCostSource(item.id); const unitCost = typeof source?.costPrice === 'number' ? source.costPrice : item.costPrice;
+      if (typeof unitCost !== 'number') isComplete = false; else totalCost += unitCost * quantity;
+    }
+    for (const addon of item.selectedAddOns || []) {
+      const source = addon.inventoryItemId ? getCostSource(addon.inventoryItemId) : undefined;
+      const unitCost = typeof source?.costPrice === 'number' ? source.costPrice : addon.costPrice;
+      if (typeof unitCost !== 'number') { isComplete = false; continue; }
+      totalCost += unitCost * (addon.quantity || 1) * quantity;
+    }
+  }
+  return { totalCost: Math.round(totalCost), isComplete };
+}

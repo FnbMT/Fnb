@@ -234,6 +234,7 @@ export interface InventoryTransaction {
   date: string;
   note?: string;
   referenceId?: string;
+  storeId?: string;
 }
 
 export interface AuditItem {
@@ -277,6 +278,8 @@ export interface Invoice {
   total: number;
   totalCost?: number; // Snapshot tổng giá vốn tại thời điểm thanh toán (phiên 1)
   costVersion?: number; // Version snapshot giá vốn (VD: 1)
+  costStatus?: 'complete' | 'estimated';
+  shiftId?: string;
   paymentMethod: 'cash' | 'card' | 'transfer' | 'qr';
   date: string;
   businessDate?: string; // Định dạng YYYY-MM-DD theo giờ Việt Nam UTC+7

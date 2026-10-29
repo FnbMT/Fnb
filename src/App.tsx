@@ -175,7 +175,8 @@ import { AttendanceScanner } from "./components/AttendanceScanner";
 import { getMenuItemImage } from "./utils/foodImageHelper";
 import { KitchenView } from './components/KitchenView';
 import { checkStoreTabPermission, isTabAllowedInPackage, APP_PACKAGE_TABS } from './utils/packagePermissions';
-import { calculateInvoiceCost } from './utils/costHelper';
+import { calculateInvoiceCost, calculateInvoiceCostSnapshot } from './utils/costHelper';
+import { isCashPayment } from './utils/reportDataIntegrity';
 import {
   sendDeviceNotification,
   checkNotificationPermission,
@@ -544,7 +545,7 @@ const MenuOrdering = ({
   tables: Table[],
   onClose: () => void, 
   onUpdateOrder: (tableId: string, order: OrderItem[], targetSessionId?: string) => void,
-  onCheckout: (tableId: string, ordersToPay: OrderSession[], discount: number, paymentMethod: 'cash' | 'transfer', shouldPrint: boolean, customerId?: string) => void,
+  onCheckout: (tableId: string, ordersToPay: OrderSession[], discount: number, paymentMethod: 'cash' | 'transfer', shouldPrint: boolean, customerId?: string) => Promise<boolean> | boolean,
   onMergeTables: (targetTableId: string, sourceTableIds: string[]) => void,
   onTransferTable: (sourceTableId: string, targetTableId: string) => void,
   menu: MenuItem[],
@@ -584,7 +585,7 @@ const MenuOrdering = ({
   const committedOrders = (activeTable.orders || []).filter(o => o.status !== 'paid');
 
   const [discount, setDiscount] = useState(activeTable.discount || 0);
-  const [vat] = useState(vatPercent); 
+  const vat = vatPercent;
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'transfer'>('cash');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [customerSearch, setCustomerSearch] = useState('');
@@ -598,24 +599,17 @@ const MenuOrdering = ({
     );
   }, [customers, customerSearch]);
   
-  // Handle customer selection and apply discount
   useEffect(() => {
     if (selectedCustomerId) {
-      const c = customers.find(x => x.id === selectedCustomerId);
-      if (c) {
-        const t = customerTypes.find(x => x.id === c.typeId);
-        if (t && t.discountPercent > 0) {
-          setDiscount(t.discountPercent);
-          return;
-        }
+      const customer = customers.find(x => x.id === selectedCustomerId);
+      if (customer) {
+        const customerType = customerTypes.find(x => x.id === customer.typeId);
+        setDiscount(Math.min(100, Math.max(0, customerType?.discountPercent || 0)));
+        return;
       }
     }
-    // Only reset discount if it was automatically set by customer selection? 
-    // Actually, maybe we just leave it or reset to activeTable.discount.
-    // We'll just reset it if there's no customer selected and they didn't manually change it... 
-    // For simplicity, if they unselect customer, we reset to activeTable.discount
-    // setDiscount(activeTable.discount || 0);
-  }, [selectedCustomerId, customers, customerTypes]);
+    setDiscount(Math.min(100, Math.max(0, activeTable.discount || 0)));
+  }, [selectedCustomerId, customers, customerTypes, activeTable.discount]);
   
   // Sync discount if it changes in DB (e.g. reset after partial payment)
   useEffect(() => {
@@ -757,11 +751,12 @@ const MenuOrdering = ({
           updatedItems[itemIndex] = newItem;
         }
         
-        // Recalculate order total
-        const newTotal = updatedItems.reduce((sum, i) => sum + (i.price + (i.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * i.quantity, 0);
-        
+        const newSubtotal = updatedItems.reduce((sum, i) => sum + (i.price + (i.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * i.quantity, 0);
+        const orderDiscount = Math.max(0, Math.min(newSubtotal, order.discount || 0));
+        const orderVat = Math.round((newSubtotal - orderDiscount) * (order.vat || 0) / 100);
+        const newTotal = newSubtotal - orderDiscount + orderVat;
         const updatedOrders = (activeTable.orders || []).map(o => 
-          o.id === orderId ? { ...o, items: updatedItems, total: newTotal, subtotal: newTotal } : o
+          o.id === orderId ? { ...o, items: updatedItems, total: newTotal, subtotal: newSubtotal } : o
         );
 
         // Log void if quantity reduced or item removed
@@ -772,7 +767,7 @@ const MenuOrdering = ({
           const reason = prompt(`⚠️ Bạn đang giảm số lượng hoặc hủy món [${oldItem.name}].\nVui lòng nhập lý do (VD: Khách đổi ý, Hết nguyên liệu...):`);
           if (!reason) {
             alert("❌ Bắt buộc phải nhập lý do hủy/giảm món!");
-            return;
+            return false;
           }
 
           const voidLog: Omit<VoidLog, "id"> = {
@@ -910,8 +905,8 @@ const MenuOrdering = ({
 
     setIsProcessing(true);
     try {
-      await onCheckout(activeTable.id, ordersToPay, discount, paymentMethod, shouldPrint, selectedCustomerId);
-      
+      const checkoutSucceeded = await onCheckout(activeTable.id, ordersToPay, discountRate, paymentMethod, shouldPrint, selectedCustomerId);
+      if (checkoutSucceeded !== true) return;
       // Clear local states
       setCurrentOrder([]);
       setSelectedOrdersToPay([]);
@@ -935,22 +930,15 @@ const MenuOrdering = ({
   // Calculate totals
   const draftSubtotal = currentOrder.reduce((sum, item) => sum + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0);
   
-  // Calculate total of SELECTED orders for display
-  const selectedOrdersTotal = committedOrders
+  // Payment starts from line-item subtotals. Summing session totals would apply VAT twice.
+  const selectedOrdersSubtotal = committedOrders
     .filter(o => selectedOrdersToPay.includes(o.id) || (selectedOrdersToPay.length === 0 && o.status !== 'paid'))
-    .reduce((sum, o) => sum + o.total, 0);
-
-  const displaySubtotal = selectedOrdersToPay.length > 0 ? selectedOrdersTotal : (selectedOrdersTotal + draftSubtotal);
-  
-  // Recalculate final total based on discount/vat for the PAYMENT view
-  // Note: committed orders already have total calculated. 
-  // If we are paying multiple orders, we sum their totals.
-  // Discount is applied to the *session* usually. 
-  // If we apply discount now, it applies to the *sum* of selected orders.
-  
-  const finalSubtotal = displaySubtotal; // Simplified for now
-  const discountAmount = (finalSubtotal * discount) / 100;
-  const vatAmount = ((finalSubtotal - discountAmount) * vat) / 100;
+    .reduce((sum, o) => sum + o.subtotal, 0);
+  const displaySubtotal = selectedOrdersToPay.length > 0 ? selectedOrdersSubtotal : (selectedOrdersSubtotal + draftSubtotal);
+  const finalSubtotal = displaySubtotal;
+  const discountRate = Math.min(100, Math.max(0, Number.isFinite(discount) ? discount : 0));
+  const discountAmount = Math.round((finalSubtotal * discountRate) / 100);
+  const vatAmount = Math.round(((finalSubtotal - discountAmount) * vat) / 100);
   const finalTotal = finalSubtotal - discountAmount + vatAmount;
 
   const handlePrintProvisional = () => {
@@ -1498,7 +1486,9 @@ const MenuOrdering = ({
                         type="number" 
                         className="w-10 bg-gray-200 dark:bg-black/40 border border-black/10 dark:border-white/10 rounded px-1 text-center text-[10px]"
                         value={discount}
-                        onChange={(e) => setDiscount(Number(e.target.value))}
+                        min="0"
+                        max="100"
+                        onChange={(e) => { const next = Number(e.target.value); setDiscount(Number.isFinite(next) ? Math.min(100, Math.max(0, next)) : 0); }}
                       />
                     )}
                   </div>
@@ -2007,8 +1997,8 @@ const ReportsView = ({ invoices, activeOrdersCount, businessDate }: { invoices: 
   const todayRevenue = todayInvoices.reduce((sum, inv) => sum + inv.total, 0);
   const todayOrders = todayInvoices.length;
 
-  const chartData = Array.from({ length: 8 }, (_, i) => {
-    const hour = 8 + (i * 2);
+  const chartData = Array.from({ length: 12 }, (_, i) => {
+    const hour = i * 2;
     const label = `${hour.toString().padStart(2, '0')}:00`;
     const revenue = todayInvoices.reduce((sum, inv) => {
       let invHour = 0;
@@ -3848,7 +3838,7 @@ export default function App() {
   const handleDeleteInvoice = async (invoiceId: string) => {
     if (!currentUser || currentUser.role !== 'admin') {
       alert('Chỉ quản trị viên (Admin) mới có quyền xóa hóa đơn.');
-      return;
+      return false;
     }
 
     try {
@@ -3878,25 +3868,21 @@ export default function App() {
       const restoredInIds: string[] = [];
 
       // THỰC THI TRANSACTION NGUYÊN TỬ (Firestore Contract: TẤT CẢ READS TRƯỚC TIÊN -> TÍNH TOÁN -> TẤT CẢ WRITES SAU CÙNG)
-      await runTransaction(db, async (txn) => {
+      const deleted = await runTransaction(db, async (txn) => {
         // ==========================================
         // GIAI ĐOẠN 1: TOÀN BỘ CÁC LẦN ĐỌC (ALL READS FIRST)
         // ==========================================
         
         // 1a. Đọc hóa đơn trực tiếp từ server
         const currentInvSnap = await txn.get(invRef);
-        if (!currentInvSnap.exists()) {
-          return; // Idempotent exit nếu hóa đơn đã bị xóa trước đó
-        }
+        if (!currentInvSnap.exists()) return false;
         const invData = currentInvSnap.data() as Invoice;
 
         // 1b. Kiểm tra storeId và trạng thái hóa đơn ngay tại nơi xử lý giao dịch
         if (invData.storeId !== currentUser.storeId) {
           throw new Error('Hóa đơn không thuộc chi nhánh hiện tại.');
         }
-        if (invData.status === 'cancelled') {
-          return; // Idempotent exit nếu hóa đơn đã được đánh dấu hủy
-        }
+        if (invData.status === 'cancelled') return false;
 
         // 1c. Thu thập toàn bộ ID món/nguyên liệu từ dữ liệu hóa đơn vừa đọc từ server
         const candidateMenuIds = new Set<string>();
@@ -4001,8 +3987,8 @@ export default function App() {
         const invCost = typeof invData.totalCost === 'number'
           ? invData.totalCost
           : calculateInvoiceCost(invData.items || []);
-        const isCash = invData.paymentMethod === 'cash';
-        const isTransfer = invData.paymentMethod === 'transfer';
+        const isCash = isCashPayment(invData.paymentMethod);
+        const isTransfer = !isCash;
 
         let pointsToRevert = 0;
         let revertedPoints = 0;
@@ -4102,7 +4088,9 @@ export default function App() {
 
         // 3f. Xóa hóa đơn hoạt động khỏi collection invoices
         txn.delete(invRef);
+        return true;
       });
+      if (!deleted) return false;
 
       // Mở khóa topping nếu tồn kho chuyển từ <= 0 sang > 0
       if (restoredInIds.length > 0) {
@@ -4118,10 +4106,12 @@ export default function App() {
         const cashIdToDelete = candidateCashDocRef.id;
         setCashTransactions(prev => prev.filter(c => c.id !== cashIdToDelete && (c as any).invoiceId !== invoiceId));
       }
+      return true;
 
     } catch (error) {
       console.error('Lỗi khi xóa hóa đơn:', error);
       alert('Có lỗi xảy ra khi xóa hóa đơn!');
+      return false;
     }
   };
 
@@ -4208,13 +4198,13 @@ export default function App() {
     });
   };
 
-  const handleCheckout = async (tableId: string, ordersToPay: OrderSession[], discount: number, paymentMethod: 'cash' | 'transfer', shouldPrint: boolean = false, customerId?: string) => {
-    if (!currentUser) return;
+  const handleCheckout = async (tableId: string, ordersToPay: OrderSession[], discount: number, paymentMethod: 'cash' | 'transfer', shouldPrint: boolean = false, customerId?: string): Promise<boolean> => {
+    if (!currentUser) return false;
 
     // 1. Khóa chống thanh toán lặp đa luồng / click đúp liên tục (P0 Idempotency & Replay Protection)
     if (checkoutLockRef.current.has(tableId)) {
       console.warn(`[Anti-Replay P0] Bàn ${tableId} đang được thanh toán trong tiến trình khác. Hủy lệnh trùng.`);
-      return;
+      return false;
     }
     checkoutLockRef.current.add(tableId);
 
@@ -4223,18 +4213,18 @@ export default function App() {
       let table = tables.find(t => t.id === tableId) || selectedTable;
       if (!table || table.id !== tableId) {
         const tableDoc = await getDoc(doc(db, 'tables', tableId));
-        if (!tableDoc.exists()) return;
+        if (!tableDoc.exists()) return false;
         table = { ...tableDoc.data(), id: tableDoc.id } as Table;
       }
 
       // Kiểm tra đơn hợp lệ cần thanh toán (Chống ghi lặp đơn đã thanh toán)
-      if (!ordersToPay || ordersToPay.length === 0) return;
+      if (!ordersToPay || ordersToPay.length === 0) return false;
       const currentOrders = table.orders || [];
       const currentOrderIds = new Set(currentOrders.map(o => o.id));
       const validOrders = ordersToPay.filter(o => currentOrderIds.has(o.id) || o.id?.startsWith('draft-'));
       if (validOrders.length === 0 && currentOrders.length === 0) {
         console.warn(`[Anti-Replay P0] Bàn ${table.name} đã được thanh toán hoặc không còn đơn nào để thanh toán.`);
-        return;
+        return false;
       }
 
       // Void Detection (Silent logging, no alert to avoid double-alerting with item_void)
@@ -4313,8 +4303,9 @@ export default function App() {
 
       // Calculate totals for the invoice based on SELECTED orders
       const subtotal = ordersToPay.reduce((sum, o) => sum + o.subtotal, 0);
-      const discountAmount = (subtotal * discount) / 100;
-      const vatAmount = ((subtotal - discountAmount) * (systemSettings.vatPercent || 0)) / 100;
+      const normalizedDiscount = Math.min(100, Math.max(0, Number.isFinite(discount) ? discount : 0));
+      const discountAmount = Math.round((subtotal * normalizedDiscount) / 100);
+      const vatAmount = Math.round(((subtotal - discountAmount) * (systemSettings.vatPercent || 0)) / 100);
       const total = subtotal - discountAmount + vatAmount;
 
       // Combine notes from orders being paid and table note (for merged/transferred tables)
@@ -4347,7 +4338,12 @@ export default function App() {
         if (existing) {
           existing.quantity += item.quantity;
         } else {
-          groupedItems.push({ ...item });
+          const selectedAddOns = (item.selectedAddOns || []).map(addOn => {
+            if (addOn.inventoryItemId) return { ...addOn };
+            const source = menu.find(menuItem => (menuItem.isInventory || menuItem.type === 'goods' || menuItem.category === 'Nguyên liệu') && menuItem.name.toLowerCase().trim() === addOn.name.toLowerCase().trim());
+            return source?.id ? { ...addOn, inventoryItemId: source.id } : { ...addOn };
+          });
+          groupedItems.push({ ...item, selectedAddOns });
         }
       });
 
@@ -4368,7 +4364,8 @@ export default function App() {
 
       // Tính chính xác giá vốn thực tế (COGS) tại thời điểm bán cho toàn bộ món & topping chốt thành snapshot
       // Chuẩn hóa theo công thức: unitCost × quantityPerServing × soldQuantity
-      const invoiceCost = calculateInvoiceCost(groupedItems);
+      let invoiceCost = calculateInvoiceCost(groupedItems);
+      let invoiceCostIsComplete = false;
 
       // GỘP DELTA NGUYÊN LIỆU & HÀNG HÓA:
       interface ConsolidatedDelta {
@@ -4426,6 +4423,13 @@ export default function App() {
         }
       }
 
+      const costSourceIds = new Set<string>();
+      groupedItems.forEach(item => {
+        if (item.id) costSourceIds.add(item.id);
+        (item.recipe || []).forEach(recipe => costSourceIds.add(recipe.ingredientId));
+        (item.selectedAddOns || []).forEach(addOn => { if (addOn.inventoryItemId) costSourceIds.add(addOn.inventoryItemId); });
+      });
+
       const cashRef = doc(db, 'cash_transactions', `cash_${invoiceId}`);
       const dailyStatsRef = doc(db, 'daily_stats', `${currentUser.storeId}_${vnBusinessDate}`);
       const tableRef = doc(db, 'tables', tableId);
@@ -4436,7 +4440,7 @@ export default function App() {
       let newStartTimeResult: string | undefined = undefined;
 
       // THỰC THI TRANSACTION NGUYÊN TỬ (Chống thanh toán đồng thời & đảm bảo tính đúng đắn đa máy)
-      await runTransaction(db, async (txn) => {
+      const checkoutCommitted = await runTransaction(db, async (txn) => {
         // --- 1. TOÀN BỘ CÁC BƯỚC ĐỌC (READS TRƯỚC TIÊN) ---
         // 1a. Đọc khóa Idempotency
         const lockSnap = await txn.get(lockDocRef);
@@ -4452,17 +4456,16 @@ export default function App() {
         }
         const serverTable = tableSnap.data() as Table;
         const serverOrders = serverTable.orders || [];
-        const paidIds = new Set(ordersToPay.map(p => p.id));
-
-        // Kiểm tra xem các phiên gọi món này còn tồn tại và chưa bị thiết bị khác thanh toán
+        const persistedOrdersToPay = ordersToPay.filter(order => !order.id?.startsWith('draft-'));
+        const paidIds = new Set(persistedOrdersToPay.map(p => p.id));
         const stillPresent = serverOrders.filter(o => paidIds.has(o.id));
-        if (stillPresent.length === 0 && ordersToPay.some(o => !o.id.startsWith('draft-'))) {
-          throw new Error('Đơn hàng trên bàn này đã được thanh toán bởi thiết bị khác!');
-        }
+        if (stillPresent.length !== persistedOrdersToPay.length) throw new Error('Đơn hàng đã thay đổi hoặc được thanh toán ở thiết bị khác. Vui lòng mở lại bàn.');
+        const signature = (order: OrderSession) => JSON.stringify({ subtotal: order.subtotal, items: (order.items || []).map(item => ({ id: item.id, price: item.price, quantity: item.quantity, note: item.note || '', addOns: (item.selectedAddOns || []).map(a => ({ id: a.id, inventoryItemId: a.inventoryItemId || '', price: a.price, quantity: a.quantity || 1 })).sort((a,b) => `${a.id}:${a.inventoryItemId}`.localeCompare(`${b.id}:${b.inventoryItemId}`)) })).sort((a,b) => `${a.id}:${a.price}:${a.note}`.localeCompare(`${b.id}:${b.price}:${b.note}`)) });
+        const serverById = new Map(stillPresent.map(order => [order.id, order]));
+        if (persistedOrdersToPay.some(order => signature(order) !== signature(serverById.get(order.id)!))) throw new Error('Nội dung đơn hàng vừa thay đổi ở thiết bị khác. Vui lòng kiểm tra lại.');
 
-        // 1c. Đọc tồn kho thực tế trên Server cho toàn bộ nguyên liệu & hàng hóa (Server-Authoritative)
         const serverItemSnaps = new Map<string, any>();
-        for (const itemId of deltaMap.keys()) {
+        for (const itemId of costSourceIds) {
           const itemSnap = await txn.get(doc(db, 'menu', itemId));
           serverItemSnaps.set(itemId, itemSnap);
         }
@@ -4475,6 +4478,12 @@ export default function App() {
 
         // 1e. Đọc thống kê ngày (daily_stats) để kiểm tra trạng thái trước khi cập nhật
         const dailyStatsSnap = await txn.get(dailyStatsRef);
+        const costSnapshot = calculateInvoiceCostSnapshot(groupedItems, itemId => {
+          const sourceSnap = serverItemSnaps.get(itemId);
+          return sourceSnap?.exists() ? sourceSnap.data() : undefined;
+        });
+        invoiceCost = costSnapshot.totalCost;
+        invoiceCostIsComplete = costSnapshot.isComplete;
 
         // --- 2. TOÀN BỘ CÁC BƯỚC GHI (WRITES) ---
         // 2a. Trừ tồn kho từ số liệu đọc trực tiếp trên server
@@ -4540,9 +4549,11 @@ export default function App() {
           vat: vatAmount,
           total,
           totalCost: invoiceCost,
-          costVersion: 1,
+          costVersion: 2,
+          costStatus: invoiceCostIsComplete ? 'complete' : 'estimated',
           paymentMethod,
-          tableId: serverTable.id,
+          tableId,
+          shiftId: activeShift?.id,
           tableName: serverTable.name,
           staffId: currentUser.id,
           staffName: currentUser.name,
@@ -4570,13 +4581,10 @@ export default function App() {
         });
 
         // 2e. Cập nhật Thống kê ngày (daily_stats) bằng Atomic Increment
-        const invoiceHasCompleteCost = groupedItems.every(i => {
-          return (typeof i.costPrice === 'number' && i.costPrice > 0) || (i.recipe && i.recipe.length > 0);
-        });
-        let targetCostStatus: 'complete' | 'estimated' = invoiceHasCompleteCost ? 'complete' : 'estimated';
+        let targetCostStatus: 'complete' | 'estimated' = invoiceCostIsComplete ? 'complete' : 'estimated';
         if (dailyStatsSnap && dailyStatsSnap.exists()) {
           const prevStats = dailyStatsSnap.data() as any;
-          if (prevStats.costStatus === 'estimated' || !invoiceHasCompleteCost) {
+          if (prevStats.costStatus === 'estimated' || !invoiceCostIsComplete) {
             targetCostStatus = 'estimated';
           }
         }
@@ -4587,8 +4595,8 @@ export default function App() {
           year: parseInt(vnBusinessDate.slice(0, 4), 10),
           month: vnBusinessDate.slice(0, 7),
           totalRevenue: increment(total),
-          totalCash: increment(paymentMethod === 'cash' ? total : 0),
-          totalTransfer: increment(paymentMethod === 'transfer' ? total : 0),
+          totalCash: increment(isCashPayment(paymentMethod) ? total : 0),
+          totalTransfer: increment(isCashPayment(paymentMethod) ? 0 : total),
           invoiceCount: increment(1),
           totalDiscount: increment(discountAmount || 0),
           totalCost: increment(invoiceCost),
@@ -4648,7 +4656,12 @@ export default function App() {
           completedAt: invoiceNowIso,
           status: 'completed'
         });
+        return true;
       });
+      if (!checkoutCommitted) {
+        alert('Đơn này đã được thanh toán trước đó. Hệ thống sẽ đồng bộ lại trạng thái bàn.');
+        return false;
+      }
 
       // Cập nhật trạng thái hết hàng của topping nếu tồn kho chuyển từ > 0 sang <= 0
       if (itemsBecomingOut.length > 0) {
@@ -4704,9 +4717,11 @@ export default function App() {
 
       // Đóng modal
       setSelectedTable(null);
+      return true;
     } catch (err) {
       console.error('Lỗi khi thực hiện thanh toán:', err);
       alert('Có lỗi xảy ra trong quá trình thanh toán. Vui lòng thử lại!');
+      return false;
     } finally {
       // Giải phóng khóa bàn
       checkoutLockRef.current.delete(tableId);
@@ -4775,17 +4790,19 @@ export default function App() {
 
   const handleCloseShift = async (endCash: number) => {
     if (!activeShift) return;
-    
-    const expectedCash = activeShift.startCash + (activeShift.totalCash || 0);
-    const discrepancy = endCash - expectedCash;
-    
-    await updateDoc(doc(db, 'shifts', activeShift.id), {
-      endTime: new Date().toISOString(),
-      endCash,
-      discrepancy,
-      discrepancyProcessed: discrepancy === 0,
-      status: 'closed'
-    });
+    try {
+      await runTransaction(db, async txn => {
+        const shiftRef = doc(db, 'shifts', activeShift.id);
+        const shiftSnap = await txn.get(shiftRef);
+        if (!shiftSnap.exists()) throw new Error('Không tìm thấy ca làm việc.');
+        const serverShift = shiftSnap.data() as Shift;
+        if (serverShift.status !== 'open') throw new Error('Ca làm việc này đã được đóng ở thiết bị khác.');
+        const discrepancy = endCash - ((serverShift.startCash || 0) + (serverShift.totalCash || 0));
+        txn.update(shiftRef, { endTime: new Date().toISOString(), endCash, discrepancy, discrepancyProcessed: discrepancy === 0, status: 'closed' });
+      });
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Không thể đóng ca. Vui lòng thử lại.');
+    }
   };
 
   // User Management (Bảo mật qua backend API: scrypt hashing, không lưu plaintext password)
