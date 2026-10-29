@@ -33,6 +33,7 @@ post_install do |installer|
       config.build_settings['SWIFT_TREAT_WARNINGS_AS_ERRORS'] = 'NO'
       config.build_settings['GCC_TREAT_WARNINGS_AS_ERRORS'] = 'NO'
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
     end
     if target.respond_to?(:product_type) and target.product_type == "com.apple.product-type.bundle"
       target.build_configurations.each do |config|

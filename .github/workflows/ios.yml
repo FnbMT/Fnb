@@ -295,10 +295,12 @@ jobs:
 
             if [ $ARCHIVE_STATUS -ne 0 ]; then
               echo "::error::xcodebuild archive thất bại với mã lỗi $ARCHIVE_STATUS!"
-              echo "=== CÁC LỖI CỤ THỂ TRONG LOG ==="
-              grep -E "error:|fatal error:|\(failures\)|failed with a nonzero exit code" xcodebuild_archive.log -B 2 -A 4 || true
-              echo "=== 150 DÒNG CUỐI CỦA LOG ==="
-              tail -n 150 xcodebuild_archive.log
+              echo "=== CÁC LỖI BIÊN DỊCH SWIFT / XCODE CỤ THỂ ==="
+              grep -E ": error: |fatal error:" xcodebuild_archive.log -B 2 -A 4 || true
+              echo "=== CÁC LỖI THẤT BẠI TỔNG QUAN ==="
+              grep -E "\(failures\)|failed with a nonzero exit code" xcodebuild_archive.log -B 2 -A 4 || true
+              echo "=== 300 DÒNG CUỐI CỦA XCODEBUILD LOG ==="
+              tail -n 300 xcodebuild_archive.log
               exit $ARCHIVE_STATUS
             fi
           else
