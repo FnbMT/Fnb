@@ -156,16 +156,9 @@ jobs:
           # Sử dụng mật khẩu tạm cho keychain runner (không phụ thuộc vào secret KEYCHAIN_PASSWORD)
           KEYCHAIN_PWD="${KEYCHAIN_PASSWORD:-RunnerSigningKeychainPass123!}"
 
-          # Giải mã base64 an toàn bằng Python để loại bỏ triệt để lỗi xuống dòng / khoảng trắng
-          python3 -c "
-import os, base64
-
-for env_var, path in [('BUILD_CERTIFICATE_BASE64', '$CERTIFICATE_PATH'), ('BUILD_PROVISION_PROFILE_BASE64', '$PP_PATH')]:
-    raw = os.environ.get(env_var, '').strip()
-    clean = ''.join(raw.split())
-    with open(path, 'wb') as f:
-        f.write(base64.b64decode(clean))
-"
+          # Giải mã base64 an toàn bằng Python (1 dòng mỗi file, tránh lỗi format YAML)
+          python3 -c "import os, base64; open('$CERTIFICATE_PATH', 'wb').write(base64.b64decode(''.join(os.environ.get('BUILD_CERTIFICATE_BASE64', '').split())))"
+          python3 -c "import os, base64; open('$PP_PATH', 'wb').write(base64.b64decode(''.join(os.environ.get('BUILD_PROVISION_PROFILE_BASE64', '').split())))"
 
           # Chuẩn hóa mật khẩu P12 (loại bỏ khoảng trắng / ký tự xuống dòng thừa)
           CLEAN_P12_PWD=$(printf '%s' "$P12_PASSWORD" | tr -d '\r\n')
