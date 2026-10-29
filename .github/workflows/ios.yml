@@ -156,12 +156,16 @@ jobs:
           # Sử dụng mật khẩu tạm cho keychain runner (không phụ thuộc vào secret KEYCHAIN_PASSWORD)
           KEYCHAIN_PWD="${KEYCHAIN_PASSWORD:-RunnerSigningKeychainPass123!}"
 
-          # Làm sạch khoảng trắng/xuống dòng do copy-paste trước khi decode base64
-          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d '\r\n ' | base64 --decode > "$CERTIFICATE_PATH" 2>/dev/null || \
-          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d '\r\n ' | base64 -D > "$CERTIFICATE_PATH"
+          # Giải mã base64 an toàn bằng Python để loại bỏ triệt để lỗi xuống dòng / khoảng trắng
+          python3 -c "
+import os, base64
 
-          printf '%s' "$BUILD_PROVISION_PROFILE_BASE64" | tr -d '\r\n ' | base64 --decode > "$PP_PATH" 2>/dev/null || \
-          printf '%s' "$BUILD_PROVISION_PROFILE_BASE64" | tr -d '\r\n ' | base64 -D > "$PP_PATH"
+for env_var, path in [('BUILD_CERTIFICATE_BASE64', '$CERTIFICATE_PATH'), ('BUILD_PROVISION_PROFILE_BASE64', '$PP_PATH')]:
+    raw = os.environ.get(env_var, '').strip()
+    clean = ''.join(raw.split())
+    with open(path, 'wb') as f:
+        f.write(base64.b64decode(clean))
+"
 
           # Chuẩn hóa mật khẩu P12 (loại bỏ khoảng trắng / ký tự xuống dòng thừa)
           CLEAN_P12_PWD=$(printf '%s' "$P12_PASSWORD" | tr -d '\r\n')
@@ -175,16 +179,50 @@ jobs:
 
           # Import chứng chỉ vào keychain
           echo "Đang import chứng chỉ .p12 vào Keychain..."
-          if ! security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$CLEAN_P12_PWD" -T /usr/bin/codesign -T /usr/bin/security -A 2>&1; then
-            echo "Lần import đầu tiên chưa thành công, thử tương thích định dạng..."
-            if openssl pkcs12 -in "$CERTIFICATE_PATH" -nodes -passin pass:"$CLEAN_P12_PWD" -out "$RUNNER_TEMP/cert_bundle.pem" 2>/dev/null; then
-              openssl pkcs12 -export -in "$RUNNER_TEMP/cert_bundle.pem" -passout pass:"$CLEAN_P12_PWD" -out "$RUNNER_TEMP/cert_clean.p12"
-              security import "$RUNNER_TEMP/cert_clean.p12" -k "$KEYCHAIN_PATH" -P "$CLEAN_P12_PWD" -T /usr/bin/codesign -T /usr/bin/security -A
+          IMPORTED=0
+
+          # Thử import trực tiếp trước
+          if security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$CLEAN_P12_PWD" -T /usr/bin/codesign -T /usr/bin/security -A 2>&1; then
+            IMPORTED=1
+            echo "Import chứng chỉ trực tiếp thành công."
+          else
+            echo "Lần import đầu tiên chưa thành công (do macOS Keychain không đọc được mã hóa AES-256 mới của OpenSSL 3)."
+            echo "Đang chuyển đổi định dạng container .p12 sang PBE-SHA1-3DES tương thích chuẩn macOS Keychain..."
+
+            # Trích xuất pem bundle từ .p12 gốc bằng OpenSSL (hỗ trợ cả file legacy hoặc modern)
+            openssl pkcs12 -in "$CERTIFICATE_PATH" -nodes -legacy -passin "pass:$CLEAN_P12_PWD" -out "$RUNNER_TEMP/cert_bundle.pem" 2>/dev/null || \
+            openssl pkcs12 -in "$CERTIFICATE_PATH" -nodes -passin "pass:$CLEAN_P12_PWD" -out "$RUNNER_TEMP/cert_bundle.pem" 2>/dev/null || true
+
+            if [ -s "$RUNNER_TEMP/cert_bundle.pem" ]; then
+              # Xuất lại container .p12 với cipher PBE-SHA1-3DES và macalg sha1 mà macOS Keychain yêu cầu
+              openssl pkcs12 -export \
+                -in "$RUNNER_TEMP/cert_bundle.pem" \
+                -passout "pass:$CLEAN_P12_PWD" \
+                -certpbe PBE-SHA1-3DES \
+                -keypbe PBE-SHA1-3DES \
+                -macalg sha1 \
+                -out "$RUNNER_TEMP/cert_clean.p12" 2>/dev/null || \
+              openssl pkcs12 -export -legacy \
+                -in "$RUNNER_TEMP/cert_bundle.pem" \
+                -passout "pass:$CLEAN_P12_PWD" \
+                -certpbe PBE-SHA1-3DES \
+                -keypbe PBE-SHA1-3DES \
+                -macalg sha1 \
+                -out "$RUNNER_TEMP/cert_clean.p12" 2>/dev/null || true
+
+              if [ -s "$RUNNER_TEMP/cert_clean.p12" ]; then
+                if security import "$RUNNER_TEMP/cert_clean.p12" -k "$KEYCHAIN_PATH" -P "$CLEAN_P12_PWD" -T /usr/bin/codesign -T /usr/bin/security -A; then
+                  IMPORTED=1
+                  echo "Import chứng chỉ sau khi chuẩn hóa mã hóa PBE-SHA1-3DES thành công!"
+                fi
+              fi
               rm -f "$RUNNER_TEMP/cert_bundle.pem" "$RUNNER_TEMP/cert_clean.p12"
-            else
-              echo "::error::Mật khẩu P12 không khớp hoặc file p12 bị hỏng khi decode. Vui lòng kiểm tra IOS_CERTIFICATE_PASSWORD."
-              exit 1
             fi
+          fi
+
+          if [ "$IMPORTED" -ne 1 ]; then
+            echo "::error::Không thể import chứng chỉ vào Keychain. Vui lòng kiểm tra lại secret IOS_CERTIFICATE_PASSWORD và IOS_CERTIFICATE_P12_BASE64."
+            exit 1
           fi
 
           # Phân quyền cho codesign truy cập private key mà không hỏi popup UI
