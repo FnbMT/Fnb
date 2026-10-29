@@ -18,55 +18,35 @@ concurrency:
 jobs:
   build_ios:
     # Sử dụng macos-latest để cung cấp Xcode 26+ và iOS 26 SDK theo yêu cầu bắt buộc của Apple App Store Connect
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select and Verify Xcode
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.2'
+
+      - name: Initialize and Verify iOS Toolchain
+        shell: bash
         run: |
-          echo "Danh sách các phiên bản Xcode có sẵn trên runner:"
-          ls -d /Applications/Xcode*.app || true
+          set -euo pipefail
 
-          DEFAULT_VER=$(xcodebuild -version 2>/dev/null | head -n 1 || true)
-          echo "Xcode mặc định hiện tại: $DEFAULT_VER"
+          sudo xcodebuild -runFirstLaunch
 
-          # Tìm phiên bản Xcode cao nhất (bắt buộc Xcode >= 26 theo chính sách Apple App Store Connect)
-          BEST_XCODE=""
-          MAX_VER=0
-
-          for xc in /Applications/Xcode*.app; do
-            if [ -d "$xc" ]; then
-              v=$("$xc/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -n 1 | sed -E 's/Xcode ([0-9]+).*/\1/' || echo "0")
-              echo "Phát hiện $xc: Xcode $v"
-              if [ "$v" -gt "$MAX_VER" ] 2>/dev/null; then
-                MAX_VER=$v
-                BEST_XCODE="$xc"
-              fi
-            fi
-          done
-
-          if [ -n "$BEST_XCODE" ]; then
-            echo "Kích hoạt Xcode phiên bản cao nhất: $BEST_XCODE (Xcode $MAX_VER)"
-            sudo xcode-select -s "$BEST_XCODE/Contents/Developer"
-          fi
-
-          echo "Phiên bản Xcode đang kích hoạt:"
+          echo "=== Selected Xcode ==="
+          xcode-select -p
           xcodebuild -version
-          sw_vers
 
-          ACTIVE_MAJOR=$(xcodebuild -version 2>/dev/null | head -n 1 | sed -E 's/Xcode ([0-9]+).*/\1/' || echo "0")
-          if [ "$ACTIVE_MAJOR" -lt 26 ] 2>/dev/null; then
-            echo "::warning::Xcode hiện tại là $ACTIVE_MAJOR. Apple yêu cầu Xcode 26+ cho TestFlight."
-          fi
+          echo "=== Available SDKs ==="
+          xcodebuild -showsdks
 
-          # Khởi chạy các thành phần ban đầu của Xcode và tải iOS platform/simulator runtime nếu cần
-          sudo xcodebuild -runFirstLaunch || true
-          echo "Kiểm tra và nạp iOS Platform components..."
-          sudo xcodebuild -downloadPlatform iOS || true
-          xcrun simctl list runtimes || true
+          echo "=== iPhoneOS SDK ==="
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -110,6 +90,16 @@ jobs:
             echo "Chưa có Podfile.lock trên repo, tiến hành cài đặt và sinh Podfile.lock..."
             pod install || pod install --repo-update
           fi
+
+      - name: Check iOS Destinations
+        working-directory: ios/App
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -showdestinations
 
       - name: Verify iOS App Icon
         run: |
