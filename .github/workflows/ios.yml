@@ -17,9 +17,8 @@ concurrency:
 
 jobs:
   build_ios:
-    # macos-14 (Apple Silicon arm64) có pool máy ảo dồi dào và ổn định nhất trên GitHub Actions hiện nay
-    # macos-15 thường xuyên gặp lỗi thiếu máy ảo (capacity constraint / runner not acquired)
-    runs-on: macos-14
+    # Sử dụng macos-latest để cung cấp Xcode 26+ và iOS 26 SDK theo yêu cầu bắt buộc của Apple App Store Connect
+    runs-on: macos-latest
     timeout-minutes: 60
 
     steps:
@@ -31,17 +30,37 @@ jobs:
           echo "Danh sách các phiên bản Xcode có sẵn trên runner:"
           ls -d /Applications/Xcode*.app || true
 
-          # Tự động tìm bản Xcode mới nhất có sẵn trên runner (Xcode 16.x / 15.x)
-          SELECTED_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
+          DEFAULT_VER=$(xcodebuild -version 2>/dev/null | head -n 1 || true)
+          echo "Xcode mặc định hiện tại: $DEFAULT_VER"
 
-          if [ -n "$SELECTED_XCODE" ]; then
-            echo "Kích hoạt Xcode tại: $SELECTED_XCODE"
-            sudo xcode-select -s "$SELECTED_XCODE"
+          # Tìm phiên bản Xcode cao nhất (bắt buộc Xcode >= 26 theo chính sách Apple App Store Connect)
+          BEST_XCODE=""
+          MAX_VER=0
+
+          for xc in /Applications/Xcode*.app; do
+            if [ -d "$xc" ]; then
+              v=$("$xc/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -n 1 | sed -E 's/Xcode ([0-9]+).*/\1/' || echo "0")
+              echo "Phát hiện $xc: Xcode $v"
+              if [ "$v" -gt "$MAX_VER" ] 2>/dev/null; then
+                MAX_VER=$v
+                BEST_XCODE="$xc"
+              fi
+            fi
+          done
+
+          if [ -n "$BEST_XCODE" ]; then
+            echo "Kích hoạt Xcode phiên bản cao nhất: $BEST_XCODE (Xcode $MAX_VER)"
+            sudo xcode-select -s "$BEST_XCODE/Contents/Developer"
           fi
 
           echo "Phiên bản Xcode đang kích hoạt:"
           xcodebuild -version
           sw_vers
+
+          ACTIVE_MAJOR=$(xcodebuild -version 2>/dev/null | head -n 1 | sed -E 's/Xcode ([0-9]+).*/\1/' || echo "0")
+          if [ "$ACTIVE_MAJOR" -lt 26 ] 2>/dev/null; then
+            echo "::warning::Xcode hiện tại là $ACTIVE_MAJOR. Apple yêu cầu Xcode 26+ cho TestFlight."
+          fi
 
           # Khởi chạy các thành phần ban đầu của Xcode và tải iOS platform/simulator runtime nếu cần
           sudo xcodebuild -runFirstLaunch || true
@@ -372,7 +391,7 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$HOME/.appstoreconnect/private_keys" "$HOME/.private_keys"
+          mkdir -p "$HOME/.appstoreconnect/private_keys" "$HOME/.private_keys" "$HOME/.private_key"
 
           # Hỗ trợ cả private key raw hoặc base64
           if echo "$API_PRIVATE_KEY" | grep -q "BEGIN PRIVATE KEY"; then
@@ -382,7 +401,8 @@ jobs:
           fi
 
           cp "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8" "$HOME/.private_keys/"
-          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8" "$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8"
+          cp "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8" "$HOME/.private_key/"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8" "$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8" "$HOME/.private_key/AuthKey_${API_KEY_ID}.p8"
 
           IPA_PATH=$(find ios/App/output -name "*.ipa" -print -quit)
 
