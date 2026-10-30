@@ -79,6 +79,7 @@ export interface DailyStats {
   cashCount?: number;
   version?: number; // Schema version (VD: 2)
   updatedAt?: string;
+  sourceRevision?: number;
 }
 
 export type MenuItemType = 'goods' | 'dish';
@@ -121,6 +122,7 @@ export interface MenuItem {
 }
 
 export interface OrderItem extends MenuItem {
+  lineId?: string;
   quantity: number;
   note?: string;
   isCompleted?: boolean;
@@ -278,6 +280,9 @@ export interface Invoice {
   total: number;
   totalCost?: number; // Snapshot tổng giá vốn tại thời điểm thanh toán (phiên 1)
   costVersion?: number; // Version snapshot giá vốn (VD: 1)
+  statsApplied?: boolean;
+  inventoryMovements?: { itemId: string; quantity: number }[];
+  pointsEarned?: number;
   costStatus?: 'complete' | 'estimated';
   shiftId?: string;
   paymentMethod: 'cash' | 'card' | 'transfer' | 'qr';

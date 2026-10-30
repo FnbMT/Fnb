@@ -136,6 +136,7 @@ import {
   updateDoc,
   getDoc,
   getDocs,
+  getDocFromServer,
   setDoc,
   deleteField,
   writeBatch,
@@ -177,6 +178,9 @@ import { KitchenView } from './components/KitchenView';
 import { checkStoreTabPermission, isTabAllowedInPackage, APP_PACKAGE_TABS } from './utils/packagePermissions';
 import { calculateInvoiceCost, calculateInvoiceCostSnapshot } from './utils/costHelper';
 import { isCashPayment } from './utils/reportDataIntegrity';
+import { operationId, cloneData, orderSignature, itemsSubtotal, stockQuantity, itemKey, attendanceTotals } from './utils/dataIntegrity';
+import { subscribeDateRange, fetchStoreRows } from './utils/completeDataSource';
+import { addOrderAtomic, updateOrdersAtomic, moveTablesAtomic, recordCashAtomic, importStockAtomic, auditStockAtomic, cancelInvoiceAtomic, recordAttendanceAtomic } from './services/dataOperations';
 import {
   sendDeviceNotification,
   checkNotificationPermission,
@@ -544,17 +548,17 @@ const MenuOrdering = ({
   selectedTable: Table, 
   tables: Table[],
   onClose: () => void, 
-  onUpdateOrder: (tableId: string, order: OrderItem[], targetSessionId?: string) => void,
+  onUpdateOrder: (tableId: string, order: OrderItem[], targetSessionId?: string, operationId?: string) => Promise<string>,
   onCheckout: (tableId: string, ordersToPay: OrderSession[], discount: number, paymentMethod: 'cash' | 'transfer', shouldPrint: boolean, customerId?: string) => Promise<boolean> | boolean,
-  onMergeTables: (targetTableId: string, sourceTableIds: string[]) => void,
-  onTransferTable: (sourceTableId: string, targetTableId: string) => void,
+  onMergeTables: (targetTableId: string, sourceTableIds: string[], operationId?: string) => Promise<void>,
+  onTransferTable: (sourceTableId: string, targetTableId: string, operationId?: string) => Promise<void>,
   menu: MenuItem[],
   categories: string[],
   vatPercent: number,
   onPrint: (data: any) => void,
   staffName: string,
   currentUser: User | null,
-  onUpdateTable: (id: string, updates: Partial<Table>) => void,
+  onUpdateTable: (id: string, updates: Partial<Table>, expectedOrders?: OrderSession[], voidLog?: VoidLog) => Promise<boolean>,
   onLogVoid: (log: VoidLog) => void,
   activeShift: Shift | null,
   customers: Customer[],
@@ -576,7 +580,30 @@ const MenuOrdering = ({
 
   
   // Draft order (New items being added)
-  const [currentOrder, setCurrentOrder] = useState<OrderItem[]>(selectedTable.currentOrder || []);
+  const draftStorageKey = `fnb_draft_${currentUser?.storeId}_${currentUser?.id}_${selectedTable.id}`;
+  const [draftOperationId] = useState(() => {
+    try { const draft = JSON.parse(safeStorage.getItem(draftStorageKey) || 'null'); return draft?.operationId || operationId('order'); } catch { return operationId('order'); }
+  });
+  const orderOperationRef = useRef(draftOperationId);
+  const [currentOrder, setCurrentOrder] = useState<OrderItem[]>(() => {
+    try { const draft = JSON.parse(safeStorage.getItem(draftStorageKey) || 'null'); return draft?.items || selectedTable.currentOrder || []; } catch { return selectedTable.currentOrder || []; }
+  });
+  useEffect(() => {
+    if (currentOrder.length) safeStorage.setItem(draftStorageKey, JSON.stringify({ operationId: orderOperationRef.current, items: currentOrder }));
+    else safeStorage.removeItem(draftStorageKey);
+  }, [currentOrder, draftStorageKey]);
+  const moveOperationRef = useRef(operationId('move'));
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [customerResults, setCustomerResults] = useState<Customer[]>(customers);
+  useEffect(() => { setCustomerResults(customers); }, [customers]);
+  useEffect(() => {
+    if (!currentUser?.storeId || !customerSearch.trim()) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      fetchStoreRows<Customer>('customers', currentUser.storeId).then(rows => { if(active) setCustomerResults(rows); }).catch(error => { if(active) alert(error instanceof Error ? error.message : 'Không thể tải đủ khách hàng.'); });
+    }, 300);
+    return () => { active = false; clearTimeout(timer); };
+  }, [customerSearch, currentUser?.storeId]);
   
   // Sync local state with fresh table data from props
   const activeTable = tables.find(t => t.id === selectedTable.id) || selectedTable;
@@ -588,20 +615,19 @@ const MenuOrdering = ({
   const vat = vatPercent;
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'transfer'>('cash');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
-  const [customerSearch, setCustomerSearch] = useState('');
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   
   const filteredCustomers = useMemo(() => {
-    if (!customerSearch) return customers;
-    return customers.filter(c => 
+    if (!customerSearch) return customerResults;
+    return customerResults.filter(c => 
       c.name.toLowerCase().includes(customerSearch.toLowerCase()) || 
       c.phone.includes(customerSearch)
     );
-  }, [customers, customerSearch]);
+  }, [customerResults, customerSearch]);
   
   useEffect(() => {
     if (selectedCustomerId) {
-      const customer = customers.find(x => x.id === selectedCustomerId);
+      const customer = customerResults.find(x => x.id === selectedCustomerId);
       if (customer) {
         const customerType = customerTypes.find(x => x.id === customer.typeId);
         setDiscount(Math.min(100, Math.max(0, customerType?.discountPercent || 0)));
@@ -609,7 +635,7 @@ const MenuOrdering = ({
       }
     }
     setDiscount(Math.min(100, Math.max(0, activeTable.discount || 0)));
-  }, [selectedCustomerId, customers, customerTypes, activeTable.discount]);
+  }, [selectedCustomerId, customerResults, customerTypes, activeTable.discount]);
   
   // Sync discount if it changes in DB (e.g. reset after partial payment)
   useEffect(() => {
@@ -726,7 +752,8 @@ const MenuOrdering = ({
     setSelectedAddOns(item.selectedAddOns || []);
   };
 
-  const handleConfirmAddItem = () => {
+  const handleConfirmAddItem = async () => {
+    if (isProcessing) return;
     if (!configuringItem) return;
     
     const newItem: OrderItem = {
@@ -742,6 +769,7 @@ const MenuOrdering = ({
       const order = committedOrders.find(o => o.id === orderId);
       if (order) {
         const oldItem = order.items[itemIndex];
+        let pendingVoidLog: VoidLog | undefined;
         let updatedItems = [...order.items];
         
         if (newItem.quantity <= 0) {
@@ -782,13 +810,15 @@ const MenuOrdering = ({
             reason: reason
           };
           
-          if (onLogVoid) onLogVoid(voidLog);
-          alert(`⚠️ Đã ghi nhận hủy món [${oldItem.name}]. Lý do: ${reason}`);
+          pendingVoidLog = voidLog;
         }
         
         // SAVE TO DB
         if (onUpdateTable) {
-          onUpdateTable(activeTable.id, { orders: updatedOrders });
+          setIsProcessing(true);
+          try { await onUpdateTable(activeTable.id, { orders: updatedOrders }, activeTable.orders || [], pendingVoidLog); }
+          catch (error) { alert(error instanceof Error ? error.message : 'Không thể lưu thay đổi món.'); return; }
+          finally { setIsProcessing(false); }
         }
       }
     } else {
@@ -815,7 +845,7 @@ const MenuOrdering = ({
 
         if (existingIndex >= 0) {
           const updated = [...prev];
-          updated[existingIndex].quantity += newItem.quantity;
+          updated[existingIndex] = { ...updated[existingIndex], quantity: updated[existingIndex].quantity + newItem.quantity };
           return updated;
         }
         return [...prev, newItem];
@@ -834,7 +864,7 @@ const MenuOrdering = ({
     try {
       const newSessionId = Math.random().toString(36).substr(2, 9);
       const targetId = selectedOrdersToPay.length === 1 ? selectedOrdersToPay[0] : undefined;
-      await onUpdateOrder(activeTable.id, currentOrder, targetId);
+      await onUpdateOrder(activeTable.id, currentOrder, targetId, orderOperationRef.current);
       
       if (isPrintKitchenEnabled) {
         onPrint({
@@ -845,7 +875,9 @@ const MenuOrdering = ({
         });
       }
       
-      setCurrentOrder([]); // Clear draft after sending
+      setCurrentOrder([]); // Clear only after the server confirmed the write
+      safeStorage.removeItem(draftStorageKey);
+      orderOperationRef.current = operationId('order');
       setSelectedOrdersToPay([]); // Clear selection
       onClose(); // Exit to table grid after sending
       return newSessionId;
@@ -870,32 +902,15 @@ const MenuOrdering = ({
     }
 
     if (currentOrder.length > 0 && selectedOrdersToPay.length === 0) {
-      const subtotal = currentOrder.reduce((sum, item) => sum + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0);
-      const vatAmount = Math.round(subtotal * (vatPercent || 0) / 100);
-      const total = subtotal + vatAmount;
-      
-      const tempSession: OrderSession = {
-        id: 'draft-' + Date.now(),
-        items: [...currentOrder],
-        startTime: new Date().toISOString(),
-        subtotal,
-        discount: 0,
-        vat: vatPercent || 0,
-        total,
-        status: 'pending',
-        staffId: currentUser?.id || ''
-      };
-      
-      ordersToPay.push(tempSession);
-      
-      if (isPrintKitchenEnabled) {
-        onPrint({
-          type: 'kitchen',
-          tableName: activeTable.name,
-          items: currentOrder,
-          staffName: staffName
-        });
-      }
+      setIsProcessing(true);
+      try {
+        const id = await onUpdateOrder(activeTable.id, currentOrder, undefined, orderOperationRef.current);
+        const subtotal = itemsSubtotal(currentOrder);
+        const saved: OrderSession = { id, items: cloneData(currentOrder), startTime: new Date().toISOString(), subtotal, discount: 0, vat: vatPercent || 0, total: subtotal + Math.round(subtotal * (vatPercent || 0) / 100), status: 'pending', staffId: currentUser?.id || '' };
+        ordersToPay = [...ordersToPay.filter(o => o.id !== id), saved];
+        setCurrentOrder([]);safeStorage.removeItem(draftStorageKey);orderOperationRef.current=operationId('order');
+      } catch (error) { alert(error instanceof Error ? error.message : 'Không thể lưu đơn trước khi thanh toán.'); return; }
+      finally { setIsProcessing(false); }
     }
 
     if (ordersToPay.length === 0) {
@@ -909,6 +924,8 @@ const MenuOrdering = ({
       if (checkoutSucceeded !== true) return;
       // Clear local states
       setCurrentOrder([]);
+      safeStorage.removeItem(draftStorageKey);
+      orderOperationRef.current = operationId('order');
       setSelectedOrdersToPay([]);
       
       // Calculate remaining orders based on what we just paid
@@ -1915,11 +1932,14 @@ const MenuOrdering = ({
                   Hủy
                 </button>
                 <button 
-                  onClick={() => {
-                    onMergeTables(activeTable.id, tablesToMerge);
-                    setShowMergeModal(false);
+                  onClick={async () => {
+                    if (isProcessing) return;
+                    setIsProcessing(true);
+                    try { await onMergeTables(activeTable.id, tablesToMerge, moveOperationRef.current); moveOperationRef.current = operationId('move'); setShowMergeModal(false); }
+                    catch (error) { alert(error instanceof Error ? error.message : 'Không thể gộp bàn.'); }
+                    finally { setIsProcessing(false); }
                   }}
-                  disabled={tablesToMerge.length === 0}
+                  disabled={tablesToMerge.length === 0 || isProcessing}
                   className="flex-1 py-3 rounded-xl bg-blue-500 text-gray-900 dark:text-white font-bold hover:bg-blue-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Xác nhận gộp
@@ -1965,14 +1985,14 @@ const MenuOrdering = ({
                   Hủy
                 </button>
                 <button 
-                  onClick={() => {
-                    if (targetTransferTable) {
-                      onTransferTable(activeTable.id, targetTransferTable);
-                      setShowTransferModal(false);
-                      onClose(); // Close the menu ordering since the current table is now empty
-                    }
+                  onClick={async () => {
+                    if (!targetTransferTable || isProcessing) return;
+                    setIsProcessing(true);
+                    try { await onTransferTable(activeTable.id, targetTransferTable, moveOperationRef.current); moveOperationRef.current = operationId('move'); setShowTransferModal(false); onClose(); }
+                    catch (error) { alert(error instanceof Error ? error.message : 'Không thể chuyển bàn.'); }
+                    finally { setIsProcessing(false); }
                   }}
-                  disabled={!targetTransferTable}
+                  disabled={!targetTransferTable || isProcessing}
                   className="flex-1 py-3 rounded-xl bg-purple-500 text-gray-900 dark:text-white font-bold hover:bg-purple-600 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Xác nhận chuyển
@@ -1986,7 +2006,7 @@ const MenuOrdering = ({
   );
 };
 
-const ReportsView = ({ invoices, activeOrdersCount, businessDate }: { invoices: Invoice[], activeOrdersCount: number, businessDate?: string }) => {
+const ReportsView = ({ invoices, activeOrdersCount, businessDate, isDataReady = false }: { invoices: Invoice[], activeOrdersCount: number, businessDate?: string, isDataReady?: boolean }) => {
   const todayVn = businessDate || getVietnamBusinessDate();
   
   // Lọc chuẩn theo ngày kinh doanh Việt Nam (hỗ trợ cả schema businessDate và legacy date ISO)
@@ -2038,6 +2058,7 @@ const ReportsView = ({ invoices, activeOrdersCount, businessDate }: { invoices: 
 
   return (
     <div className="p-8 space-y-8 overflow-y-auto h-full">
+      {!isDataReady && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Đang đồng bộ chứng từ; doanh thu và số đơn hiện chưa được server xác nhận đầy đủ.</div>}
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold">Báo cáo doanh thu (Hôm nay)</h2>
       </div>
@@ -2191,6 +2212,7 @@ export default function App() {
   const [cashTransactions, setCashTransactions] = useState<CashTransaction[]>([]);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>([]);
+  const [payrollSourceReady, setPayrollSourceReady] = useState(false);
   const [myTodayAttendance, setMyTodayAttendance] = useState<AttendanceRecord[]>([]);
   const [currentBusinessDate, setCurrentBusinessDate] = useState<string>(() => getVietnamBusinessDate());
 
@@ -2310,73 +2332,24 @@ export default function App() {
   };
 
   const updateOutOfStockStatus = async (itemIdsOut: string[], itemIdsIn: string[]) => {
-    if (!currentUser?.storeId) return;
-    const storeId = currentUser.storeId;
-
-    // Lọc theo trackStock: mặt hàng có trackStock === false KHÔNG BAO GIỜ bị đưa vào outOfStock
-    const validOutIds: string[] = [];
-    itemIdsOut.forEach(id => {
-      if (!id) return;
-      const target = menu.find(m => m.id === id);
-      if (target && target.trackStock === false) {
-        return;
+    if(!currentUser?.storeId)return;
+    const storeId=currentUser.storeId,ids=[...new Set([...itemIdsOut,...itemIdsIn])].filter(Boolean);
+    if(!ids.length)return;
+    const settingsRef=await getSettingsDocRef(storeId);
+    await runTransaction(db,async txn=>{
+      const settings=await txn.get(settingsRef);
+      if(settings.exists()&&settings.data().storeId!==storeId)throw new Error('Cài đặt không thuộc cửa hàng.');
+      const reads=[];
+      for(const id of ids){const snapshot=await txn.get(doc(db,'menu',id));if(snapshot.exists()&&snapshot.data().storeId!==storeId)throw new Error('Mặt hàng không thuộc cửa hàng.');reads.push({id,data:snapshot.data()});}
+      const out=new Set<string>(),available=new Set<string>();
+      for(const {id,data} of reads){
+        const target=data&&data.trackStock===false?available:!data||(data.stock||0)<=0?out:available;
+        getLinkedAddOnIds(id,menu).forEach(linked=>target.add(linked));
       }
-      validOutIds.push(id);
+      const next=new Set<string>(settings.data()?.outOfStockAddOnIds||[]);
+      available.forEach(id=>{if(!out.has(id))next.delete(id);});out.forEach(id=>next.add(id));
+      txn.set(settingsRef,{storeId,outOfStockAddOnIds:[...next]},{merge:true});
     });
-
-    const expandedOut = new Set<string>();
-    validOutIds.forEach(id => {
-      getLinkedAddOnIds(id, menu).forEach(lid => expandedOut.add(lid));
-    });
-
-    const expandedIn = new Set<string>();
-    itemIdsIn.forEach(id => {
-      if (!id) return;
-      getLinkedAddOnIds(id, menu).forEach(lid => expandedIn.add(lid));
-    });
-
-    // Nếu một mặt hàng vừa có trong IN vừa có trong OUT, ưu tiên IN (tránh khóa nhầm)
-    expandedIn.forEach(id => expandedOut.delete(id));
-
-    const finalOut = Array.from(expandedOut);
-    const finalIn = Array.from(expandedIn);
-
-    if (finalOut.length === 0 && finalIn.length === 0) return;
-
-    // Cập nhật optimistic local state để UI phản hồi tức thì
-    setSystemSettings(prev => {
-      const set = new Set(prev.outOfStockAddOnIds || []);
-      finalOut.forEach(id => set.add(id));
-      finalIn.forEach(id => set.delete(id));
-      return { ...prev, outOfStockAddOnIds: Array.from(set) };
-    });
-
-    try {
-      const sRef = await getSettingsDocRef(storeId);
-
-      // CẬP NHẬT ATOMIC TRÊN SERVER (ArrayUnion / ArrayRemove / Transaction)
-      // Loại bỏ hoàn toàn race condition khi 2 máy cập nhật cùng lúc
-      if (finalOut.length > 0 && finalIn.length > 0) {
-        await runTransaction(db, async (txn) => {
-          const sDoc = await txn.get(sRef);
-          const currentList: string[] = sDoc.exists() ? (sDoc.data().outOfStockAddOnIds || []) : [];
-          const set = new Set(currentList);
-          finalOut.forEach(id => set.add(id));
-          finalIn.forEach(id => set.delete(id));
-          txn.update(sRef, { outOfStockAddOnIds: Array.from(set) });
-        });
-      } else if (finalOut.length > 0) {
-        await updateDoc(sRef, {
-          outOfStockAddOnIds: arrayUnion(...finalOut)
-        });
-      } else if (finalIn.length > 0) {
-        await updateDoc(sRef, {
-          outOfStockAddOnIds: arrayRemove(...finalIn)
-        });
-      }
-    } catch (err) {
-      console.error('Lỗi cập nhật atomic outOfStockAddOnIds lên Firestore:', err);
-    }
   };
 
   const hasReconciledOutOfStockRef = useRef(false);
@@ -2391,7 +2364,8 @@ export default function App() {
       }
     });
 
-    const currentSet = new Set(currentOutOfStock || []);
+    const settingsSnapshot=await getDocFromServer(await getSettingsDocRef(storeId));
+    const currentSet = new Set<string>(settingsSnapshot.data()?.outOfStockAddOnIds || []);
 
     const missingOut: string[] = [];
     expectedOutIds.forEach(id => {
@@ -2748,12 +2722,16 @@ export default function App() {
           });
         }
 
+        const sources = new Map(menuData.map(item => [item.id,item]));
+        menuData = menuData.map(item => item.recipe?.length && item.recipe.every(r => typeof sources.get(r.ingredientId)?.costPrice === 'number')
+          ? { ...item, costPrice: Math.round(item.recipe.reduce((sum,r) => sum + sources.get(r.ingredientId)!.costPrice*r.quantity,0)) }
+          : item);
         setMenu(menuData);
 
         // Tự động kiểm tra & đồng bộ outOfStockAddOnIds cho quán cũ khi menu vừa tải (Admin / Manager)
         if (!hasReconciledOutOfStockRef.current && menuData.length > 0 && (currentUser.role === 'admin' || currentUser.role === 'manager')) {
           hasReconciledOutOfStockRef.current = true;
-          reconcileOutOfStockStatus(storeId, menuData, systemSettings.outOfStockAddOnIds || []);
+          reconcileOutOfStockStatus(storeId, menuData, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
         }
       }, (err) => console.warn('Lỗi menu listener:', err));
       unsubs.push(unsubMenu);
@@ -2880,7 +2858,7 @@ export default function App() {
 
     // 8. Sync Customers (Chỉ cho Thu ngân / Quản lý / Admin - Bếp và Order KHÔNG nghe)
     if (!isKitchenOrOrder) {
-      const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId), limit(100));
+      const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId));
       const unsubCustomers = onSnapshot(customersQuery, (snapshot) => {
         const customersData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Customer));
         setCustomers(customersData);
@@ -2908,8 +2886,7 @@ export default function App() {
     const myAttendanceQuery = query(
       collection(db, 'attendance_records'),
       where('storeId', '==', storeId),
-      where('userId', '==', currentUser.id),
-      where('date', '==', currentBusinessDate)
+      where('userId', '==', currentUser.id)
     );
     const unsubMyAttendance = onSnapshot(myAttendanceQuery, (snapshot) => {
       const attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
@@ -2924,136 +2901,20 @@ export default function App() {
       };
     }
 
-    // 2. Hóa đơn hôm nay (Hỗ trợ cả schema mới businessDate lẫn schema cũ chưa migrate date ISO)
     setInvoicesReady(false);
-    let activeLegacyInvoicesUnsub: (() => void) | null = null;
-
-    const startLegacyInvoicesFallback = () => {
-      if (activeLegacyInvoicesUnsub) return;
-      const fallbackQuery = query(
-        collection(db, 'invoices'),
-        where('storeId', '==', storeId),
-        orderBy('date', 'desc'),
-        limit(100)
-      );
-      activeLegacyInvoicesUnsub = onSnapshot(fallbackQuery, (legacySnap) => {
-        const docs = legacySnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
-        const matched = docs.filter(inv => {
-          const invDate = inv.businessDate || getVietnamBusinessDate(inv.date);
-          return invDate === currentBusinessDate;
-        });
-        setInvoices(matched.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
-        setInvoicesReady(true);
-      }, (err) => {
-        console.warn('Invoices orderBy fallback error (needs index), trying safeQuery:', err);
-        const safeQuery = query(
-          collection(db, 'invoices'),
-          where('storeId', '==', storeId),
-          limit(100)
-        );
-        const unsubSafe = onSnapshot(safeQuery, (safeSnap) => {
-          const docs = safeSnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
-          const matched = docs.filter(inv => {
-            const invDate = inv.businessDate || getVietnamBusinessDate(inv.date);
-            return invDate === currentBusinessDate;
-          });
-          setInvoices(matched.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
-          setInvoicesReady(true);
-        }, () => setInvoicesReady(true));
-        unsubs.push(unsubSafe);
-      });
-      unsubs.push(() => {
-        if (activeLegacyInvoicesUnsub) activeLegacyInvoicesUnsub();
-      });
-    };
-
-    const modernInvoicesQuery = query(
-      collection(db, 'invoices'),
-      where('storeId', '==', storeId),
-      where('businessDate', '==', currentBusinessDate)
-    );
-
-    const unsubInvoices = onSnapshot(modernInvoicesQuery, (snapshot) => {
-      if (!snapshot.empty) {
-        if (activeLegacyInvoicesUnsub) {
-          activeLegacyInvoicesUnsub();
-          activeLegacyInvoicesUnsub = null;
-        }
-        const todayInvoices = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Invoice));
-        setInvoices(todayInvoices.sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date)));
-        setInvoicesReady(true);
-      } else {
-        // Nếu không có hóa đơn nào theo businessDate, có thể do hôm nay chưa bán hoặc do dữ liệu cũ chưa có trường businessDate
-        startLegacyInvoicesFallback();
-      }
-    }, (error) => {
-      console.warn('Invoices businessDate listener error, falling back:', error);
-      startLegacyInvoicesFallback();
-    });
-    unsubs.push(unsubInvoices);
-
-    // 3. Sổ quỹ hôm nay (Hỗ trợ cả schema mới businessDate lẫn schema cũ chưa migrate date ISO)
-    let activeLegacyCashUnsub: (() => void) | null = null;
-
-    const startLegacyCashFallback = () => {
-      if (activeLegacyCashUnsub) return;
-      const fallbackCashQuery = query(
-        collection(db, 'cash_transactions'),
-        where('storeId', '==', storeId),
-        orderBy('date', 'desc'),
-        limit(100)
-      );
-      activeLegacyCashUnsub = onSnapshot(fallbackCashQuery, (legacySnap) => {
-        const docs = legacySnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
-        const matched = docs.filter(c => {
-          const cDate = c.businessDate || getVietnamBusinessDate(c.date);
-          return cDate === currentBusinessDate;
-        });
-        setCashTransactions(matched.sort((a, b) => b.date.localeCompare(a.date)));
-      }, (err) => {
-        console.warn('Cash orderBy fallback error, trying safeCashQuery:', err);
-        const safeCashQuery = query(
-          collection(db, 'cash_transactions'),
-          where('storeId', '==', storeId),
-          limit(100)
-        );
-        const unsubSafeCash = onSnapshot(safeCashQuery, (safeSnap) => {
-          const docs = safeSnap.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
-          const matched = docs.filter(c => {
-            const cDate = c.businessDate || getVietnamBusinessDate(c.date);
-            return cDate === currentBusinessDate;
-          });
-          setCashTransactions(matched.sort((a, b) => b.date.localeCompare(a.date)));
-        });
-        unsubs.push(unsubSafeCash);
-      });
-      unsubs.push(() => {
-        if (activeLegacyCashUnsub) activeLegacyCashUnsub();
-      });
-    };
-
-    const modernCashQuery = query(
-      collection(db, 'cash_transactions'),
-      where('storeId', '==', storeId),
-      where('businessDate', '==', currentBusinessDate)
-    );
-
-    const unsubCash = onSnapshot(modernCashQuery, (snapshot) => {
-      if (!snapshot.empty) {
-        if (activeLegacyCashUnsub) {
-          activeLegacyCashUnsub();
-          activeLegacyCashUnsub = null;
-        }
-        const todayCash = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as CashTransaction));
-        setCashTransactions(todayCash.sort((a, b) => b.date.localeCompare(a.date)));
-      } else {
-        startLegacyCashFallback();
-      }
-    }, (error) => {
-      console.warn('Cash businessDate listener error, falling back:', error);
-      startLegacyCashFallback();
-    });
-    unsubs.push(unsubCash);
+    setInvoices([]);
+    setCashTransactions([]);
+    const errors = (error: Error) => { invoicesConfirmed=false;cashConfirmed=false;console.error('Không thể xác nhận dữ liệu hôm nay:', error); setInvoicesReady(false); };
+    let invoicesConfirmed = false, cashConfirmed = false;
+    const updateReady = () => setInvoicesReady(invoicesConfirmed && cashConfirmed);
+    unsubs.push(subscribeDateRange<Invoice>('invoices', storeId, currentBusinessDate, currentBusinessDate, (rows, confirmed) => {
+      setInvoices(rows.filter(i => i.status !== 'cancelled').sort((a,b) => b.date.localeCompare(a.date)));
+      invoicesConfirmed = confirmed; updateReady();
+    }, errors));
+    unsubs.push(subscribeDateRange<CashTransaction>('cash_transactions', storeId, currentBusinessDate, currentBusinessDate, (rows, confirmed) => {
+      setCashTransactions(rows.sort((a,b) => b.date.localeCompare(a.date)));
+      cashConfirmed = confirmed; updateReady();
+    }, errors));
 
     return () => {
       unsubs.forEach(u => u());
@@ -3069,15 +2930,14 @@ export default function App() {
     const auditsQuery = query(
       collection(db, 'inventory_audits'), 
       where('storeId', '==', storeId), 
-      orderBy('date', 'desc'), 
-      limit(50)
+      orderBy('date', 'desc')
     );
     const unsubAudits = onSnapshot(auditsQuery, (snapshot) => {
       const auditsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as InventoryAudit));
       setInventoryAudits(auditsData);
     }, (err) => {
       console.warn('Audits orderBy fallback to limit:', err);
-      const fallbackAudits = query(collection(db, 'inventory_audits'), where('storeId', '==', storeId), limit(50));
+      const fallbackAudits = query(collection(db, 'inventory_audits'), where('storeId', '==', storeId));
       const unsubFallback = onSnapshot(fallbackAudits, (snapshot) => {
         const auditsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as InventoryAudit));
         setInventoryAudits(auditsData.sort((a, b) => b.date.localeCompare(a.date)));
@@ -3089,15 +2949,14 @@ export default function App() {
     const stockCardQuery = query(
       collection(db, 'stock_card'), 
       where('storeId', '==', storeId), 
-      orderBy('date', 'desc'), 
-      limit(100)
+      orderBy('date', 'desc')
     );
     const unsubStockCard = onSnapshot(stockCardQuery, (snapshot) => {
       const stockCardData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StockCardEntry));
       setStockCardEntries(stockCardData);
     }, (err) => {
       console.warn('Stock card orderBy fallback to limit:', err);
-      const fallbackStock = query(collection(db, 'stock_card'), where('storeId', '==', storeId), limit(100));
+      const fallbackStock = query(collection(db, 'stock_card'), where('storeId', '==', storeId));
       const unsubFallback = onSnapshot(fallbackStock, (snapshot) => {
         const stockCardData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StockCardEntry));
         setStockCardEntries(stockCardData.sort((a, b) => b.date.localeCompare(a.date)));
@@ -3111,89 +2970,29 @@ export default function App() {
     };
   }, [currentUser?.storeId, view]);
 
-  // ON-DEMAND SYNC: Quản lý nhân sự & Bảng lương (Chỉ lắng nghe khi mở trang Nhân viên hoặc Bảng lương của tôi)
+  // Complete source for payroll: never calculate salaries from a display-page limit.
   useEffect(() => {
+    setPayrollSourceReady(false);
     if (!currentUser || (view !== 'user_mgmt' && view !== 'my_payroll')) return;
     const storeId = currentUser.storeId;
-    const isStaffPersonalView = view === 'my_payroll' || (currentUser.role !== 'admin' && currentUser.role !== 'manager');
-    const unsubs: (() => void)[] = [];
+    const personal = view === 'my_payroll' || !['admin','manager'].includes(currentUser.role);
+    let attendanceReady = false, payrollReady = false;
+    const constraints = [where('storeId', '==', storeId)];
+    if (personal) constraints.push(where('userId','==',currentUser.id));
+    const error = (err: Error) => { setPayrollSourceReady(false); console.error('Không thể tải đầy đủ dữ liệu lương:',err); };
+    const a = onSnapshot(query(collection(db,'attendance_records'),...constraints), {includeMetadataChanges:true}, snapshot => {
+      setAttendanceRecords(snapshot.docs.map(d => ({...d.data(),id:d.id} as AttendanceRecord)).sort((a,b)=>b.date.localeCompare(a.date)));
+      attendanceReady=!snapshot.metadata.fromCache&&!snapshot.metadata.hasPendingWrites;
+      setPayrollSourceReady(attendanceReady&&payrollReady);
+    },error);
+    const p = onSnapshot(query(collection(db,'payroll_records'),...constraints), {includeMetadataChanges:true}, snapshot => {
+      setPayrollRecords(snapshot.docs.map(d=>({...d.data(),id:d.id} as PayrollRecord)).sort((a,b)=>b.month.localeCompare(a.month)));
+      payrollReady=!snapshot.metadata.fromCache&&!snapshot.metadata.hasPendingWrites;
+      setPayrollSourceReady(attendanceReady&&payrollReady);
+    },error);
+    return () => { a();p(); };
+  }, [currentUser?.storeId,currentUser?.id,currentUser?.role,view]);
 
-    // Lọc chấm công: Nhân viên chỉ tải đúng bản ghi của mình (tiết kiệm 90% reads); Admin/Manager tải 100 bản ghi gần nhất
-    const attendanceQuery = isStaffPersonalView
-      ? query(
-          collection(db, 'attendance_records'),
-          where('storeId', '==', storeId),
-          where('userId', '==', currentUser.id),
-          limit(60)
-        )
-      : query(
-          collection(db, 'attendance_records'),
-          where('storeId', '==', storeId),
-          orderBy('date', 'desc'),
-          limit(100)
-        );
-
-    const unsubAttendance = onSnapshot(attendanceQuery, (snapshot) => {
-      const attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
-      setAttendanceRecords(attendanceData.sort((a, b) => b.date.localeCompare(a.date)));
-    }, (err) => {
-      console.warn('Attendance query fallback:', err);
-      const fallbackQuery = query(
-        collection(db, 'attendance_records'),
-        where('storeId', '==', storeId),
-        limit(isStaffPersonalView ? 60 : 100)
-      );
-      const unsubFallback = onSnapshot(fallbackQuery, (snapshot) => {
-        let attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
-        if (isStaffPersonalView) {
-          attendanceData = attendanceData.filter(a => a.userId === currentUser.id);
-        }
-        setAttendanceRecords(attendanceData.sort((a, b) => b.date.localeCompare(a.date)));
-      });
-      unsubs.push(unsubFallback);
-    });
-    unsubs.push(unsubAttendance);
-
-    // Lọc bảng lương: Nhân viên chỉ tải bảng lương của mình; Quản lý tải 30 bản ghi gần nhất
-    const payrollQuery = isStaffPersonalView
-      ? query(
-          collection(db, 'payroll_records'),
-          where('storeId', '==', storeId),
-          where('userId', '==', currentUser.id),
-          limit(24)
-        )
-      : query(
-          collection(db, 'payroll_records'),
-          where('storeId', '==', storeId),
-          orderBy('month', 'desc'),
-          limit(30)
-        );
-
-    const unsubPayroll = onSnapshot(payrollQuery, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as PayrollRecord));
-      setPayrollRecords(data.sort((a, b) => b.month.localeCompare(a.month)));
-    }, (err) => {
-      console.warn('Payroll query fallback:', err);
-      const fallbackPayroll = query(
-        collection(db, 'payroll_records'),
-        where('storeId', '==', storeId),
-        limit(30)
-      );
-      const unsubFallback = onSnapshot(fallbackPayroll, (snapshot) => {
-        let data = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as PayrollRecord));
-        if (isStaffPersonalView) {
-          data = data.filter(p => p.userId === currentUser.id);
-        }
-        setPayrollRecords(data.sort((a, b) => b.month.localeCompare(a.month)));
-      });
-      unsubs.push(unsubFallback);
-    });
-    unsubs.push(unsubPayroll);
-
-    return () => {
-      unsubs.forEach(u => u());
-    };
-  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, view]);
 
   // Authentication
   const handleLogin = (user: User) => {
@@ -3300,7 +3099,7 @@ export default function App() {
     return true;
   };
 
-  const handleUpdateTable = async (id: string, updates: Partial<Table>) => {
+  const handleUpdateTable = async (id: string, updates: Partial<Table>, expectedOrders?: OrderSession[], voidLog?: VoidLog) => {
     // Check for duplicate name if name is being updated
     if (updates.name) {
       const isDuplicate = tables.some(t => t.id !== id && t.name.toLowerCase() === updates.name!.toLowerCase());
@@ -3309,7 +3108,10 @@ export default function App() {
         return false;
       }
     }
-    await updateDoc(doc(db, 'tables', id), updates);
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    if (updates.orders) {
+      await updateOrdersAtomic(currentUser, id, expectedOrders || tables.find(t => t.id === id)?.orders || [], updates.orders, false, voidLog, activeShift?.id);
+    } else await updateDoc(doc(db, 'tables', id), updates);
     return true;
   };
 
@@ -3377,10 +3179,8 @@ export default function App() {
     if (!item.id) return;
     const existing = menu.find(i => i.id === item.id);
     setMenu(prev => prev.map(i => i.id === item.id ? { ...i, ...item } : i));
-    await updateDoc(doc(db, 'menu', item.id), { 
-      ...item, 
-      isInventory: item.isInventory === true 
-    });
+    const { stock: currentStockIsReadOnly, ...metadata } = item;
+    await updateDoc(doc(db, 'menu', item.id), { ...metadata, isInventory: item.isInventory === true });
 
     if (item.trackStock === false) {
       await updateOutOfStockStatus([], [item.id]);
@@ -3487,172 +3287,31 @@ export default function App() {
   };
 
   // Inventory Management
-  const handleImportStock = async (itemId: string, quantity: number, unitPrice: number) => {
-    const item = menu.find(i => i.id === itemId);
-    if (!item || !currentUser) return;
-
-    const oldStock = item.stock || 0;
-    const oldCostPrice = item.costPrice || 0;
-    const newStock = Number((oldStock + quantity).toFixed(1));
-    
-    // Calculate new average cost price (Giá vốn bình quân gia quyền)
-    let newCostPrice = oldCostPrice;
-    if (newStock > 0 && unitPrice > 0) {
-      newCostPrice = Math.round(((oldStock * oldCostPrice) + (quantity * unitPrice)) / newStock);
-    } else if (unitPrice > 0) {
-      newCostPrice = unitPrice;
-    }
-
-    setMenu(prev => prev.map(i => i.id === itemId ? { ...i, stock: newStock, costPrice: newCostPrice } : i));
-
-    const itemRef = doc(db, 'menu', itemId);
-    await updateDoc(itemRef, { 
-      stock: newStock,
-      costPrice: newCostPrice
-    });
-
-    if (item.trackStock !== false && oldStock <= 0 && newStock > 0) {
-      await updateOutOfStockStatus([], [itemId]);
-    }
-
-    // Cập nhật giá vốn của các món ăn / đồ uống sử dụng nguyên liệu này trong định lượng (recipe)
-    if (newCostPrice !== oldCostPrice) {
-      const affectedDishes = menu.filter(m => m.recipe?.some(r => r.ingredientId === itemId));
-      for (const dish of affectedDishes) {
-        let updatedDishCost = 0;
-        dish.recipe?.forEach(r => {
-          if (r.ingredientId === itemId) {
-            updatedDishCost += newCostPrice * r.quantity;
-          } else {
-            const ingr = menu.find(m => m.id === r.ingredientId);
-            updatedDishCost += (ingr?.costPrice || 0) * r.quantity;
-          }
-        });
-        
-        const dishRef = doc(db, 'menu', dish.id);
-        await updateDoc(dishRef, { costPrice: updatedDishCost });
-      }
-    }
-
-    // Log transaction
-    const log: InventoryTransaction = {
-      itemId,
-      itemName: item.name,
-      quantity,
-      unitPrice,
-      totalPrice: quantity * unitPrice,
-      type: 'import',
-      date: new Date().toISOString()
-    };
-    const logRef = await addDoc(collection(db, 'inventory_logs'), { ...log, storeId: currentUser.storeId });
-
-    // Record Cash Transaction for Import Expense
-    const cashTx: Omit<CashTransaction, 'id'> = {
-      amount: log.totalPrice,
-      type: 'expense',
-      paymentMethod: 'cash',
-      category: 'Nhập hàng',
-      note: `Chi phí nhập kho: ${quantity} ${item.unit} ${item.name}`,
-      date: new Date().toISOString(),
-      staffId: currentUser.id,
-      staffName: currentUser.name,
-      storeId: currentUser.storeId
-    };
-    await handleAddCashTransaction(cashTx);
-
-    // Record Stock Card
-    const cardEntry: StockCardEntry = {
-      itemId,
-      itemName: item.name,
-      date: log.date,
-      type: 'import',
-      referenceId: logRef.id,
-      change: quantity,
-      remaining: newStock,
-      note: `Nhập kho: ${quantity} ${item.unit}`
-    };
-    await addDoc(collection(db, 'stock_card'), { ...cardEntry, storeId: currentUser.storeId });
+  const handleImportStock = async (itemId: string, quantity: number, unitPrice: number, id = operationId('import')) => {
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    await importStockAtomic(currentUser, itemId, quantity, unitPrice, activeShift?.id, id);
+    // An auxiliary status refresh must never turn a committed import into a failed import.
+    await updateOutOfStockStatus([], [itemId]).catch(console.warn);
   };
 
   const handleAuditInventory = async (audit: InventoryAudit) => {
-    if (!currentUser) return;
-    
-    setMenu(prev => prev.map(i => {
-      const aud = audit.items.find(a => a.itemId === i.id);
-      return aud ? { ...i, stock: Number(aud.actualStock.toFixed(1)) } : i;
-    }));
-
-    const auditRef = await addDoc(collection(db, 'inventory_audits'), { ...audit, storeId: currentUser.storeId });
-    
-    for (const auditItem of audit.items) {
-      const item = menu.find(i => i.id === auditItem.itemId);
-      if (item) {
-        await updateDoc(doc(db, 'menu', item.id), { stock: auditItem.actualStock });
-        
-        // Record Stock Card
-        const cardEntry: StockCardEntry = {
-          itemId: item.id,
-          itemName: item.name,
-          date: audit.date,
-          type: 'audit',
-          referenceId: auditRef.id,
-          change: auditItem.discrepancy,
-          remaining: auditItem.actualStock,
-          note: `Kiểm kho: Chênh lệch ${auditItem.discrepancy} ${item.unit}`
-        };
-        await addDoc(collection(db, 'stock_card'), { ...cardEntry, storeId: currentUser.storeId });
-      }
-    }
-
-    const auditOutIds: string[] = [];
-    const auditInIds: string[] = [];
-    audit.items.forEach(a => {
-      const matched = menu.find(m => m.id === a.itemId);
-      if (matched && matched.trackStock === false) {
-        auditInIds.push(a.itemId);
-        return;
-      }
-      const oldStock = matched?.stock ?? 0;
-      if (a.actualStock <= 0 && oldStock > 0) {
-        auditOutIds.push(a.itemId);
-      } else if (a.actualStock > 0 && oldStock <= 0) {
-        auditInIds.push(a.itemId);
-      }
-    });
-    if (auditOutIds.length > 0 || auditInIds.length > 0) {
-      await updateOutOfStockStatus(auditOutIds, auditInIds);
-    }
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    await auditStockAtomic(currentUser, audit);
+    const out = audit.items.filter(i => i.actualStock <= 0).map(i => i.itemId);
+    const available = audit.items.filter(i => i.actualStock > 0).map(i => i.itemId);
+    await updateOutOfStockStatus(out, available).catch(console.warn);
   };
 
-  const handleUpdateInventoryItem = async (item: MenuItem) => {
-    const existing = menu.find(i => i.id === item.id);
-    // Giữ nguyên cờ isInventory của mặt hàng đã có (hàng bán trực tiếp type === 'goods' giữ isInventory: false).
-    // Không bao giờ tự ý ép isInventory: true làm hàng bán biến mất khỏi thực đơn.
-    let isInventory: boolean;
-    if (item.type === 'goods' && (item.price || 0) > 0 && item.category !== 'Nguyên liệu') {
-      isInventory = false;
-    } else if (item.isInventory !== undefined) {
-      isInventory = item.isInventory;
-    } else if (existing?.isInventory !== undefined) {
-      isInventory = existing.isInventory;
-    } else {
-      isInventory = item.category === 'Nguyên liệu' || (item.price === 0 && item.code?.startsWith('NL'));
-    }
-
-    const updatedItem: MenuItem = { ...item, isInventory };
-    setMenu(prev => prev.map(i => i.id === item.id ? { ...i, ...updatedItem } : i));
-    const itemRef = doc(db, 'menu', item.id);
-    await updateDoc(itemRef, { ...updatedItem });
-    if (updatedItem.trackStock === false) {
-      await updateOutOfStockStatus([], [item.id]);
-    } else if (item.stock !== undefined) {
-      const oldStock = existing?.stock ?? 0;
-      if (oldStock > 0 && item.stock <= 0) {
-        await updateOutOfStockStatus([item.id], []);
-      } else if (oldStock <= 0 && item.stock > 0) {
-        await updateOutOfStockStatus([], [item.id]);
-      }
-    }
+  const handleUpdateInventoryItem = async (item: MenuItem, expected?: MenuItem) => {
+    if(!currentUser)throw new Error('Vui lòng đăng nhập lại.');
+    const {stock: ignoredStock,id,...metadata}=item;
+    await runTransaction(db,async txn=>{
+      const ref=doc(db,'menu',id),snapshot=await txn.get(ref);
+      if(!snapshot.exists()||snapshot.data().storeId!==currentUser.storeId)throw new Error('Không tìm thấy mặt hàng của cửa hàng.');
+      if(expected && snapshot.data().costPrice!==expected.costPrice)throw new Error('Giá vốn vừa thay đổi do nhập hàng. Vui lòng mở lại mặt hàng trước khi sửa.');
+      txn.update(ref,metadata);
+    });
+    await reconcileOutOfStockStatus(currentUser.storeId,menu,systemSettings.outOfStockAddOnIds||[]).catch(console.warn);
   };
 
   const handleDeleteInventoryItem = async (id: string) => {
@@ -3662,457 +3321,32 @@ export default function App() {
   };
 
   const handleUpdateTableOrders = async (tableId: string, updatedOrders: OrderSession[]) => {
-    try {
-      setTables(prev => prev.map(t => t.id === tableId ? { ...t, orders: updatedOrders } : t));
-      await updateDoc(doc(db, 'tables', tableId), {
-        orders: updatedOrders
-      });
-    } catch (error) {
-      console.error('Error updating table orders from kitchen:', error);
-    }
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    const base = tables.find(t => t.id === tableId)?.orders || [];
+    await updateOrdersAtomic(currentUser, tableId, base, updatedOrders, true);
   };
 
-  const handleUpdateOrder = async (tableId: string, order: OrderItem[], targetSessionId?: string) => {
-    const table = tables.find(t => t.id === tableId);
-    if (!table || !currentUser) return;
-
-    let updatedOrders = [...(table.orders || [])];
-    
-    if (targetSessionId) {
-      const existingOrderIndex = updatedOrders.findIndex(o => o.id === targetSessionId);
-      if (existingOrderIndex >= 0) {
-        const existingOrder = updatedOrders[existingOrderIndex];
-        const newItems = [...existingOrder.items];
-        
-        for (const item of order) {
-          const existingItemIndex = newItems.findIndex(i => 
-            i.id === item.id && 
-            i.note === item.note && 
-            JSON.stringify(i.selectedAddOns) === JSON.stringify(item.selectedAddOns)
-          );
-          if (existingItemIndex >= 0) {
-            newItems[existingItemIndex] = {
-              ...newItems[existingItemIndex],
-              quantity: newItems[existingItemIndex].quantity + item.quantity
-            };
-          } else {
-            newItems.push(item);
-          }
-        }
-
-        const subtotal = newItems.reduce((sum, item) => sum + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0);
-        const vatAmount = Math.round(subtotal * (systemSettings.vatPercent || 0) / 100);
-        const total = subtotal + vatAmount - (existingOrder.discount || 0);
-
-        updatedOrders[existingOrderIndex] = {
-          ...existingOrder,
-          items: newItems,
-          subtotal,
-          vat: systemSettings.vatPercent || 0,
-          total
-        };
-      } else {
-        // Fallback to new session
-        const subtotal = order.reduce((sum, item) => sum + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0);
-        const vatAmount = Math.round(subtotal * (systemSettings.vatPercent || 0) / 100);
-        const total = subtotal + vatAmount; 
-    
-        const newSession: OrderSession = {
-          id: `session-${Date.now()}`,
-          items: order,
-          startTime: new Date().toISOString(),
-          subtotal,
-          discount: 0,
-          vat: systemSettings.vatPercent || 0,
-          total,
-          status: 'pending',
-          staffId: currentUser.id
-        };
-        
-        updatedOrders.push(newSession);
-      }
-    } else {
-      // Create new OrderSession
-      const subtotal = order.reduce((sum, item) => sum + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0);
-      const vatAmount = Math.round(subtotal * (systemSettings.vatPercent || 0) / 100);
-      const total = subtotal + vatAmount; 
-  
-      const newSession: OrderSession = {
-        id: `session-${Date.now()}`,
-        items: order,
-        startTime: new Date().toISOString(),
-        subtotal,
-        discount: 0,
-        vat: systemSettings.vatPercent || 0,
-        total,
-        status: 'pending',
-        staffId: currentUser.id
-      };
-      
-      updatedOrders.push(newSession);
-    }
-
-    await updateDoc(doc(db, 'tables', tableId), {
-      status: 'occupied',
-      orders: updatedOrders,
-      currentOrder: [] // Clear draft
-    });
+  const handleUpdateOrder = async (tableId: string, items: OrderItem[], targetSessionId?: string, id = operationId('order')): Promise<string> => {
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    return addOrderAtomic(currentUser, tableId, items, targetSessionId, systemSettings.vatPercent || 0, id);
   };
 
-  const handleAddCashTransaction = async (transaction: Omit<CashTransaction, 'id' | 'storeId'>) => {
-    if (!currentUser) return;
-    
-    const txDate = transaction.date || new Date().toISOString();
-    const vnBDate = getVietnamBusinessDate(txDate);
-    const vnBMonth = vnBDate.slice(0, 7);
-    const vnBYear = parseInt(vnBDate.slice(0, 4), 10);
-
-    const txRef = doc(collection(db, 'cash_transactions'));
-    const dailyStatsRef = doc(db, 'daily_stats', `${currentUser.storeId}_${vnBDate}`);
-    const isNonSaleIncome = transaction.type === 'income' && transaction.category !== 'Bán hàng';
-    const isExpense = transaction.type === 'expense';
-    const isCash = transaction.paymentMethod === 'cash' || !transaction.paymentMethod;
-    const cat = (transaction.category || '').toLowerCase().trim();
-    const isInvExp = isExpense && (cat.includes('nhập hàng') || cat.includes('mua hàng') || cat.includes('nguyên liệu'));
-    const isRentExp = isExpense && (cat.includes('mặt bằng') || cat.includes('thuê nhà') || cat.includes('tiền nhà'));
-    const isSalExp = isExpense && (cat.includes('lương') || cat.includes('nhân sự') || cat.includes('nhân viên'));
-    const isOtherExp = isExpense && !isInvExp && !isRentExp && !isSalExp;
-
-    const statsPayload: Record<string, any> = {
-      storeId: currentUser.storeId,
-      date: vnBDate,
-      year: vnBYear,
-      month: vnBMonth,
-      cashCount: increment(1),
-      updatedAt: new Date().toISOString()
-    };
-
-    if (isNonSaleIncome) {
-      statsPayload.totalIncome = increment(transaction.amount);
-      if (isCash) statsPayload.cashIncome = increment(transaction.amount);
-      else statsPayload.transferIncome = increment(transaction.amount);
-    }
-    if (isExpense) {
-      statsPayload.totalExpense = increment(transaction.amount);
-      if (isCash) statsPayload.cashExpense = increment(transaction.amount);
-      else statsPayload.transferExpense = increment(transaction.amount);
-
-      if (isInvExp) statsPayload.expenseInventory = increment(transaction.amount);
-      if (isRentExp) statsPayload.expenseRent = increment(transaction.amount);
-      if (isSalExp) statsPayload.expenseSalary = increment(transaction.amount);
-      if (isOtherExp) statsPayload.expenseOther = increment(transaction.amount);
-    }
-
-    const batch = writeBatch(db);
-
-    batch.set(txRef, {
-      ...transaction,
-      date: txDate,
-      businessDate: vnBDate,
-      businessMonth: vnBMonth,
-      businessYear: vnBYear,
-      storeId: currentUser.storeId
-    });
-
-    batch.set(dailyStatsRef, statsPayload, { merge: true });
-
-    if (activeShift) {
-      const isIncome = transaction.type === 'income';
-      const amount = transaction.amount;
-      const amountDiff = isIncome ? amount : -amount;
-
-      batch.update(doc(db, 'shifts', activeShift.id), {
-        totalCash: increment(isCash ? amountDiff : 0),
-        totalTransfer: increment(!isCash ? amountDiff : 0),
-        cashIncome: increment(isCash && isIncome ? amount : 0),
-        cashExpense: increment(isCash && !isIncome ? amount : 0),
-        transferIncome: increment(!isCash && isIncome ? amount : 0),
-        transferExpense: increment(!isCash && !isIncome ? amount : 0)
-      });
-    }
-
-    // Cam kết ghi nguyên tử toàn bộ giao dịch, thống kê và ca làm việc (chống nuốt lỗi)
-    await batch.commit();
+  const handleAddCashTransaction = async (transaction: Omit<CashTransaction, 'id' | 'storeId'>, id = operationId('cash')) => {
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    await recordCashAtomic(currentUser, transaction, activeShift?.id, id);
   };
 
   const handleDeleteInvoice = async (invoiceId: string) => {
-    if (!currentUser || currentUser.role !== 'admin') {
-      alert('Chỉ quản trị viên (Admin) mới có quyền xóa hóa đơn.');
-      return false;
+    if (!currentUser || currentUser.role !== 'admin') throw new Error('Chỉ quản trị viên được hủy hóa đơn.');
+    const result = await cancelInvoiceAtomic(currentUser, invoiceId);
+    if (result.deleted) {
+      setInvoices(previous => previous.filter(i => i.id !== invoiceId));
+      setCashTransactions(previous => previous.filter(c => (c as any).invoiceId !== invoiceId));
+      const currentCatalog=await fetchStoreRows<MenuItem>('menu',currentUser.storeId).catch(()=>menu);
+      await reconcileOutOfStockStatus(currentUser.storeId, currentCatalog, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
+      if (result.legacyStockUnknown) alert('Đã hủy hóa đơn. Hóa đơn cũ không có lịch sử xuất kho để hoàn tự động; hãy đối soát tồn kho theo chứng từ thực tế.');
     }
-
-    try {
-      const invRef = doc(db, 'invoices', invoiceId);
-      
-      // 1. Tìm bản ghi phiếu thu liên kết STRICT bằng invoiceId (Doc ID chuẩn cash_${invoiceId} hoặc query)
-      const exactCashRef = doc(db, 'cash_transactions', `cash_${invoiceId}`);
-      let candidateCashDocRef: any = exactCashRef;
-      
-      const exactCashSnap = await getDoc(exactCashRef);
-      if (!exactCashSnap.exists()) {
-        const cashQ = query(
-          collection(db, 'cash_transactions'),
-          where('storeId', '==', currentUser.storeId),
-          where('invoiceId', '==', invoiceId),
-          limit(1)
-        );
-        const cashSnap = await getDocs(cashQ);
-        if (!cashSnap.empty) {
-          candidateCashDocRef = doc(db, 'cash_transactions', cashSnap.docs[0].id);
-        } else {
-          candidateCashDocRef = null;
-        }
-      }
-
-      const restoredMenuUpdates: Record<string, number> = {};
-      const restoredInIds: string[] = [];
-
-      // THỰC THI TRANSACTION NGUYÊN TỬ (Firestore Contract: TẤT CẢ READS TRƯỚC TIÊN -> TÍNH TOÁN -> TẤT CẢ WRITES SAU CÙNG)
-      const deleted = await runTransaction(db, async (txn) => {
-        // ==========================================
-        // GIAI ĐOẠN 1: TOÀN BỘ CÁC LẦN ĐỌC (ALL READS FIRST)
-        // ==========================================
-        
-        // 1a. Đọc hóa đơn trực tiếp từ server
-        const currentInvSnap = await txn.get(invRef);
-        if (!currentInvSnap.exists()) return false;
-        const invData = currentInvSnap.data() as Invoice;
-
-        // 1b. Kiểm tra storeId và trạng thái hóa đơn ngay tại nơi xử lý giao dịch
-        if (invData.storeId !== currentUser.storeId) {
-          throw new Error('Hóa đơn không thuộc chi nhánh hiện tại.');
-        }
-        if (invData.status === 'cancelled') return false;
-
-        // 1c. Thu thập toàn bộ ID món/nguyên liệu từ dữ liệu hóa đơn vừa đọc từ server
-        const candidateMenuIds = new Set<string>();
-        if (invData.items && invData.items.length > 0) {
-          for (const item of invData.items) {
-            if (item.recipe && item.recipe.length > 0) {
-              for (const r of item.recipe) {
-                if (r.ingredientId) candidateMenuIds.add(r.ingredientId);
-              }
-            } else if (item.type === 'goods' && item.id) {
-              candidateMenuIds.add(item.id);
-            }
-
-            if (item.selectedAddOns && item.selectedAddOns.length > 0) {
-              for (const addon of item.selectedAddOns) {
-                if (addon.inventoryItemId) {
-                  candidateMenuIds.add(addon.inventoryItemId);
-                } else {
-                  const matched = menu.find(m => 
-                    (m.isInventory || m.type === 'goods' || m.category === 'Nguyên liệu') &&
-                    m.name.toLowerCase().trim() === addon.name.toLowerCase().trim()
-                  );
-                  if (matched?.id) candidateMenuIds.add(matched.id);
-                }
-              }
-            }
-          }
-        }
-
-        // Đọc tất cả các tài liệu nguyên liệu/mặt hàng trước bất kỳ thao tác ghi nào
-        const itemSnaps = new Map<string, any>();
-        for (const itemId of candidateMenuIds) {
-          const snap = await txn.get(doc(db, 'menu', itemId));
-          if (snap.exists()) {
-            itemSnaps.set(itemId, snap);
-          }
-        }
-
-        // 1d. Đọc tài liệu khách hàng nếu có
-        let custSnap = null;
-        let custRef = null;
-        if (invData.customerId) {
-          custRef = doc(db, 'customers', invData.customerId);
-          custSnap = await txn.get(custRef);
-        }
-
-        // 1e. Đọc daily_stats (chỉ cập nhật nếu đã tồn tại)
-        const invDateStr = invData.businessDate || getVietnamBusinessDate(invData.date);
-        const dailyStatsRef = doc(db, 'daily_stats', `${currentUser.storeId}_${invDateStr}`);
-        const dailyStatsSnap = await txn.get(dailyStatsRef);
-
-        // 1f. Đọc phiếu thu tiền nếu có
-        let cashSnap = null;
-        if (candidateCashDocRef) {
-          cashSnap = await txn.get(candidateCashDocRef);
-        }
-
-        // ==========================================
-        // GIAI ĐOẠN 2: TÍNH TOÁN DỰA TRÊN DỮ LIỆU VỪA ĐỌC TỪ SERVER
-        // ==========================================
-        const restoreMap = new Map<string, number>();
-        if (invData.items && invData.items.length > 0) {
-          for (const item of invData.items) {
-            if (item.recipe && item.recipe.length > 0) {
-              for (const r of item.recipe) {
-                const itemSnap = itemSnaps.get(r.ingredientId);
-                const itemData = itemSnap?.data();
-                if (itemData && itemData.trackStock !== false) {
-                  const qty = Number((r.quantity * item.quantity).toFixed(3));
-                  restoreMap.set(r.ingredientId, (restoreMap.get(r.ingredientId) || 0) + qty);
-                }
-              }
-            } else if (item.type === 'goods') {
-              const itemSnap = itemSnaps.get(item.id);
-              const itemData = itemSnap?.data();
-              if (itemData && itemData.trackStock !== false) {
-                restoreMap.set(item.id, (restoreMap.get(item.id) || 0) + item.quantity);
-              }
-            }
-
-            if (item.selectedAddOns && item.selectedAddOns.length > 0) {
-              for (const addon of item.selectedAddOns) {
-                const addonId = addon.inventoryItemId || menu.find(m => 
-                  (m.isInventory || m.type === 'goods' || m.category === 'Nguyên liệu') &&
-                  m.name.toLowerCase().trim() === addon.name.toLowerCase().trim()
-                )?.id;
-                if (addonId) {
-                  const itemSnap = itemSnaps.get(addonId);
-                  const itemData = itemSnap?.data();
-                  if (itemData && itemData.trackStock !== false) {
-                    const addOnQty = Number(((addon.quantity || 1) * item.quantity).toFixed(3));
-                    restoreMap.set(addonId, (restoreMap.get(addonId) || 0) + addOnQty);
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        const invTotal = invData.total || 0;
-        const invDiscount = invData.discount || 0;
-        const invCost = typeof invData.totalCost === 'number'
-          ? invData.totalCost
-          : calculateInvoiceCost(invData.items || []);
-        const isCash = isCashPayment(invData.paymentMethod);
-        const isTransfer = !isCash;
-
-        let pointsToRevert = 0;
-        let revertedPoints = 0;
-        if (custRef && custSnap && custSnap.exists()) {
-          pointsToRevert = Math.floor(invTotal / 100000);
-          const currentPts = custSnap.data().points || 0;
-          revertedPoints = Math.max(0, currentPts - pointsToRevert);
-        }
-
-        // ==========================================
-        // GIAI ĐOẠN 3: TOÀN BỘ CÁC LẦN GHI (ALL WRITES AFTER READS)
-        // ==========================================
-        const nowIso = new Date().toISOString();
-
-        // 3a. Cập nhật tồn kho và ghi thẻ kho hoàn hàng
-        const restoredStockAudit: any[] = [];
-        for (const [itemId, restoreQty] of restoreMap.entries()) {
-          const snap = itemSnaps.get(itemId);
-          if (snap && snap.exists()) {
-            const itemData = snap.data();
-            const oldStock = typeof itemData.stock === 'number' ? itemData.stock : 0;
-            const newStock = Number((oldStock + restoreQty).toFixed(3));
-            restoredMenuUpdates[itemId] = newStock;
-            if (oldStock <= 0 && newStock > 0) {
-              restoredInIds.push(itemId);
-            }
-            txn.update(doc(db, 'menu', itemId), { stock: newStock });
-
-            // Ghi thẻ kho hoàn hàng trong transaction
-            const cardRef = doc(collection(db, 'stock_card'));
-            txn.set(cardRef, {
-              itemId,
-              itemName: itemData.name,
-              date: nowIso,
-              type: 'import',
-              referenceId: invoiceId,
-              change: restoreQty,
-              remaining: newStock,
-              note: `Hoàn kho do hủy hóa đơn #${invoiceId.slice(-6).toUpperCase()}`,
-              storeId: currentUser.storeId
-            });
-
-            restoredStockAudit.push({
-              itemId,
-              itemName: itemData.name,
-              quantity: restoreQty,
-              remaining: newStock
-            });
-          }
-        }
-
-        // 3b. Hoàn lại điểm tích lũy khách hàng
-        if (custRef && custSnap && custSnap.exists() && pointsToRevert > 0) {
-          txn.update(custRef, { points: revertedPoints });
-        }
-
-        // 3c. Giảm thống kê ngày (daily_stats):
-        // Nếu daily aggregate chưa tồn tại, tuyệt đối KHÔNG tạo một document chỉ có increment âm mà thiếu storeId, ngày/tháng/năm
-        if (dailyStatsSnap && dailyStatsSnap.exists()) {
-          txn.set(dailyStatsRef, {
-            totalRevenue: increment(-invTotal),
-            totalCash: increment(isCash ? -invTotal : 0),
-            totalTransfer: increment(isTransfer ? -invTotal : 0),
-            invoiceCount: increment(-1),
-            totalDiscount: increment(-invDiscount),
-            totalCost: increment(-invCost),
-            updatedAt: nowIso
-          }, { merge: true });
-        }
-
-        // 3d. Xóa phiếu thu tiền liên kết nếu tồn tại
-        if (candidateCashDocRef && cashSnap && cashSnap.exists()) {
-          txn.delete(candidateCashDocRef);
-        }
-
-        // 3e. Ghi nhận nhật ký hủy hóa đơn (Audit Log) để lưu vết kiểm toán vĩnh viễn
-        const cancelAuditRef = doc(collection(db, 'cancelled_invoices'));
-        txn.set(cancelAuditRef, {
-          invoiceId,
-          storeId: currentUser.storeId,
-          cancelledAt: nowIso,
-          cancelledBy: {
-            id: currentUser.id,
-            name: currentUser.name,
-            role: currentUser.role
-          },
-          total: invTotal,
-          totalCost: invCost,
-          paymentMethod: invData.paymentMethod,
-          tableName: invData.tableName,
-          businessDate: invDateStr,
-          restoredStock: restoredStockAudit,
-          pointsReverted: pointsToRevert,
-          originalInvoice: invData,
-          note: `Hủy hóa đơn #${invoiceId.slice(-6).toUpperCase()} bởi ${currentUser.name}`
-        });
-
-        // 3f. Xóa hóa đơn hoạt động khỏi collection invoices
-        txn.delete(invRef);
-        return true;
-      });
-      if (!deleted) return false;
-
-      // Mở khóa topping nếu tồn kho chuyển từ <= 0 sang > 0
-      if (restoredInIds.length > 0) {
-        await updateOutOfStockStatus([], restoredInIds);
-      }
-
-      // Cập nhật local state
-      if (Object.keys(restoredMenuUpdates).length > 0) {
-        setMenu(prev => prev.map(m => restoredMenuUpdates[m.id] !== undefined ? { ...m, stock: restoredMenuUpdates[m.id] } : m));
-      }
-      setInvoices(prev => prev.filter(inv => inv.id !== invoiceId));
-      if (candidateCashDocRef) {
-        const cashIdToDelete = candidateCashDocRef.id;
-        setCashTransactions(prev => prev.filter(c => c.id !== cashIdToDelete && (c as any).invoiceId !== invoiceId));
-      }
-      return true;
-
-    } catch (error) {
-      console.error('Lỗi khi xóa hóa đơn:', error);
-      alert('Có lỗi xảy ra khi xóa hóa đơn!');
-      return false;
-    }
+    return result.deleted;
   };
 
   const handleResetAllTables = async () => {
@@ -4136,66 +3370,14 @@ export default function App() {
     });
   };
 
-  const handleMergeTables = async (targetTableId: string, sourceTableIds: string[]) => {
-    const targetTable = tables.find(t => t.id === targetTableId);
-    if (!targetTable) return;
-
-    let newOrders = [...(targetTable.orders || [])];
-    const sourceNames: string[] = [];
-
-    for (const sourceId of sourceTableIds) {
-      const sourceTable = tables.find(t => t.id === sourceId);
-      if (sourceTable && sourceTable.orders) {
-        newOrders = [...newOrders, ...sourceTable.orders];
-        sourceNames.push(sourceTable.name);
-
-        // Clear source table completely
-        await updateDoc(doc(db, 'tables', sourceId), {
-          status: 'empty',
-          orders: [],
-          currentOrder: [],
-          startTime: deleteField(),
-          note: deleteField()
-        });
-      }
-    }
-
-    const mergeText = sourceNames.length > 0 ? `Gộp từ ${sourceNames.join(', ')}` : '';
-    const updatedNote = targetTable.note 
-      ? `${targetTable.note}; ${mergeText}` 
-      : mergeText;
-
-    await updateDoc(doc(db, 'tables', targetTableId), {
-      orders: newOrders,
-      status: 'occupied',
-      note: updatedNote || deleteField()
-    });
+  const handleMergeTables = async (targetTableId: string, sourceTableIds: string[], id = operationId('move')) => {
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    await moveTablesAtomic(currentUser, targetTableId, sourceTableIds, false, id);
   };
 
-  const handleTransferTable = async (sourceTableId: string, targetTableId: string) => {
-    const sourceTable = tables.find(t => t.id === sourceTableId);
-    const targetTable = tables.find(t => t.id === targetTableId);
-    if (!sourceTable || !targetTable) return;
-
-    const transferText = `Chuyển từ ${sourceTable.name}`;
-    const updatedNote = sourceTable.note 
-      ? `${sourceTable.note}; ${transferText}` 
-      : transferText;
-
-    await updateDoc(doc(db, 'tables', targetTableId), {
-      status: 'occupied',
-      orders: sourceTable.orders || [],
-      startTime: sourceTable.startTime || new Date().toISOString(),
-      note: updatedNote
-    });
-
-    await updateDoc(doc(db, 'tables', sourceTableId), {
-      status: 'empty',
-      orders: [],
-      currentOrder: [],
-      startTime: deleteField(),
-      note: deleteField()
-    });
+  const handleTransferTable = async (sourceTableId: string, targetTableId: string, id = operationId('move')) => {
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    await moveTablesAtomic(currentUser, targetTableId, [sourceTableId], true, id);
   };
 
   const handleCheckout = async (tableId: string, ordersToPay: OrderSession[], discount: number, paymentMethod: 'cash' | 'transfer', shouldPrint: boolean = false, customerId?: string): Promise<boolean> => {
@@ -4209,16 +3391,15 @@ export default function App() {
     checkoutLockRef.current.add(tableId);
 
     try {
-      // Retrieve table from active state or fallback to getDoc
-      let table = tables.find(t => t.id === tableId) || selectedTable;
-      if (!table || table.id !== tableId) {
-        const tableDoc = await getDoc(doc(db, 'tables', tableId));
-        if (!tableDoc.exists()) return false;
-        table = { ...tableDoc.data(), id: tableDoc.id } as Table;
-      }
+      // The draft may have just been saved while React still holds an older table.
+      const tableDoc=await getDocFromServer(doc(db,'tables',tableId));
+      if(!tableDoc.exists())throw new Error('Bàn không còn tồn tại.');
+      const table={...tableDoc.data(),id:tableDoc.id} as Table;
+      if((table as any).storeId!==currentUser.storeId)throw new Error('Bàn không thuộc cửa hàng.');
 
       // Kiểm tra đơn hợp lệ cần thanh toán (Chống ghi lặp đơn đã thanh toán)
       if (!ordersToPay || ordersToPay.length === 0) return false;
+      if (ordersToPay.some(o => o.id?.startsWith('draft-'))) throw new Error('Vui lòng lưu đơn trước khi thanh toán.');
       const currentOrders = table.orders || [];
       const currentOrderIds = new Set(currentOrders.map(o => o.id));
       const validOrders = ordersToPay.filter(o => currentOrderIds.has(o.id) || o.id?.startsWith('draft-'));
@@ -4227,82 +3408,8 @@ export default function App() {
         return false;
       }
 
-      // Void Detection (Silent logging, no alert to avoid double-alerting with item_void)
-      if (activeShift) {
-        const voidItemDetails: VoidItemDetail[] = [];
-        let totalValueDiff = 0;
-
-        ordersToPay.forEach(paySession => {
-          const dbSession = table.orders?.find(o => o.id === paySession.id);
-          if (dbSession) {
-            // Aggregate items by ID to avoid JSON.stringify mismatch issues with add-ons
-            const dbItemsAgg = new Map<string, { name: string, quantity: number, price: number }>();
-            dbSession.items.forEach(i => {
-              const existing = dbItemsAgg.get(i.id);
-              if (existing) {
-                existing.quantity += i.quantity;
-              } else {
-                dbItemsAgg.set(i.id, { name: i.name, quantity: i.quantity, price: i.price });
-              }
-            });
-            
-            const payItemsAgg = new Map<string, { quantity: number }>();
-            paySession.items.forEach(i => {
-              const existing = payItemsAgg.get(i.id);
-              if (existing) {
-                existing.quantity += i.quantity;
-              } else {
-                payItemsAgg.set(i.id, { quantity: i.quantity });
-              }
-            });
-
-            dbItemsAgg.forEach((dbAgg, id) => {
-              const payAgg = payItemsAgg.get(id);
-              const payQty = payAgg ? payAgg.quantity : 0;
-              if (payQty < dbAgg.quantity) {
-                const diff = dbAgg.quantity - payQty;
-                const valueDiff = diff * dbAgg.price; // Use base price for tracking main item difference
-                totalValueDiff += valueDiff;
-                voidItemDetails.push({
-                  itemName: dbAgg.name,
-                  oldQuantity: dbAgg.quantity,
-                  newQuantity: payQty,
-                  valueDiff: valueDiff
-                });
-              }
-            });
-          }
-        });
-
-        if (voidItemDetails.length > 0) {
-          const reason = prompt(`⚠️ Phát hiện chênh lệch (giảm số lượng) khi thanh toán bàn ${table.name}.\nVui lòng nhập lý do:`);
-          if (!reason) {
-            alert("❌ Bắt buộc phải nhập lý do hủy/giảm món!");
-            return;
-          }
-
-          const voidLog: Omit<VoidLog, "id"> = {
-            time: new Date().toISOString(),
-            staffName: currentUser.name,
-            tableName: table.name,
-            itemName: '⚠️ CHÊNH LỆCH KHI THANH TOÁN',
-            oldQuantity: 0,
-            newQuantity: 0,
-            valueDiff: totalValueDiff,
-            type: 'bill_void',
-            details: voidItemDetails,
-            reason: reason
-          };
-
-          const updatedLogs = [...(activeShift.voidLogs || []), voidLog];
-          await updateDoc(doc(db, 'shifts', activeShift.id), {
-            voidLogs: updatedLogs
-          });
-        }
-      }
-
       // Calculate totals for the invoice based on SELECTED orders
-      const subtotal = ordersToPay.reduce((sum, o) => sum + o.subtotal, 0);
+      const subtotal = ordersToPay.reduce((sum, o) => sum + itemsSubtotal(o.items), 0);
       const normalizedDiscount = Math.min(100, Math.max(0, Number.isFinite(discount) ? discount : 0));
       const discountAmount = Math.round((subtotal * normalizedDiscount) / 100);
       const vatAmount = Math.round(((subtotal - discountAmount) * (systemSettings.vatPercent || 0)) / 100);
@@ -4326,21 +3433,20 @@ export default function App() {
       // Create Invoice
       const allItems = ordersToPay.reduce((acc, o) => acc.concat(o.items), [] as OrderItem[]);
       
-      // Group items by ID, name, price, and add-ons
+      // Keep recipe versions separate even if the dish ID and sale price match.
       const groupedItems: OrderItem[] = [];
       allItems.forEach(item => {
-        const itemKey = `${item.id}-${item.price}-${JSON.stringify([...(item.selectedAddOns || [])].sort((a, b) => (a.id||'').localeCompare(b.id||'')))}-${item.note || ''}`;
-        const existing = groupedItems.find(i => {
-          const existingKey = `${i.id}-${i.price}-${JSON.stringify([...(i.selectedAddOns || [])].sort((a, b) => (a.id||'').localeCompare(b.id||'')))}-${i.note || ''}`;
-          return existingKey === itemKey;
-        });
-        
+        const key=itemKey(item);
+        const existing=groupedItems.find(i=>itemKey(i)===key);
+
         if (existing) {
           existing.quantity += item.quantity;
         } else {
           const selectedAddOns = (item.selectedAddOns || []).map(addOn => {
             if (addOn.inventoryItemId) return { ...addOn };
-            const source = menu.find(menuItem => (menuItem.isInventory || menuItem.type === 'goods' || menuItem.category === 'Nguyên liệu') && menuItem.name.toLowerCase().trim() === addOn.name.toLowerCase().trim());
+            const candidates = menu.filter(menuItem => (menuItem.isInventory || menuItem.type === 'goods' || menuItem.category === 'Nguyên liệu') && menuItem.name.toLowerCase().trim() === addOn.name.toLowerCase().trim());
+            if(candidates.length > 1) throw new Error('Món kèm trùng tên nhiều nguyên liệu; vui lòng liên kết đúng mã kho trước khi thanh toán.');
+            const source = candidates[0];
             return source?.id ? { ...addOn, inventoryItemId: source.id } : { ...addOn };
           });
           groupedItems.push({ ...item, selectedAddOns });
@@ -4366,62 +3472,6 @@ export default function App() {
       // Chuẩn hóa theo công thức: unitCost × quantityPerServing × soldQuantity
       let invoiceCost = calculateInvoiceCost(groupedItems);
       let invoiceCostIsComplete = false;
-
-      // GỘP DELTA NGUYÊN LIỆU & HÀNG HÓA:
-      interface ConsolidatedDelta {
-        item: MenuItem;
-        totalDeduction: number;
-        details: string[];
-      }
-      const deltaMap = new Map<string, ConsolidatedDelta>();
-
-      const recordDelta = (targetItem: MenuItem, deductionQty: number, reason: string) => {
-        if (deductionQty <= 0) return;
-        if (targetItem.trackStock === false) return;
-
-        const existing = deltaMap.get(targetItem.id);
-        if (existing) {
-          existing.totalDeduction = Number((existing.totalDeduction + deductionQty).toFixed(3));
-          existing.details.push(reason);
-        } else {
-          deltaMap.set(targetItem.id, {
-            item: targetItem,
-            totalDeduction: Number(deductionQty.toFixed(3)),
-            details: [reason]
-          });
-        }
-      };
-
-      for (const item of groupedItems) {
-        if (item.recipe && item.recipe.length > 0) {
-          for (const recipeItem of item.recipe) {
-            const ingredient = menu.find(m => m.id === recipeItem.ingredientId);
-            if (ingredient) {
-              const deduction = Number((recipeItem.quantity * item.quantity).toFixed(3));
-              recordDelta(ingredient, deduction, `${item.name} x${item.quantity} (${deduction}${recipeItem.unit || ingredient.unit})`);
-            }
-          }
-        } else if (item.type === 'goods') {
-          const menuItem = menu.find(m => m.id === item.id);
-          if (menuItem) {
-            recordDelta(menuItem, item.quantity, `${item.name} x${item.quantity}`);
-          }
-        }
-
-        if (item.selectedAddOns && item.selectedAddOns.length > 0) {
-          for (const addon of item.selectedAddOns) {
-            const invItem = menu.find(m => 
-              (m.isInventory || m.type === 'goods' || m.category === 'Nguyên liệu') &&
-              (m.id === addon.inventoryItemId || m.name.toLowerCase().trim() === addon.name.toLowerCase().trim())
-            );
-            if (invItem) {
-              const addOnQty = addon.quantity || 1;
-              const deduction = Number((addOnQty * item.quantity).toFixed(3));
-              recordDelta(invItem, deduction, `Kèm [${addon.name}] của [${item.name} x${item.quantity}]`);
-            }
-          }
-        }
-      }
 
       const costSourceIds = new Set<string>();
       groupedItems.forEach(item => {
@@ -4460,13 +3510,13 @@ export default function App() {
         const paidIds = new Set(persistedOrdersToPay.map(p => p.id));
         const stillPresent = serverOrders.filter(o => paidIds.has(o.id));
         if (stillPresent.length !== persistedOrdersToPay.length) throw new Error('Đơn hàng đã thay đổi hoặc được thanh toán ở thiết bị khác. Vui lòng mở lại bàn.');
-        const signature = (order: OrderSession) => JSON.stringify({ subtotal: order.subtotal, items: (order.items || []).map(item => ({ id: item.id, price: item.price, quantity: item.quantity, note: item.note || '', addOns: (item.selectedAddOns || []).map(a => ({ id: a.id, inventoryItemId: a.inventoryItemId || '', price: a.price, quantity: a.quantity || 1 })).sort((a,b) => `${a.id}:${a.inventoryItemId}`.localeCompare(`${b.id}:${b.inventoryItemId}`)) })).sort((a,b) => `${a.id}:${a.price}:${a.note}`.localeCompare(`${b.id}:${b.price}:${b.note}`)) });
         const serverById = new Map(stillPresent.map(order => [order.id, order]));
-        if (persistedOrdersToPay.some(order => signature(order) !== signature(serverById.get(order.id)!))) throw new Error('Nội dung đơn hàng vừa thay đổi ở thiết bị khác. Vui lòng kiểm tra lại.');
+        if (persistedOrdersToPay.some(order => orderSignature(order) !== orderSignature(serverById.get(order.id)!))) throw new Error('Nội dung đơn hàng vừa thay đổi ở thiết bị khác. Vui lòng kiểm tra lại.');
 
         const serverItemSnaps = new Map<string, any>();
         for (const itemId of costSourceIds) {
           const itemSnap = await txn.get(doc(db, 'menu', itemId));
+          if(itemSnap.exists()&&itemSnap.data().storeId!==currentUser.storeId)throw new Error('Mặt hàng/nguyên liệu không thuộc cửa hàng.');
           serverItemSnaps.set(itemId, itemSnap);
         }
 
@@ -4478,6 +3528,28 @@ export default function App() {
 
         // 1e. Đọc thống kê ngày (daily_stats) để kiểm tra trạng thái trước khi cập nhật
         const dailyStatsSnap = await txn.get(dailyStatsRef);
+        if (activeShift) {
+          const shiftSnap = await txn.get(doc(db,'shifts',activeShift.id));
+          if (!shiftSnap.exists() || shiftSnap.data().storeId !== currentUser.storeId || shiftSnap.data().status !== 'open') throw new Error('Ca đã đóng ở thiết bị khác. Vui lòng mở ca hợp lệ.');
+        }
+        // Stock decisions use server flags and the exact IDs captured on the order.
+        const deltaMap = new Map<string, { item: MenuItem; totalDeduction: number; details: string[] }>();
+        const addDelta = (id: string, quantity: number, reason: string) => {
+          const source = serverItemSnaps.get(id);
+          if (!source?.exists()) throw new Error('Mặt hàng/nguyên liệu không còn tồn tại. Vui lòng kiểm tra lại định lượng.');
+          const data = source.data();
+          if (data.storeId !== currentUser.storeId) throw new Error('Nguyên liệu không thuộc cửa hàng.');
+          if (data.trackStock === false || quantity <= 0) return;
+          if(stockQuantity(quantity)<=0)throw new Error('Định lượng nhỏ hơn 0,001 đơn vị kho. Vui lòng kiểm tra lại đơn vị nguyên liệu.');
+          const previous = deltaMap.get(id);
+          deltaMap.set(id, { item: { ...data, id } as MenuItem, totalDeduction: stockQuantity((previous?.totalDeduction || 0) + quantity), details: [...(previous?.details || []), reason] });
+        };
+        for (const item of groupedItems) {
+          if (item.recipe?.length) for (const recipe of item.recipe) addDelta(recipe.ingredientId, recipe.quantity * item.quantity, item.name);
+          else if (item.type === 'goods') addDelta(item.id, item.quantity, item.name);
+          for (const addon of item.selectedAddOns || []) if (addon.inventoryItemId) addDelta(addon.inventoryItemId, (addon.quantity ?? 1) * item.quantity, addon.name);
+        }
+        if(deltaMap.size>200)throw new Error('Hóa đơn có quá nhiều mặt hàng kho. Vui lòng chia thanh toán theo các đơn nhỏ hơn. Chưa có giao dịch nào được ghi.');
         const costSnapshot = calculateInvoiceCostSnapshot(groupedItems, itemId => {
           const sourceSnap = serverItemSnaps.get(itemId);
           return sourceSnap?.exists() ? sourceSnap.data() : undefined;
@@ -4549,7 +3621,10 @@ export default function App() {
           vat: vatAmount,
           total,
           totalCost: invoiceCost,
-          costVersion: 2,
+          costVersion: 3,
+          statsApplied: true,
+          inventoryMovements: [...deltaMap.entries()].map(([itemId, delta]) => ({ itemId, quantity: delta.totalDeduction })),
+          pointsEarned: Math.floor(total / 100000),
           costStatus: invoiceCostIsComplete ? 'complete' : 'estimated',
           paymentMethod,
           tableId,
@@ -4602,6 +3677,7 @@ export default function App() {
           totalCost: increment(invoiceCost),
           costStatus: targetCostStatus,
           coverageStatus: 'live_tracking',
+          sourceRevision: increment(1),
           hasData: true,
           version: 2,
           updatedAt: invoiceNowIso
@@ -4665,7 +3741,7 @@ export default function App() {
 
       // Cập nhật trạng thái hết hàng của topping nếu tồn kho chuyển từ > 0 sang <= 0
       if (itemsBecomingOut.length > 0) {
-        await updateOutOfStockStatus(itemsBecomingOut, []);
+        await updateOutOfStockStatus(itemsBecomingOut, []).catch(error => console.warn('Thanh toán đã thành công; trạng thái hết hàng sẽ đồng bộ lại:', error));
       }
 
       // Cập nhật local state tức thì mượt mà
@@ -4698,7 +3774,7 @@ export default function App() {
 
       // Print Invoice if requested
       if (shouldPrint) {
-        triggerPrint({
+        try { triggerPrint({
           type: 'bill',
           tableName: tables.find(t => t.id === tableId)?.name || 'Bàn',
           items: groupedItems,
@@ -4712,7 +3788,7 @@ export default function App() {
           note: combinedNotes,
           customerName,
           customerType
-        });
+        }); } catch (error) { console.warn('Thanh toán đã thành công; vui lòng in lại hóa đơn:', error); }
       }
 
       // Đóng modal
@@ -4730,66 +3806,30 @@ export default function App() {
 
   // Shift Management
   const handleOpenShift = async (startCash: number) => {
-    if (!currentUser) return;
-
-    // Kiểm tra xem đã có ca đang mở chưa để chống mở trùng ca từ nhiều máy
-    if (activeShift) {
-      alert('Bạn đã có ca làm việc đang mở.');
-      return;
-    }
-
+    if(!currentUser)return;
+    if(!Number.isFinite(startCash)||startCash<0){alert('Tiền đầu ca không hợp lệ.');return;}
     try {
-      const q = query(
-        collection(db, 'shifts'),
-        where('storeId', '==', currentUser.storeId),
-        where('staffId', '==', currentUser.id),
-        where('status', '==', 'open'),
-        limit(1)
-      );
-      const existingSnap = await getDocs(q);
-      if (!existingSnap.empty) {
-        const existingShift = { ...existingSnap.docs[0].data(), id: existingSnap.docs[0].id } as Shift;
-        setActiveShift(existingShift);
-        setAllActiveShifts(prev => [...prev.filter(s => s.id !== existingShift.id), existingShift]);
-        alert('Đã tìm thấy ca làm việc đang mở của bạn.');
-        return;
-      }
-
-      const nowIso = new Date().toISOString();
-      const docRef = await addDoc(collection(db, 'shifts'), {
-        startTime: nowIso,
-        startCash,
-        totalRevenue: 0,
-        totalCash: 0,
-        totalTransfer: 0,
-        staffId: currentUser.id,
-        staffName: currentUser.name,
-        status: 'open',
-        storeId: currentUser.storeId
+      const legacy=(await fetchStoreRows<Shift>('shifts',currentUser.storeId)).find(s=>s.staffId===currentUser.id&&s.status==='open');
+      const guardRef=doc(db,'checkout_locks',`shift_open_${currentUser.storeId}_${currentUser.id}`);
+      const freshRef=doc(collection(db,'shifts'));
+      await runTransaction(db,async txn=>{
+        const guard=await txn.get(guardRef);
+        const oldId=guard.data()?.shiftId||legacy?.id;
+        const old=oldId?await txn.get(doc(db,'shifts',oldId)):undefined;
+        if(old?.exists()&&old.data().status==='open'){
+          if(old.data().storeId!==currentUser.storeId||old.data().staffId!==currentUser.id)throw new Error('Ca không thuộc nhân viên hiện tại.');
+          return;
+        }
+        const now=new Date().toISOString();
+        txn.set(freshRef,{storeId:currentUser.storeId,startTime:now,startCash,totalRevenue:0,totalCash:0,totalTransfer:0,cashIncome:0,cashExpense:0,transferIncome:0,transferExpense:0,staffId:currentUser.id,staffName:currentUser.name,status:'open'});
+        txn.set(guardRef,{storeId:currentUser.storeId,staffId:currentUser.id,shiftId:freshRef.id,type:'shift_guard',updatedAt:now});
       });
-
-      const newShift: Shift = {
-        id: docRef.id,
-        startTime: nowIso,
-        startCash,
-        totalRevenue: 0,
-        totalCash: 0,
-        totalTransfer: 0,
-        staffId: currentUser.id,
-        staffName: currentUser.name,
-        status: 'open',
-        storeId: currentUser.storeId
-      };
-      setActiveShift(newShift);
-      setAllActiveShifts(prev => [...prev.filter(s => s.id !== newShift.id), newShift]);
-    } catch (err) {
-      console.error('Error opening shift:', err);
-      alert('Có lỗi xảy ra khi mở ca làm việc.');
-    }
+    }catch(error){alert(error instanceof Error?error.message:'Không thể mở ca.');}
   };
 
-  const handleCloseShift = async (endCash: number) => {
-    if (!activeShift) return;
+  const handleCloseShift = async (endCash: number): Promise<boolean> => {
+    if (!activeShift) return false;
+    if(!Number.isFinite(endCash)||endCash<0){alert('Tiền kiểm kê không hợp lệ.');return false;}
     try {
       await runTransaction(db, async txn => {
         const shiftRef = doc(db, 'shifts', activeShift.id);
@@ -4800,8 +3840,10 @@ export default function App() {
         const discrepancy = endCash - ((serverShift.startCash || 0) + (serverShift.totalCash || 0));
         txn.update(shiftRef, { endTime: new Date().toISOString(), endCash, discrepancy, discrepancyProcessed: discrepancy === 0, status: 'closed' });
       });
+      return true;
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Không thể đóng ca. Vui lòng thử lại.');
+      return false;
     }
   };
 
@@ -4882,24 +3924,18 @@ export default function App() {
   };
 
   const handleFinalizePayroll = async (payroll: PayrollRecord) => {
-    if (!currentUser) return;
-    try {
-      const q = query(
-        collection(db, 'payroll_records'), 
-        where('storeId', '==', currentUser.storeId),
-        where('userId', '==', payroll.userId),
-        where('month', '==', payroll.month)
-      );
-      const snap = await getDocs(q);
-      
-      if (!snap.empty) {
-        await updateDoc(doc(db, 'payroll_records', snap.docs[0].id), { ...payroll });
-      } else {
-        await addDoc(collection(db, 'payroll_records'), { ...payroll, storeId: currentUser.storeId });
-      }
-    } catch (err) {
-      console.error(err);
-    }
+    if (!currentUser || !payrollSourceReady) throw new Error('Dữ liệu chấm công/lương chưa được server xác nhận đầy đủ.');
+    const records = attendanceRecords.filter(r => r.userId === payroll.userId && r.date.slice(0,7) === payroll.month);
+    if (attendanceTotals(records).hasOpenSession) throw new Error('Có lượt chấm công chưa kết thúc hoặc giờ không hợp lệ. Vui lòng hoàn tất trước khi chốt lương.');
+    const id = `${currentUser.storeId}_${payroll.userId}_${payroll.month}`;
+    // Check legacy records before the transaction; the deterministic ID prevents duplicate new finalizations.
+    const legacy = payrollRecords.find(p => p.userId === payroll.userId && p.month === payroll.month && p.status === 'finalized');
+    if (legacy) throw new Error('Tháng này đã chốt lương. Vui lòng tải lại dữ liệu.');
+    await runTransaction(db, async txn => {
+      const ref = doc(db,'payroll_records',id), existing = await txn.get(ref);
+      if (existing.exists()) throw new Error('Bảng lương đã được chốt ở thiết bị khác.');
+      txn.set(ref,{...payroll,id,storeId:currentUser.storeId,finalizedAt:new Date().toISOString()});
+    });
   };
 
   const handleChangePassword = async (newPassword: string) => {
@@ -5048,61 +4084,8 @@ export default function App() {
   }
 
   const handleCheckIn = async (record: Partial<AttendanceRecord>) => {
-    try {
-      const today = record.date || format(new Date(), 'yyyy-MM-dd');
-      const q = query(
-        collection(db, 'attendance_records'),
-        where('storeId', '==', currentUser.storeId),
-        where('userId', '==', currentUser.id),
-        where('date', '==', today)
-      );
-      const snap = await getDocs(q);
-
-      let latestRecord: AttendanceRecord | null = null;
-      if (!snap.empty) {
-        const sortedRecords = snap.docs.map(d => ({ ...d.data(), id: d.id }) as AttendanceRecord).sort((a, b) => {
-          return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
-        });
-        latestRecord = sortedRecords[0];
-      }
-
-      const nowIso = new Date().toISOString();
-
-      if (latestRecord && latestRecord.checkInTime && !latestRecord.checkOutTime) {
-        // Must check-out
-        const updateData: any = { checkOutTime: nowIso };
-        if (record.locationValid !== undefined) updateData.locationValid = record.locationValid;
-        await updateDoc(doc(db, 'attendance_records', latestRecord.id!), updateData);
-        return { type: 'check_out', time: nowIso };
-      } else {
-        // Must check-in
-        let finalStatus = record.status || 'present';
-        const shiftStartStr = (currentUser.shifts && currentUser.shifts[0]) ? currentUser.shifts[0].start : currentUser.shiftStart;
-        if (shiftStartStr) {
-          const checkInDate = new Date(nowIso);
-          const [hours, minutes] = shiftStartStr.split(':').map(Number);
-          const shiftStartDate = new Date(checkInDate);
-          shiftStartDate.setHours(hours, minutes, 0, 0);
-          const diffMinutes = (checkInDate.getTime() - shiftStartDate.getTime()) / 60000;
-          if (diffMinutes > 240) finalStatus = 'half-day';
-          else if (diffMinutes > 15) finalStatus = 'late';
-        }
-
-        await addDoc(collection(db, 'attendance_records'), {
-          userId: currentUser.id,
-          staffName: currentUser.name,
-          date: today,
-          checkInTime: nowIso,
-          status: finalStatus,
-          storeId: currentUser.storeId,
-          locationValid: record.locationValid !== undefined ? record.locationValid : true
-        });
-        return { type: 'check_in', time: nowIso };
-      }
-    } catch (e) {
-      console.error("Check-in error:", e);
-      throw e;
-    }
+    if(!currentUser)throw new Error('Vui lòng đăng nhập lại.');
+    return recordAttendanceAtomic(currentUser,record);
   };
 
   const isCheckinPage = new URLSearchParams(window.location.search).get('checkin') === 'true';
@@ -5112,7 +4095,7 @@ export default function App() {
   }
 
   const todayStr = currentBusinessDate;
-  const todayRecords = currentUser ? (myTodayAttendance.length > 0 ? myTodayAttendance : attendanceRecords.filter(r => r.userId === currentUser.id && r.date === todayStr)) : [];
+  const todayRecords = currentUser ? (myTodayAttendance.length > 0 ? myTodayAttendance.filter(r=>r.date===todayStr||!r.checkOutTime) : attendanceRecords.filter(r => r.userId === currentUser.id && (r.date === todayStr||!r.checkOutTime))) : [];
   const latestTodayRecord = todayRecords.sort((a, b) => new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime())[0];
   const attendanceStatus: 'none' | 'checked_in' | 'checked_out' = !latestTodayRecord 
     ? 'none' 
@@ -5264,7 +4247,7 @@ export default function App() {
                 !checkStoreTabPermission('reports', currentUser, packages) ? (
                   <LockedTabView title="Báo cáo doanh thu" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <ReportsView invoices={invoices} activeOrdersCount={activeOrdersCount} businessDate={currentBusinessDate} />
+                  <ReportsView isDataReady={invoicesReady} invoices={invoices} activeOrdersCount={activeOrdersCount} businessDate={currentBusinessDate} />
                 )
               )}
               {view === 'kitchen' && (
@@ -5400,6 +4383,7 @@ export default function App() {
               )}
               {view === 'user_mgmt' && (
                 <UserMgmtView 
+                    isDataReady={payrollSourceReady}
                   users={users} 
                   currentUser={currentUser}
                   attendanceRecords={attendanceRecords}
@@ -5412,7 +4396,7 @@ export default function App() {
                 />
               )}
               {view === 'my_payroll' && (
-                <MyPayrollView 
+                <MyPayrollView isDataReady={payrollSourceReady} 
                   currentUser={currentUser} 
                   attendanceRecords={attendanceRecords}
                   payrollRecords={payrollRecords}

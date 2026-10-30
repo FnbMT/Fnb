@@ -21,7 +21,7 @@ export const ShiftView = ({
   allActiveShifts?: Shift[],
   history: Shift[],
   onOpenShift: (startCash: number) => void,
-  onCloseShift: (endCash: number) => void,
+  onCloseShift: (endCash: number) => Promise<boolean>,
   onResolveDiscrepancy?: (shiftId: string) => void,
   currentUser: User | null,
   tables?: Table[],
@@ -227,7 +227,7 @@ export const ShiftView = ({
 
               <div className="pt-4 relative z-10">
                 <button 
-                  onClick={() => {
+                  onClick={async () => {
                     if (isOrderOnly) {
                       const activeTables = tables.filter(t => 
                         t.status !== 'empty' && 
@@ -238,7 +238,7 @@ export const ShiftView = ({
                         alert(`Không thể đóng ca!\nBạn đang có đơn chưa thanh toán tại các bàn: ${tableNames}\nVui lòng yêu cầu thu ngân thanh toán hoặc bàn giao cho nhân viên khác trước khi đóng ca.`);
                         return;
                       }
-                      onCloseShift(0);
+                      if(await onCloseShift(0)!==true)return;
                       if (currentUser?.requiresAttendance) {
                         setShowCheckoutReminder(true);
                       }
@@ -435,7 +435,7 @@ export const ShiftView = ({
                 Quay lại
               </button>
               <button 
-                onClick={() => {
+                onClick={async () => {
                   if (currentUser?.role === 'order' || currentUser?.role === 'cashier' || currentUser?.role === 'order_cashier') {
                     const activeTables = tables.filter(t => 
                       t.status !== 'empty' && 
@@ -448,7 +448,7 @@ export const ShiftView = ({
                       return;
                     }
                   }
-                  onCloseShift(cashAmount);
+                  if(await onCloseShift(cashAmount)!==true)return;
                   setShowCloseModal(false);
                   if (currentUser?.requiresAttendance) {
                     setShowCheckoutReminder(true);

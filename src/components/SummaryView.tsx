@@ -5,10 +5,12 @@ import { format, isSameDay, isSameMonth, isSameYear, parseISO, startOfMonth, end
 import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot, onSnapshot } from 'firebase/firestore';
 import { getDateRangeIso, getVietnamBusinessDate, getVietnamYesterdayDate } from '../utils/firestoreDateHelper';
 import { calculateInvoiceCost } from '../utils/costHelper';
 import { isCashPayment, isReconciledDailyStat } from '../utils/reportDataIntegrity';
+import { dailyStatsFromSources, invoiceCostIsComplete, operationId, receiptMismatch, isSalesCategory, allocatedItemRevenue } from '../utils/dataIntegrity';
+import { subscribeDateRange } from '../utils/completeDataSource';
 
 // Hàm xác định toàn bộ danh sách ngày dự kiến trong kỳ (không lấy ngày tương lai vượt quá hôm nay)
 function getExpectedPeriodDates(dateFilter: string, filterType: 'day' | 'month' | 'year', todayStr: string): string[] {
@@ -252,7 +254,7 @@ export const SummaryView = ({
   payrollRecords: PayrollRecord[],
   shifts?: Shift[],
   activeShift?: Shift | null,
-  onAddCashTransaction: (t: Omit<CashTransaction, 'id' | 'storeId'>) => void,
+  onAddCashTransaction: (t: Omit<CashTransaction, 'id' | 'storeId'>, id?: string) => Promise<void>,
   onDeleteInvoice?: (invoiceId: string) => Promise<boolean> | boolean,
   currentUser: User | null,
   settings: SystemSettings,
@@ -269,6 +271,7 @@ export const SummaryView = ({
   const todayVietnam = businessDate || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   const [dateFilter, setDateFilter] = useState(todayVietnam);
   const [filterType, setFilterType] = useState<'day' | 'month' | 'year'>('day');
+  const [financialCostBasis,setFinancialCostBasis]=useState<'cash'|'payroll'>('cash');
   const [taxRevenueType, setTaxRevenueType] = useState<'under_1b' | 'over_1b'>('under_1b');
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [confirmDeleteInvoice, setConfirmDeleteInvoice] = useState<Invoice | null>(null);
@@ -351,6 +354,11 @@ export const SummaryView = ({
   const [historicalLogs, setHistoricalLogs] = useState<InventoryTransaction[]>([]);
   const [periodPayrolls, setPeriodPayrolls] = useState<PayrollRecord[]>([]);
   const [isLoadingHistorical, setIsLoadingHistorical] = useState(false);
+  const [reportDataReady, setReportDataReady] = useState(false);
+  const [reportError, setReportError] = useState('');
+  const [payrollDataReady, setPayrollDataReady] = useState(false);
+  const [isSavingCash, setIsSavingCash] = useState(false);
+  const cashOperationRef = useRef<{ id: string; date: string; signature: string } | null>(null);
   const [hasMoreInvoices, setHasMoreInvoices] = useState(false);
   const [lastInvoiceDoc, setLastInvoiceDoc] = useState<QueryDocumentSnapshot | null>(null);
   const [isLoadingMoreInvoices, setIsLoadingMoreInvoices] = useState(false);
@@ -367,29 +375,8 @@ export const SummaryView = ({
   const activeRequestId = useRef(0);
 
   // Gộp dữ liệu: Dữ liệu thời gian thực hôm nay (Live) PHẢI GHI ĐÈ LÊN Lịch sử để bản mới nhất luôn thắng, lọc đúng quán hiện tại
-  const allInvoices = useMemo(() => {
-    const storeId = currentUser?.storeId;
-    const map = new Map<string, Invoice>();
-    historicalInvoices.forEach(inv => {
-      if (!storeId || inv.storeId === storeId) map.set(inv.id, inv);
-    });
-    invoices.forEach(inv => {
-      if (!storeId || inv.storeId === storeId) map.set(inv.id, inv);
-    });
-    return Array.from(map.values());
-  }, [invoices, historicalInvoices, currentUser?.storeId]);
-
-  const allCashTransactions = useMemo(() => {
-    const storeId = currentUser?.storeId;
-    const map = new Map<string, CashTransaction>();
-    historicalCash.forEach(c => {
-      if (!storeId || c.storeId === storeId) map.set(c.id, c);
-    });
-    cashTransactions.forEach(c => {
-      if (!storeId || c.storeId === storeId) map.set(c.id, c);
-    });
-    return Array.from(map.values());
-  }, [cashTransactions, historicalCash, currentUser?.storeId]);
+  const allInvoices = useMemo(() => historicalInvoices.filter(i => i.storeId === currentUser?.storeId && i.status !== 'cancelled'), [historicalInvoices, currentUser?.storeId]);
+  const allCashTransactions = useMemo(() => historicalCash.filter(i => i.storeId === currentUser?.storeId), [historicalCash, currentUser?.storeId]);
 
   const allInventoryLogs = useMemo(() => {
     const storeId = currentUser?.storeId;
@@ -776,381 +763,35 @@ export const SummaryView = ({
     }
   };
 
-  // Kiến trúc 2 tầng (Two-Tier Architecture): Tầng 1 chỉ nạp daily_stats; Tầng 2 chỉ nạp chứng từ theo Tab on-demand
+  // Financial totals come from complete, live source queries. List pagination is
+  // a display concern and cannot determine the financial total of a period.
   useEffect(() => {
     if (!currentUser?.storeId) return;
     const storeId = currentUser.storeId;
-
-    const currentReq = ++activeRequestId.current;
-    let isMounted = true;
-
-    const cacheKey = `${storeId}_${dateFilter}_${filterType}`;
-    const cached = summaryPeriodCache.get(cacheKey);
-
-    // Kiểm tra cache xem kỳ này đã tải và còn hiệu lực không (TTL 5 phút)
-    const isCacheFresh = cached && (Date.now() - cached.timestamp < 5 * 60 * 1000);
-    if (isCacheFresh && cached.dailyStats) {
-      setDailyStats(cached.dailyStats);
-      if (cached.invoices) setHistoricalInvoices(cached.invoices);
-      if (cached.cash) setHistoricalCash(cached.cash);
-      if (cached.logs) setHistoricalLogs(cached.logs);
-      if (cached.periodPayrolls) setPeriodPayrolls(cached.periodPayrolls);
-      setHasMoreInvoices(Boolean(cached.hasMoreInvoices));
-      setLastInvoiceDoc(cached.lastInvoiceDoc || null);
-      if (cached.invoiceQueryMode) {
-        setInvoiceQueryConfig({
-          mode: cached.invoiceQueryMode,
-          ordered: cached.invoiceQueryOrdered ?? true
-        });
-      }
-      setHasMoreCash(Boolean(cached.hasMoreCash));
-      setLastCashDoc(cached.lastCashDoc || null);
-      if (cached.cashQueryMode) {
-        setCashQueryConfig({
-          mode: cached.cashQueryMode,
-          ordered: cached.cashQueryOrdered ?? true
-        });
-      }
-      setHasMoreLogs(Boolean(cached.hasMoreLogs));
-      setLastLogDoc(cached.lastLogDoc || null);
-
-      const cachedStats = cached.dailyStats || [];
-      const expectedDatesForCache = getExpectedPeriodDates(dateFilter, filterType, todayVietnam);
-      const cacheCompleteness = checkStatsCompleteness(cachedStats, expectedDatesForCache, todayVietnam, isViewingCurrentPeriod);
-      const hasCompleteCostInCachedStats = cacheCompleteness.hasCompleteCost && cacheCompleteness.isFullyCovered;
-
-      const hasTabData = 
-        (activeTab === 'sales' && (isViewingTodayOnly || cached.invoices)) ||
-        (activeTab === 'cash' && (isViewingTodayOnly || cached.cash)) ||
-        (activeTab === 'inventory' && cached.logs) ||
-        (activeTab === 'items' && (isViewingTodayOnly || cached.invoices)) ||
-        (activeTab === 'financial' && cached.dailyStats && (hasCompleteCostInCachedStats || (cached.invoices && cached.cash)) && cached.periodPayrolls);
-
-      if (hasTabData) {
-        setIsLoadingHistorical(false);
-        return; // Đã có đủ dữ liệu từ cache, 0 reads Firestore!
-      }
-    }
-
-    if (cached && !isCacheFresh) {
-      summaryPeriodCache.delete(cacheKey);
-    }
-
-    setIsLoadingHistorical(true);
-
-    const loadPeriodData = async () => {
-      try {
-        const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
-        const currentEntry: SummaryPeriodCacheItem = summaryPeriodCache.get(cacheKey) || { timestamp: Date.now() };
-
-        // 1. TẦNG 1: Luôn tải daily_stats (Chỉ 1 - 31 reads cho cả kỳ, phục vụ tức thì 100% KPI & biểu đồ)
-        let loadedStats: DailyStats[] = currentEntry.dailyStats || [];
-        if (!currentEntry.dailyStats) {
-          try {
-            let statsQ;
-            if (filterType === 'day') {
-              const dayStr = dateFilter.slice(0, 10);
-              statsQ = query(
-                collection(db, 'daily_stats'),
-                where('storeId', '==', storeId),
-                where('date', '==', dayStr)
-              );
-            } else if (filterType === 'month') {
-              const monthStr = dateFilter.slice(0, 7);
-              statsQ = query(
-                collection(db, 'daily_stats'),
-                where('storeId', '==', storeId),
-                where('month', '==', monthStr)
-              );
-            } else {
-              const yearNum = parseInt(dateFilter.slice(0, 4), 10) || new Date().getFullYear();
-              statsQ = query(
-                collection(db, 'daily_stats'),
-                where('storeId', '==', storeId),
-                where('year', '==', yearNum)
-              );
-            }
-            const statsSnap = await getDocs(statsQ);
-            loadedStats = statsSnap.docs.map(d => ({ ...(d.data() as any), id: d.id } as DailyStats));
-            currentEntry.dailyStats = loadedStats;
-          } catch (err) {
-            console.warn('Lỗi tải daily_stats:', err);
-          }
-        }
-
-        const expectedDatesForPeriod = getExpectedPeriodDates(dateFilter, filterType, todayVietnam);
-        const statsCompleteness = checkStatsCompleteness(loadedStats, expectedDatesForPeriod, todayVietnam, isViewingCurrentPeriod);
-        const hasCompleteCostInStats = statsCompleteness.hasCompleteCost && statsCompleteness.isFullyCovered;
-        const needsInvoiceCostFallback = (activeTab === 'financial' && !hasCompleteCostInStats) || (!statsCompleteness.isFullyCovered);
-
-        // 2. TẦNG 2: Danh sách hóa đơn chi tiết
-        // Nạp khi xem các tab 'sales', 'items', 'financial' hoặc khi daily_stats của kỳ/ngày đó chưa có
-        let loadedInvoices: Invoice[] = currentEntry.invoices || [];
-        const shouldLoadInvoices = !isViewingTodayOnly && !currentEntry.invoices && (
-          activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial' || needsInvoiceCostFallback || loadedStats.length === 0
-        );
-
-        if (shouldLoadInvoices) {
-          try {
-            let invSnap: any = null;
-            let mode: 'modern' | 'legacy' = 'modern';
-            let ordered = true;
-
-            // Bước 1: Thử truy vấn modern (businessDate)
-            try {
-              const invQueryOrdered = buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', true, null, 50);
-              invSnap = await getDocs(invQueryOrdered);
-            } catch (orderErr) {
-              ordered = false;
-              try {
-                const invQueryFallback = buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, null, 50);
-                invSnap = await getDocs(invQueryFallback);
-              } catch (_) {}
-            }
-
-            // Bước 2: Thử truy vấn dải ngày legacy nếu modern rỗng
-            if ((!invSnap || invSnap.empty) && filterType === 'day') {
-              try {
-                const legacyQ = buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'legacy', false, null, 50);
-                const legacySnap = await getDocs(legacyQ);
-                if (!legacySnap.empty) {
-                  invSnap = legacySnap;
-                  mode = 'legacy';
-                  ordered = false;
-                }
-              } catch (_) {}
-            }
-
-            // Bước 3: Fallback an toàn tuyệt đối không đòi hỏi Composite Index: Quét theo storeId và lọc theo múi giờ Việt Nam
-            if (!invSnap || invSnap.empty) {
-              try {
-                const safeQ = query(
-                  collection(db, 'invoices'),
-                  where('storeId', '==', storeId),
-                  limit(300)
-                );
-                const safeSnap = await getDocs(safeQ);
-                const targetDay = dateFilter.slice(0, 10);
-                const matchedDocs = safeSnap.docs.filter(d => {
-                  const data = d.data();
-                  const dStr = data.businessDate || getVietnamBusinessDate(data.date);
-                  if (filterType === 'day') return dStr === targetDay;
-                  if (filterType === 'month') return dStr.slice(0, 7) === dateFilter.slice(0, 7);
-                  return dStr.slice(0, 4) === dateFilter.slice(0, 4);
-                });
-                if (matchedDocs.length > 0) {
-                  invSnap = {
-                    empty: false,
-                    docs: matchedDocs
-                  } as any;
-                  mode = 'legacy';
-                  ordered = false;
-                }
-              } catch (safeErr) {
-                console.warn('Fallback quét hóa đơn an toàn thất bại:', safeErr);
-              }
-            }
-
-            if (invSnap && !invSnap.empty) {
-              loadedInvoices = invSnap.docs
-                .map((d: any) => ({ ...(d.data() as any), id: d.id } as Invoice))
-                .sort((a: any, b: any) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date));
-              currentEntry.invoices = loadedInvoices;
-              currentEntry.lastInvoiceDoc = invSnap.docs[invSnap.docs.length - 1] || null;
-              currentEntry.hasMoreInvoices = invSnap.docs.length >= 50;
-              currentEntry.invoiceQueryMode = mode;
-              currentEntry.invoiceQueryOrdered = ordered;
-            } else {
-              loadedInvoices = [];
-              currentEntry.invoices = [];
-            }
-          } catch (err) {
-            console.warn('Lỗi tải hóa đơn cửa hàng:', err);
-            delete currentEntry.invoices;
-          }
-        }
-
-        // 3. TẦNG 2: Sổ quỹ nạp on-demand (hoặc khi daily_stats chưa có để tính đúng Tiền mặt / Chuyển khoản trong KPI)
-        let loadedCash: CashTransaction[] = currentEntry.cash || [];
-        const shouldLoadCash = !isViewingTodayOnly && !currentEntry.cash && (
-          activeTab === 'cash' || activeTab === 'financial' || !statsCompleteness.isFullyCovered || loadedStats.length === 0
-        );
-
-        if (shouldLoadCash) {
-          try {
-            let cashSnap: any = null;
-            let mode: 'modern' | 'legacy' = 'modern';
-            let ordered = true;
-
-            // Bước 1: Thử truy vấn modern
-            try {
-              const cashQueryOrdered = buildCashQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', true, null, 50);
-              cashSnap = await getDocs(cashQueryOrdered);
-            } catch (orderErr) {
-              ordered = false;
-              try {
-                const cashQueryFallback = buildCashQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, null, 50);
-                cashSnap = await getDocs(cashQueryFallback);
-              } catch (_) {}
-            }
-
-            // Bước 2: Thử truy vấn dải ngày legacy nếu modern rỗng
-            if ((!cashSnap || cashSnap.empty) && filterType === 'day') {
-              try {
-                const legacyCashQ = buildCashQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'legacy', false, null, 50);
-                const legacySnap = await getDocs(legacyCashQ);
-                if (!legacySnap.empty) {
-                  cashSnap = legacySnap;
-                  mode = 'legacy';
-                  ordered = false;
-                }
-              } catch (_) {}
-            }
-
-            // Bước 3: Fallback an toàn không cần index: Quét theo storeId và lọc theo múi giờ Việt Nam
-            if (!cashSnap || cashSnap.empty) {
-              try {
-                const safeCashQ = query(
-                  collection(db, 'cash_transactions'),
-                  where('storeId', '==', storeId),
-                  limit(300)
-                );
-                const safeSnap = await getDocs(safeCashQ);
-                const targetDay = dateFilter.slice(0, 10);
-                const matchedDocs = safeSnap.docs.filter(d => {
-                  const data = d.data();
-                  const dStr = data.businessDate || getVietnamBusinessDate(data.date);
-                  if (filterType === 'day') return dStr === targetDay;
-                  if (filterType === 'month') return dStr.slice(0, 7) === dateFilter.slice(0, 7);
-                  return dStr.slice(0, 4) === dateFilter.slice(0, 4);
-                });
-                if (matchedDocs.length > 0) {
-                  cashSnap = {
-                    empty: false,
-                    docs: matchedDocs
-                  } as any;
-                  mode = 'legacy';
-                  ordered = false;
-                }
-              } catch (safeErr) {
-                console.warn('Fallback quét sổ quỹ an toàn thất bại:', safeErr);
-              }
-            }
-
-            if (cashSnap && !cashSnap.empty) {
-              loadedCash = cashSnap.docs
-                .map((d: any) => ({ ...(d.data() as any), id: d.id } as CashTransaction))
-                .sort((a: any, b: any) => b.date.localeCompare(a.date));
-              currentEntry.cash = loadedCash;
-              currentEntry.lastCashDoc = cashSnap.docs[cashSnap.docs.length - 1] || null;
-              currentEntry.hasMoreCash = cashSnap.docs.length >= 50;
-              currentEntry.cashQueryMode = mode;
-              currentEntry.cashQueryOrdered = ordered;
-            } else {
-              loadedCash = [];
-              currentEntry.cash = [];
-            }
-          } catch (err) {
-            console.warn('Lỗi tải sổ quỹ:', err);
-            delete currentEntry.cash;
-          }
-        }
-
-        // 4. TẦNG 2: Nhật ký kho chỉ nạp khi mở tab 'inventory'
-        let loadedLogs: InventoryTransaction[] = currentEntry.logs || [];
-        if (activeTab === 'inventory' && !currentEntry.logs) {
-          try {
-            const logQuery = buildLogQuery(storeId, startIso, endExclusiveIso, null, 50);
-            const logSnap = await getDocs(logQuery);
-            loadedLogs = logSnap.docs.map(d => ({ ...(d.data() as any), id: d.id } as InventoryTransaction));
-            currentEntry.logs = loadedLogs;
-            currentEntry.lastLogDoc = logSnap.docs[logSnap.docs.length - 1] || null;
-            currentEntry.hasMoreLogs = logSnap.docs.length >= 50;
-          } catch (err) {
-            console.warn('Lỗi tải nhật ký kho:', err);
-            delete currentEntry.logs;
-            delete currentEntry.lastLogDoc;
-            delete currentEntry.hasMoreLogs;
-          }
-        }
-
-        // 5. TẦNG 2: Bảng lương (payroll_records) nạp độc lập cho kỳ khi mở tab 'financial'
-        let loadedPayrolls: PayrollRecord[] = currentEntry.periodPayrolls || [];
-        if (activeTab === 'financial' && !currentEntry.periodPayrolls) {
-          try {
-            let payQ;
-            if (filterType === 'day' || filterType === 'month') {
-              const mStr = dateFilter.slice(0, 7);
-              payQ = query(
-                collection(db, 'payroll_records'),
-                where('storeId', '==', storeId),
-                where('month', '==', mStr)
-              );
-            } else {
-              const yStr = dateFilter.slice(0, 4);
-              payQ = query(
-                collection(db, 'payroll_records'),
-                where('storeId', '==', storeId),
-                where('month', '>=', `${yStr}-01`),
-                where('month', '<=', `${yStr}-12`)
-              );
-            }
-            const paySnap = await getDocs(payQ);
-            loadedPayrolls = paySnap.docs.map(d => ({ ...(d.data() as any), id: d.id } as PayrollRecord));
-            currentEntry.periodPayrolls = loadedPayrolls;
-          } catch (err) {
-            console.warn('Lỗi tải bảng lương độc lập cho báo cáo tài chính:', err);
-            delete currentEntry.periodPayrolls;
-          }
-        }
-
-        currentEntry.timestamp = Date.now();
-        summaryPeriodCache.set(cacheKey, currentEntry);
-
-        if (currentReq === activeRequestId.current && isMounted) {
-          setDailyStats(loadedStats);
-          if (loadedInvoices) {
-            setHistoricalInvoices(loadedInvoices);
-            setInvoiceQueryConfig({
-              mode: currentEntry.invoiceQueryMode || 'modern',
-              ordered: currentEntry.invoiceQueryOrdered ?? true
-            });
-          }
-          if (loadedPayrolls) {
-            setPeriodPayrolls(loadedPayrolls);
-          }
-          if (loadedCash) {
-            setHistoricalCash(loadedCash);
-            setCashQueryConfig({
-              mode: currentEntry.cashQueryMode || 'modern',
-              ordered: currentEntry.cashQueryOrdered ?? true
-            });
-          }
-          if (loadedLogs) {
-            setHistoricalLogs(loadedLogs);
-          }
-          setHasMoreInvoices(Boolean(currentEntry.hasMoreInvoices));
-          setLastInvoiceDoc(currentEntry.lastInvoiceDoc || null);
-          setHasMoreCash(Boolean(currentEntry.hasMoreCash));
-          setLastCashDoc(currentEntry.lastCashDoc || null);
-          setHasMoreLogs(Boolean(currentEntry.hasMoreLogs));
-          setLastLogDoc(currentEntry.lastLogDoc || null);
-        }
-      } catch (err) {
-        console.warn('Lỗi tổng hợp dữ liệu báo cáo từ Firestore:', err);
-      } finally {
-        if (currentReq === activeRequestId.current && isMounted) {
-          setIsLoadingHistorical(false);
-        }
-      }
-    };
-
-    loadPeriodData();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [currentUser?.storeId, dateFilter, filterType, activeTab, isViewingTodayOnly]);
+    ++activeRequestId.current;
+    setIsLoadingHistorical(true); setReportDataReady(false); setPayrollDataReady(false); setReportError('');
+    setHistoricalInvoices([]); setHistoricalCash([]); setHistoricalLogs([]); setPeriodPayrolls([]); setDailyStats([]);
+    setHasMoreInvoices(false); setHasMoreCash(false); setHasMoreLogs(false);
+    setLastInvoiceDoc(null); setLastCashDoc(null); setLastLogDoc(null);
+    const expected = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
+    if (!expected.length) { setIsLoadingHistorical(false); setReportError('Vui lòng chọn kỳ không vượt quá ngày hiện tại.'); return; }
+    const first = expected[0], last = expected[expected.length-1];
+    let invoicesReady = false, cashReady = false, disposed = false;
+    const updateReady = () => { if(!disposed) {setReportDataReady(invoicesReady && cashReady); if(invoicesReady&&cashReady)setReportError(''); setIsLoadingHistorical(!(invoicesReady && cashReady));} };
+    const error = (err: Error) => { invoicesReady=false;cashReady=false;if(!disposed) { setReportError(err.message || 'Không thể xác nhận đủ chứng từ.'); setReportDataReady(false); setIsLoadingHistorical(false); } };
+    const unsubs = [
+      subscribeDateRange<Invoice>('invoices',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalInvoices(rows);invoicesReady=confirmed;updateReady(); },error),
+      subscribeDateRange<CashTransaction>('cash_transactions',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalCash(rows);cashReady=confirmed;updateReady(); },error)
+    ];
+    if(activeTab==='inventory') unsubs.push(subscribeDateRange<InventoryTransaction>('inventory_logs',storeId,first,last,(rows)=>{ if(!disposed)setHistoricalLogs(rows); },error));
+    if(activeTab==='financial') unsubs.push(onSnapshot(query(collection(db,'payroll_records'),where('storeId','==',storeId)),{includeMetadataChanges:true},snapshot=>{
+      if(disposed)return;
+      const rows=snapshot.docs.map(d=>({...d.data(),id:d.id} as PayrollRecord));
+      setPeriodPayrolls(rows.filter(p=>filterType==='year'?p.month.slice(0,4)===dateFilter.slice(0,4):p.month===dateFilter.slice(0,7)));
+      setPayrollDataReady(!snapshot.metadata.fromCache&&!snapshot.metadata.hasPendingWrites);
+    },error));
+    return () => {disposed=true;unsubs.forEach(fn=>fn());};
+  }, [currentUser?.storeId,dateFilter,filterType,activeTab,todayVietnam]);
 
   // 1. Toàn bộ hóa đơn thuộc kỳ được chọn của cửa hàng (KHÔNG bị lọc bởi ô tìm kiếm) dùng để tính toán số liệu, KPI, COGS
   const periodInvoices = useMemo(() => {
@@ -1215,7 +856,7 @@ export const SummaryView = ({
     const targetYear = dateFilter.slice(0, 4);
 
     return allCashTransactions.filter(t => {
-      const isAuto = t.category === 'Bán hàng' || t.category === 'Nhập hàng' || t.category === 'Trả hàng';
+      const isAuto = isSalesCategory(t.category) || t.category === 'Nhập hàng' || t.category === 'Trả hàng';
       if (!isAdminOrManager && (t.staffId !== currentUser?.id || isAuto)) return false;
 
       const tDateStr = getVietnamBusinessDate(t.date);
@@ -1237,12 +878,13 @@ export const SummaryView = ({
   const itemSales = useMemo(() => {
     const acc: Record<string, { name: string, quantity: number, revenue: number }> = {};
     periodInvoices.forEach(inv => {
-      inv.items.forEach(item => {
+      const revenues=allocatedItemRevenue(inv);
+      (inv.items||[]).forEach((item,index) => {
         if (!acc[item.id]) {
           acc[item.id] = { name: item.name, quantity: 0, revenue: 0 };
         }
         acc[item.id].quantity += item.quantity;
-        acc[item.id].revenue += item.price * item.quantity;
+        acc[item.id].revenue += revenues[index];
       });
     });
     return Object.values(acc).sort((a, b) => b.revenue - a.revenue);
@@ -1251,446 +893,28 @@ export const SummaryView = ({
   const sortedItemSales = itemSales;
 
   // Tổng hợp dữ liệu đa tầng theo từng ngày (Per-day Single Source of Truth, 100% toàn vẹn)
+  const sourceMismatch=useMemo(()=>receiptMismatch(periodInvoices,periodCash),[periodInvoices,periodCash]);
   const statsAggregates = useMemo(() => {
-    let totalRevenue = 0;
-    let totalCash = 0;
-    let totalTransfer = 0;
-    let invoiceCount = 0;
-    let totalDiscount = 0;
-    let totalCost = 0;
-    let totalIncome = 0;
-    let totalExpense = 0;
-
-    let totalCashExpense = 0;
-    let totalTransferExpense = 0;
-    let totalCashIncome = 0;
-    let totalTransferIncome = 0;
-    let expenseInventory = 0;
-    let expenseSalary = 0;
-    let expenseRent = 0;
-    let expenseOther = 0;
-    let hasExpenseBreakdown = false;
-
-    let hasSalesInStats = false;
-    let hasCostInStats = false;
-    let hasExpenseInStats = false;
-    let hasIncomeInStats = false;
-
-    let daysWithSales = 0;
-    let daysWithCompleteCost = 0;
-    let daysWithEstimatedCost = 0;
-    let daysWithMissingCost = 0;
-    let zeroActivityDaysCount = 0;
-    let daysUsingFallbackInvoices = 0;
-    let daysUsingFallbackCash = 0;
-    let missingDaysCount = 0;
-    let reconciledDaysCount = 0;
-    let liveDaysCount = 0;
-
-    const todayStr = businessDate || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-
-    // 1. Xác định toàn bộ danh sách các ngày dự kiến trong kỳ (Expected Dates)
-    const expectedDays = getExpectedPeriodDates(dateFilter, filterType, todayStr);
-
-    // 2. Lập bản đồ cho các nguồn dữ liệu có sẵn
-    const statsMap = new Map<string, DailyStats>();
-    if (dailyStats && dailyStats.length > 0) {
-      dailyStats.forEach(s => statsMap.set(s.date, s));
-    }
-
-    // Nhóm hóa đơn lịch sử theo ngày nghiệp vụ (dùng periodInvoices chuẩn theo kỳ)
-    const invoicesByDay = new Map<string, Invoice[]>();
-    (periodInvoices || []).forEach(inv => {
-      const d = inv.businessDate || getVietnamBusinessDate(inv.date);
-      if (!invoicesByDay.has(d)) invoicesByDay.set(d, []);
-      invoicesByDay.get(d)!.push(inv);
-    });
-
-    // Nhóm sổ quỹ theo ngày nghiệp vụ (dùng periodCash chuẩn theo kỳ)
-    const cashByDay = new Map<string, CashTransaction[]>();
-    (periodCash || []).forEach(c => {
-      const d = c.businessDate || getVietnamBusinessDate(c.date);
-      if (!cashByDay.has(d)) cashByDay.set(d, []);
-      cashByDay.get(d)!.push(c);
-    });
-
-    // 3. Duyệt qua TỪNG NGÀY trong danh sách expectedDays:
-    // NGUYÊN TẮC: Mỗi ngày CHỈ lấy số liệu từ DUY NHẤT 1 NGUỒN CHUẨN XÁC NHẤT
-    expectedDays.forEach(dayStr => {
-      // NGUỒN 1: Nếu là HÔM NAY và listener live đã sẵn sàng: Dùng trực tiếp Live Listener của App
-      if (dayStr === todayStr && isViewingCurrentPeriod && isInvoicesReady) {
-        liveDaysCount++;
-        let dayRev = 0;
-        let dayCash = 0;
-        let dayTransfer = 0;
-        let dayCost = 0;
-        let dayInvCount = 0;
-        let dayHasEstimatedCost = false;
-
-        invoices.forEach(inv => {
-          dayRev += inv.total || 0;
-          if (inv.paymentMethod === 'cash' || !inv.paymentMethod) dayCash += inv.total || 0;
-          else dayTransfer += inv.total || 0;
-          dayInvCount += 1;
-          totalDiscount += (inv.discount || 0);
-
-          const costVal = typeof inv.totalCost === 'number'
-            ? inv.totalCost
-            : calculateInvoiceCost(inv.items || []);
-          dayCost += costVal;
-
-          const items = inv.items || [];
-          const hasEstimated = items.some(i => !(typeof i.costPrice === 'number' && i.costPrice > 0) && (!i.recipe || i.recipe.length === 0));
-          if (hasEstimated) dayHasEstimatedCost = true;
-        });
-
-        totalRevenue += dayRev;
-        totalCash += dayCash;
-        totalTransfer += dayTransfer;
-        invoiceCount += dayInvCount;
-        totalCost += dayCost;
-
-        if (dayInvCount > 0) {
-          hasSalesInStats = true;
-          hasCostInStats = true;
-          daysWithSales++;
-          if (dayHasEstimatedCost) daysWithEstimatedCost++;
-          else daysWithCompleteCost++;
-        } else {
-          zeroActivityDaysCount++;
-        }
-
-        cashTransactions.forEach(c => {
-          const isNonSaleIncome = c.type === 'income' && c.category !== 'Bán hàng';
-          const isExp = c.type === 'expense';
-          const isCash = c.paymentMethod === 'cash' || !c.paymentMethod;
-          const cat = (c.category || '').toLowerCase().trim();
-
-          if (isNonSaleIncome) {
-            totalIncome += c.amount || 0;
-            if (isCash) totalCashIncome += c.amount || 0;
-            else totalTransferIncome += c.amount || 0;
-            hasIncomeInStats = true;
-          }
-          if (isExp) {
-            totalExpense += c.amount || 0;
-            if (isCash) totalCashExpense += c.amount || 0;
-            else totalTransferExpense += c.amount || 0;
-
-            if (cat.includes('nhập hàng') || cat.includes('mua hàng') || cat.includes('nguyên liệu')) {
-              expenseInventory += c.amount || 0;
-            } else if (cat.includes('mặt bằng') || cat.includes('thuê nhà') || cat.includes('tiền nhà')) {
-              expenseRent += c.amount || 0;
-            } else if (cat.includes('lương') || cat.includes('nhân sự') || cat.includes('nhân viên')) {
-              expenseSalary += c.amount || 0;
-            } else {
-              expenseOther += c.amount || 0;
-            }
-            hasExpenseInStats = true;
-            hasExpenseBreakdown = true;
-          }
-        });
-        return;
-      }
-
-      // NGUỒN 2: Có bản ghi trong daily_stats
-      const stat = statsMap.get(dayStr);
-      if (stat && isReconciledDailyStat(stat)) {
-        reconciledDaysCount++;
-
-        const dayRev = stat.totalRevenue || 0;
-        const dayInvCount = stat.invoiceCount || 0;
-        totalRevenue += dayRev;
-        totalCash += stat.totalCash || 0;
-        totalTransfer += stat.totalTransfer || 0;
-        invoiceCount += dayInvCount;
-        totalDiscount += stat.totalDiscount || 0;
-
-        const dayHasSales = dayRev > 0 || dayInvCount > 0;
-        if (dayHasSales) {
-          hasSalesInStats = true;
-          daysWithSales++;
-        }
-
-        if (typeof stat.totalCost === 'number') {
-          totalCost += stat.totalCost;
-          hasCostInStats = true;
-        }
-
-        // Đánh giá trạng thái giá vốn của ngày theo chuẩn chung
-        const dayCostEval = evaluateDailyStatCostStatus(stat);
-        if (dayCostEval === 'complete') {
-          daysWithCompleteCost++;
-        } else if (dayCostEval === 'estimated') {
-          daysWithEstimatedCost++;
-        } else if (dayCostEval === 'missing') {
-          daysWithMissingCost++;
-        } else if (dayCostEval === 'none') {
-          zeroActivityDaysCount++;
-        }
-
-        const dayIncome = stat.totalIncome || 0;
-        totalIncome += dayIncome;
-        if (dayIncome > 0) hasIncomeInStats = true;
-
-        // TÁCH BIỆT: Phân loại thu tiền mặt / chuyển khoản KHÔNG phụ thuộc vào việc có chi hay không
-        if (typeof stat.cashIncome === 'number' || typeof stat.transferIncome === 'number') {
-          const cInc = stat.cashIncome || 0;
-          const tInc = stat.transferIncome || 0;
-          totalCashIncome += cInc;
-          totalTransferIncome += tInc;
-          const incDiff = dayIncome - (cInc + tInc);
-          if (incDiff > 0) {
-            totalCashIncome += incDiff; // Mặc định khoản thu ngoài bán hàng chưa rõ phương thức vào tiền mặt
-          }
-        } else if (dayIncome > 0) {
-          totalCashIncome += dayIncome;
-        }
-
-        const dayExp = stat.totalExpense || 0;
-        totalExpense += dayExp;
-        if (dayExp > 0) {
-          hasExpenseInStats = true;
-          hasExpenseBreakdown = true;
-        }
-
-        // TÁCH BIỆT: Phân loại chi tiền mặt / chuyển khoản
-        if (typeof stat.cashExpense === 'number' || typeof stat.transferExpense === 'number') {
-          const cExp = stat.cashExpense || 0;
-          const tExp = stat.transferExpense || 0;
-          totalCashExpense += cExp;
-          totalTransferExpense += tExp;
-          const expDiff = dayExp - (cExp + tExp);
-          if (expDiff > 0) {
-            totalCashExpense += expDiff; // Mặc định khoản chi chưa rõ phương thức vào tiền mặt
-          }
-        } else if (dayExp > 0) {
-          totalCashExpense += dayExp;
-        }
-
-        // TÁCH BIỆT: Phân loại nhóm chi phí & Tự động phân bổ chi legacy chưa phân loại
-        const eInv = stat.expenseInventory || 0;
-        const eSal = stat.expenseSalary || 0;
-        const eRent = stat.expenseRent || 0;
-        let eOth = stat.expenseOther || 0;
-
-        // INVARIANT FIX: Nếu tổng chi lớn hơn tổng 4 nhóm phân loại (VD: aggregate cũ chỉ lưu totalExpense mà không phân loại)
-        const categorizedTotal = eInv + eSal + eRent + eOth;
-        const unclassifiedAmount = dayExp - categorizedTotal;
-        if (unclassifiedAmount > 0) {
-          // Toàn bộ chi phí chưa phân loại được phân bổ vào Chi phí khác / Vận hành để đảm bảo tổng các nhóm luôn đúng bằng totalExpense
-          eOth += unclassifiedAmount;
-        }
-
-        expenseInventory += eInv;
-        expenseSalary += eSal;
-        expenseRent += eRent;
-        expenseOther += eOth;
-        return;
-      }
-
-      // NGUỒN 3: Không có daily_stats, nhưng có chứng từ trong historicalInvoices hoặc historicalCash đã nạp
-      const dayInvs = invoicesByDay.get(dayStr) || [];
-      const dayCashTxs = cashByDay.get(dayStr) || [];
-
-      if (dayInvs.length > 0 || dayCashTxs.length > 0) {
-        if (dayInvs.length > 0) daysUsingFallbackInvoices++;
-        if (dayCashTxs.length > 0) daysUsingFallbackCash++;
-
-        let dayRev = 0;
-        let dayCash = 0;
-        let dayTransfer = 0;
-        let dayCost = 0;
-        let dayInvCount = 0;
-        let dayHasEstimatedCost = false;
-
-        dayInvs.forEach(inv => {
-          dayRev += inv.total || 0;
-          if (inv.paymentMethod === 'cash' || !inv.paymentMethod) dayCash += inv.total || 0;
-          else dayTransfer += inv.total || 0;
-          dayInvCount += 1;
-          totalDiscount += (inv.discount || 0);
-
-          const costVal = typeof inv.totalCost === 'number'
-            ? inv.totalCost
-            : calculateInvoiceCost(inv.items || []);
-          dayCost += costVal;
-
-          const items = inv.items || [];
-          const hasEstimated = items.some(i => !(typeof i.costPrice === 'number' && i.costPrice > 0) && (!i.recipe || i.recipe.length === 0));
-          if (hasEstimated) dayHasEstimatedCost = true;
-        });
-
-        totalRevenue += dayRev;
-        totalCash += dayCash;
-        totalTransfer += dayTransfer;
-        invoiceCount += dayInvCount;
-        totalCost += dayCost;
-
-        if (dayInvCount > 0) {
-          hasSalesInStats = true;
-          hasCostInStats = true;
-          daysWithSales++;
-          if (dayHasEstimatedCost) daysWithEstimatedCost++;
-          else daysWithCompleteCost++;
-        } else {
-          zeroActivityDaysCount++;
-        }
-
-        dayCashTxs.forEach(c => {
-          const isNonSaleIncome = c.type === 'income' && c.category !== 'Bán hàng';
-          const isExp = c.type === 'expense';
-          const isCash = c.paymentMethod === 'cash' || !c.paymentMethod;
-          const cat = (c.category || '').toLowerCase().trim();
-
-          if (isNonSaleIncome) {
-            totalIncome += c.amount || 0;
-            if (isCash) totalCashIncome += c.amount || 0;
-            else totalTransferIncome += c.amount || 0;
-            hasIncomeInStats = true;
-          }
-          if (isExp) {
-            totalExpense += c.amount || 0;
-            if (isCash) totalCashExpense += c.amount || 0;
-            else totalTransferExpense += c.amount || 0;
-
-            if (cat.includes('nhập hàng') || cat.includes('mua hàng') || cat.includes('nguyên liệu')) {
-              expenseInventory += c.amount || 0;
-            } else if (cat.includes('mặt bằng') || cat.includes('thuê nhà') || cat.includes('tiền nhà')) {
-              expenseRent += c.amount || 0;
-            } else if (cat.includes('lương') || cat.includes('nhân sự') || cat.includes('nhân viên')) {
-              expenseSalary += c.amount || 0;
-            } else {
-              expenseOther += c.amount || 0;
-            }
-            hasExpenseInStats = true;
-            hasExpenseBreakdown = true;
-          }
-        });
-        return;
-      }
-
-      // NGUỒN 4: Ngày hoàn toàn chưa có số liệu tổng hợp trong daily_stats và chưa nạp chứng từ
-      missingDaysCount++;
-    });
-
-    // INVARIANT NORMALIZATION:
-    // Đảm bảo:
-    // 1) Thu ngoài bán hàng khớp 100% giữa tổng và từng phương thức
-    const nonSaleDiff = totalIncome - (totalCashIncome + totalTransferIncome);
-    if (nonSaleDiff !== 0) {
-      totalCashIncome += nonSaleDiff;
-    }
-    // 2) Chi phí thanh toán khớp 100% giữa tổng và phương thức
-    const expPayDiff = totalExpense - (totalCashExpense + totalTransferExpense);
-    if (expPayDiff !== 0) {
-      totalCashExpense += expPayDiff;
-    }
-    // 3) Chi phí nhóm loại khớp 100% với tổng chi phí (phân bổ unclassified vào expenseOther)
-    const expCatDiff = totalExpense - (expenseInventory + expenseSalary + expenseRent + expenseOther);
-    if (expCatDiff !== 0) {
-      expenseOther += expCatDiff;
-    }
-
-    // 4. XÁC ĐỊNH CHUẨN XÁC TRẠNG THÁI GIÁ VỐN TOÀN KỲ:
-    // Nếu dựa vào hóa đơn thô (Nguồn 3) mà hasMoreInvoices = true thì tập dữ liệu CHƯA ĐẦY ĐỦ (chưa exhausted)
-    const isInvoiceDataIncomplete = daysUsingFallbackInvoices > 0 && hasMoreInvoices;
-    const isCashDataIncomplete = daysUsingFallbackCash > 0 && hasMoreCash;
-
-    let costStatus: 'complete' | 'estimated' | 'partial' | 'missing' = 'missing';
-    if (daysWithSales === 0) {
-      // Toàn bộ kỳ không có bán hàng -> Giá vốn 0đ là đầy đủ và chính xác 100%
-      costStatus = 'complete';
-    } else if (missingDaysCount > 0 || daysWithMissingCost > 0 || isInvoiceDataIncomplete) {
-      // Có ngày thiếu dữ liệu, ngày bán hàng bị thiếu giá vốn, hoặc mới chỉ tải 1 trang phân trang (hasMoreInvoices = true)
-      costStatus = 'partial';
-    } else if (daysWithEstimatedCost > 0) {
-      // Tất cả ngày có bán hàng đều có giá vốn, nhưng có ngày là ước tính
-      costStatus = 'estimated';
-    } else if (daysWithCompleteCost === daysWithSales) {
-      // 100% các ngày có bán hàng đều có giá vốn hoàn chỉnh (complete) và đã nạp trọn vẹn
-      costStatus = 'complete';
-    } else {
-      costStatus = 'partial';
-    }
-
-    // 5. XÁC ĐỊNH CHUẨN XÁC TRẠNG THÁI TOÀN VẸN TOÀN KỲ (Coverage Status):
-    let coverageStatus: 'reconciled' | 'partial' = 'partial';
-    const isDataFullyExhausted = !isInvoiceDataIncomplete && !isCashDataIncomplete;
-    if (missingDaysCount === 0 && isDataFullyExhausted) {
-      if (reconciledDaysCount === expectedDays.length || (isViewingCurrentPeriod && (reconciledDaysCount + liveDaysCount === expectedDays.length))) {
-        coverageStatus = 'reconciled';
-      } else if (reconciledDaysCount + liveDaysCount + daysUsingFallbackInvoices + zeroActivityDaysCount >= expectedDays.length) {
-        // Toàn bộ các ngày trong kỳ đã được bao phủ và dữ liệu chứng từ đã tải trọn vẹn (exhausted)
-        coverageStatus = 'reconciled';
-      }
-    }
-
-    const hasAnyData = hasSalesInStats || hasCostInStats || hasExpenseInStats || hasIncomeInStats || (expectedDays.length > 0 && missingDaysCount < expectedDays.length);
-
-    return hasAnyData ? {
-      totalRevenue,
-      totalCash,
-      totalTransfer,
-      invoiceCount,
-      totalDiscount,
-      totalCost,
-      totalIncome,
-      totalExpense,
-      cashExpense: totalCashExpense,
-      transferExpense: totalTransferExpense,
-      cashIncome: totalCashIncome,
-      transferIncome: totalTransferIncome,
-      expenseInventory,
-      expenseSalary,
-      expenseRent,
-      expenseOther,
-      hasExpenseBreakdown,
-      costStatus,
-      coverageStatus,
-      missingDaysCount,
-      reconciledDaysCount,
-      daysWithSales,
-      daysWithCompleteCost,
-      daysWithEstimatedCost,
-      daysWithMissingCost,
-      zeroActivityDaysCount,
-      daysUsingFallbackInvoices,
-      daysUsingFallbackCash,
-      isInvoicePartial: isInvoiceDataIncomplete || missingDaysCount > 0,
-      isCashPartial: isCashDataIncomplete || (missingDaysCount > 0 && !hasExpenseInStats),
-      hasSalesInStats,
-      hasCostInStats,
-      hasExpenseInStats,
-      hasIncomeInStats
-    } : null;
-  }, [
-    dailyStats,
-    isViewingCurrentPeriod,
-    isInvoicesReady,
-    invoices,
-    cashTransactions,
-    businessDate,
-    historicalInvoices,
-    periodInvoices,
-    periodCash,
-    hasMoreInvoices,
-    hasMoreCash,
-    filterType,
-    dateFilter,
-    isViewingTodayOnly
-  ]);
+    const dates=getExpectedPeriodDates(dateFilter,filterType,todayVietnam).filter(d=>d<=todayVietnam);
+    let stats: DailyStats[];
+    try { stats=dailyStatsFromSources(currentUser?.storeId||'',dates,periodInvoices,periodCash,reportDataReady); }
+    catch { return null; }
+    const totals:any={totalRevenue:0,totalCash:0,totalTransfer:0,invoiceCount:0,totalDiscount:0,totalCost:0,totalIncome:0,totalExpense:0,cashExpense:0,transferExpense:0,cashIncome:0,transferIncome:0,expenseInventory:0,expenseSalary:0,expenseRent:0,expenseOther:0};
+    for(const stat of stats)for(const key of Object.keys(totals))totals[key]+=Number((stat as any)[key])||0;
+    const sales=periodInvoices.filter(i=>i.status!=='cancelled');
+    return {...totals,hasExpenseBreakdown:true,costStatus:!reportDataReady?'partial':sales.every(invoiceCostIsComplete)?'complete':'estimated',coverageStatus:reportDataReady&&!sourceMismatch?'reconciled':'partial',missingDaysCount:reportDataReady?0:dates.length,reconciledDaysCount:reportDataReady?dates.length:0,daysWithSales:stats.filter(s=>s.invoiceCount>0).length,daysWithCompleteCost:stats.filter(s=>s.invoiceCount>0&&s.costStatus==='complete').length,daysWithEstimatedCost:stats.filter(s=>s.costStatus==='estimated').length,daysWithMissingCost:0,zeroActivityDaysCount:stats.filter(s=>!s.hasData).length,daysUsingFallbackInvoices:0,daysUsingFallbackCash:0,isInvoicePartial:!reportDataReady,isCashPartial:!reportDataReady,hasSalesInStats:sales.length>0,hasCostInStats:reportDataReady,hasExpenseInStats:totals.totalExpense>0,hasIncomeInStats:totals.totalIncome>0};
+  },[periodInvoices,periodCash,reportDataReady,dateFilter,filterType,todayVietnam,currentUser?.storeId,sourceMismatch]);
 
   // Cash Book Stats - Tính toán chuẩn xác: Tổng thu = salesReceipts + nonSaleIncome
   const cashStats = useMemo(() => {
     const filterDate = parseISO(dateFilter);
     // 1. Thu ngoài bán hàng (Non-sale income)
     const nonSaleCashIncomeFromList = filteredCash
-      .filter(t => t.type === 'income' && t.category !== 'Bán hàng' && (t.paymentMethod === 'cash' || !t.paymentMethod))
+      .filter(t => t.type === 'income' && !isSalesCategory(t.category) && (t.paymentMethod === 'cash' || !t.paymentMethod))
       .reduce((sum, t) => sum + t.amount, 0);
 
     const nonSaleBankIncomeFromList = filteredCash
-      .filter(t => t.type === 'income' && t.category !== 'Bán hàng' && t.paymentMethod === 'transfer')
+      .filter(t => t.type === 'income' && !isSalesCategory(t.category) && !isCashPayment(t.paymentMethod))
       .reduce((sum, t) => sum + t.amount, 0);
 
     const nonSaleCashIncome = (statsAggregates && typeof statsAggregates.cashIncome === 'number')
@@ -1707,16 +931,16 @@ export const SummaryView = ({
 
     // 2. Thu từ bán hàng (Sales receipts)
     const filteredCashSalesInTx = filteredCash
-      .filter(t => t.type === 'income' && t.category === 'Bán hàng' && (t.paymentMethod === 'cash' || !t.paymentMethod))
+      .filter(t => t.type === 'income' && isSalesCategory(t.category) && (t.paymentMethod === 'cash' || !t.paymentMethod))
       .reduce((sum, t) => sum + t.amount, 0);
 
     const filteredBankSalesInTx = filteredCash
-      .filter(t => t.type === 'income' && t.category === 'Bán hàng' && t.paymentMethod === 'transfer')
+      .filter(t => t.type === 'income' && isSalesCategory(t.category) && !isCashPayment(t.paymentMethod))
       .reduce((sum, t) => sum + t.amount, 0);
 
     // Ưu tiên nguồn bán hàng đầy đủ từ statsAggregates (toàn bộ kỳ, không bị giới hạn 30 bản ghi)
-    const cashSalesAmount = statsAggregates ? statsAggregates.totalCash : filteredCashSalesInTx;
-    const bankSalesAmount = statsAggregates ? statsAggregates.totalTransfer : filteredBankSalesInTx;
+    const cashSalesAmount = filteredCashSalesInTx;
+    const bankSalesAmount = filteredBankSalesInTx;
     const salesReceipts = cashSalesAmount + bankSalesAmount;
 
     // 3. Tiền vào theo phương thức: Bán hàng + Thu ngoài bán hàng tương ứng
@@ -1731,7 +955,7 @@ export const SummaryView = ({
       .filter(t => t.type === 'expense' && (t.paymentMethod === 'cash' || !t.paymentMethod))
       .reduce((sum, t) => sum + t.amount, 0);
     const bankExpensesFromList = filteredCash
-      .filter(t => t.type === 'expense' && t.paymentMethod === 'transfer')
+      .filter(t => t.type === 'expense' && !isCashPayment(t.paymentMethod))
       .reduce((sum, t) => sum + t.amount, 0);
 
     // Chi phí phân bổ theo phương thức từ statsAggregates nếu có số liệu toàn kỳ
@@ -1745,22 +969,12 @@ export const SummaryView = ({
 
     const totalExpense = totalCashExpense + totalTransferExpense;
 
-    // 5. Tiền đầu ca / đầu ngày xác định chính xác theo ca làm việc của ngày đó:
-    let openingCash = 0;
-    if (filterType === 'day') {
-      const matchShifts = (shifts || []).filter(s => s.startTime && isSameDay(parseISO(s.startTime), filterDate));
-      if (matchShifts.length > 0) {
-        openingCash = matchShifts.reduce((sum, s) => sum + (s.startCash || 0), 0);
-      } else if (isSameDay(filterDate, new Date()) && activeShift?.startCash) {
-        openingCash = activeShift.startCash;
-      }
-    }
-
-    const openingBalance = openingCash;
-    const closingBalance = openingBalance + totalIncome - totalExpense;
-    // Cân đối hoàn hảo: Số dư tiền mặt & ngân hàng khớp 100% với tồn quỹ toàn kỳ (cashBalance + bankBalance === closingBalance)
-    const cashBalance = openingCash + periodCashIncome - totalCashExpense;
-    const bankBalance = periodBankIncome - totalTransferExpense;
+    // These are period movements. A real carried-forward balance requires a
+    // reconciled account ledger; summing successive shift floats double-counts cash.
+    const openingBalance=0;
+    const closingBalance=totalIncome-totalExpense;
+    const cashBalance=periodCashIncome-totalCashExpense;
+    const bankBalance=periodBankIncome-totalTransferExpense;
 
     return {
       openingBalance,
@@ -1784,6 +998,7 @@ export const SummaryView = ({
   }, [filteredCash, cashFilterType]);
 
   const exportToExcel = () => {
+    if (!reportDataReady || isLoadingHistorical || sourceMismatch) { alert('Chưa xác nhận đủ chứng từ từ server. Vui lòng đợi đồng bộ hoặc kết nối lại trước khi xuất.'); return; }
     let dataToExport = [];
     let fileName = '';
 
@@ -1929,12 +1144,7 @@ export const SummaryView = ({
   // 1. Nhân sự (Labor Cost):
   // Ưu tiên 1: Bảng lương đã chốt của kỳ (periodPayrolls nạp độc lập từ Firestore)
   // Ưu tiên 2: props.payrollRecords nếu có
-  const effectivePayrolls = periodPayrolls.length > 0 ? periodPayrolls : (payrollRecords || []).filter(p => {
-    const pDate = parseISO(p.month + '-01');
-    const filterDate = parseISO(dateFilter);
-    if (filterType === 'day' || filterType === 'month') return isSameMonth(pDate, filterDate);
-    return isSameYear(pDate, filterDate);
-  });
+  const effectivePayrolls = periodPayrolls;
   const accruedPayrollTotal = effectivePayrolls.reduce((sum, p) => sum + (p.totalSalary || 0), 0);
 
   // Tính chi phí lương bằng tiền mặt từ cashTransactions / statsAggregates
@@ -1944,7 +1154,7 @@ export const SummaryView = ({
 
   // NGUYÊN TẮC: Nếu đã có bảng lương chốt thì dùng bảng lương chốt (kế toán dồn tích);
   // Nếu chưa chốt bảng lương thì dùng phiếu chi lương thực tế; TUYỆT ĐỐI KHÔNG CỘNG CẢ HAI!
-  let laborCost = accruedPayrollTotal > 0 ? accruedPayrollTotal : cashSalaryExpense;
+  let laborCost = financialCostBasis==='payroll' ? accruedPayrollTotal : cashSalaryExpense;
 
   // 2. Chi phí mặt bằng (Rent Cost):
   const cashRentExpense = statsAggregates?.expenseRent !== undefined
@@ -1966,10 +1176,11 @@ export const SummaryView = ({
       }).reduce((sum, t) => sum + t.amount, 0);
   let otherOperatingCost = cashOtherExpense;
 
-  // Với chế độ xem theo ngày (day): các chi phí cố định tháng (lương, mặt bằng) được chia đều 30 ngày để ước tính
-  if (filterType === 'day') {
-    laborCost = laborCost / 30;
-    rentCost = rentCost / 30;
+  // Monthly finalized payroll may be allocated across actual calendar days.
+  // A cash payment already selected for this day must never be divided again.
+  if (filterType === 'day' && financialCostBasis==='payroll') {
+    const [year,month]=dateFilter.slice(0,7).split('-').map(Number);
+    laborCost=accruedPayrollTotal/new Date(year,month,0).getDate();
   }
 
   // Alias để tương thích giao diện hiển thị
@@ -2006,36 +1217,27 @@ export const SummaryView = ({
 
   const totalPages = (data: any[]) => Math.ceil(data.length / rowsPerPage);
 
-  const handleAddCash = () => {
-    if (!currentUser || !showAddCashModal) return;
-    const trimmedCat = newCash.category.trim();
-    if (trimmedCat) {
-      const currentCats = settings.cashCategories && settings.cashCategories.length > 0
-        ? settings.cashCategories
-        : ['Bán hàng', 'Tiền điện', 'Tiền nước', 'Tiền mặt bằng', 'Nhập hàng', 'Lương nhân viên', 'Khác'];
-      if (!currentCats.some(c => c.toLowerCase() === trimmedCat.toLowerCase())) {
-        onUpdateSettings({
-          ...settings,
-          cashCategories: [...currentCats, trimmedCat]
-        });
-      }
-    }
-    onAddCashTransaction({
-      date: new Date().toISOString(),
-      type: showAddCashModal,
-      amount: newCash.amount,
-      paymentMethod: newCash.paymentMethod,
-      category: trimmedCat || (showAddCashModal === 'income' ? 'Thu khác' : 'Chi khác'),
-      note: newCash.note,
-      staffId: currentUser.id,
-      staffName: currentUser.name
-    });
-    setShowAddCashModal(null);
-    setNewCash({ amount: 0, paymentMethod: 'cash', category: '', note: '' });
+  const handleAddCash = async () => {
+    if (!currentUser || !showAddCashModal || isSavingCash) return;
+    if (!Number.isFinite(newCash.amount) || newCash.amount <= 0) { alert('Số tiền phải lớn hơn 0.'); return; }
+    const category=newCash.category.trim() || (showAddCashModal==='income'?'Thu khác':'Chi khác');
+    if(isSalesCategory(category)) {alert('Thu bán hàng được tạo từ hóa đơn. Hãy chọn hạng mục thu khác cho khoản thu thủ công.');return;}
+    const signature=JSON.stringify({...newCash,category,type:showAddCashModal});
+    if(cashOperationRef.current?.signature!==signature)cashOperationRef.current={id:operationId('cash'),date:new Date().toISOString(),signature};
+    setIsSavingCash(true);
+    try {
+      await onAddCashTransaction({date:cashOperationRef.current!.date,type:showAddCashModal,amount:newCash.amount,paymentMethod:newCash.paymentMethod,category,note:newCash.note,staffId:currentUser.id,staffName:currentUser.name},cashOperationRef.current!.id);
+      setShowAddCashModal(null);setNewCash({amount:0,paymentMethod:'cash',category:'',note:''});cashOperationRef.current=null;
+    } catch(error) {alert(error instanceof Error?error.message:'Không thể lưu phiếu. Nội dung đã được giữ để thử lại.');}
+    finally {setIsSavingCash(false);}
   };
 
   return (
     <div className="p-8 space-y-6 h-full overflow-y-auto">
+      {activeTab==='items'&&periodInvoices.some(i=>i.total>0&&!i.items?.length)&&<div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Có hóa đơn thiếu chi tiết món. Thống kê theo món chưa đầy đủ; cần đối soát hóa đơn gốc.</div>}
+      {sourceMismatch && <div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{sourceMismatch}</div>}
+      {(!reportDataReady || reportError) && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{reportError || 'Đang đồng bộ toàn bộ chứng từ. Số liệu dưới đây chưa được xác nhận đầy đủ; chưa thể xuất báo cáo.'}</div>}
+      {activeTab === 'financial' && <div className="text-sm text-gray-500">Lợi nhuận dùng doanh thu gồm VAT theo hóa đơn; doanh thu món là trước VAT, sau giảm giá. Lương: {financialCostBasis==='payroll' ? 'tạm tính theo các bảng lương đã chốt; chưa bao gồm nhân viên chưa chốt, phân bổ theo ngày khi xem ngày' : 'theo phiếu chi lương thực tế trong kỳ'}. {financialCostBasis==='payroll'&&!payrollDataReady ? 'Bảng lương đang đồng bộ.' : ''}<select className="ml-2 rounded border bg-transparent p-1" value={financialCostBasis} onChange={event=>setFinancialCostBasis(event.target.value as 'cash'|'payroll')}><option value="cash">Chi lương thực tế</option><option value="payroll">Bảng lương đã chốt (tạm tính)</option></select></div>}
       <div className="flex justify-between items-center">
         <div className="flex items-center gap-4">
           <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
@@ -2065,8 +1267,8 @@ export const SummaryView = ({
         isAdminOrManager ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
-              <p className="text-xs text-gray-500 uppercase font-bold">Quỹ đầu kỳ</p>
-              <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-gray-600 dark:text-gray-400">{cashStats.openingBalance.toLocaleString('vi-VN')}đ</p>
+              <p className="text-xs text-gray-500 uppercase font-bold">Số dư đầu kỳ chưa đối soát</p>
+              <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-gray-600 dark:text-gray-400">Chưa đối soát</p>
             </div>
             <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
               <p className="text-xs text-gray-500 uppercase font-bold">Tổng thu</p>
@@ -2077,7 +1279,7 @@ export const SummaryView = ({
               <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-rose-600 dark:text-rose-500">-{cashStats.totalExpense.toLocaleString('vi-VN')}đ</p>
             </div>
             <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
-              <p className="text-xs text-gray-500 uppercase font-bold">Tồn quỹ</p>
+              <p className="text-xs text-gray-500 uppercase font-bold">Thu − chi trong kỳ</p>
               <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-blue-600 dark:text-blue-500">{cashStats.closingBalance.toLocaleString('vi-VN')}đ</p>
             </div>
           </div>
@@ -2776,7 +1978,7 @@ export const SummaryView = ({
                   </div>
                 </div>
                 <div className="pt-4 border-t border-black/5 dark:border-white/5 flex justify-between items-center">
-                  <p className="text-gray-600 dark:text-gray-400">Lợi nhuận ròng ({netMargin.toFixed(1)}%)</p>
+                  <p className="text-gray-600 dark:text-gray-400">Lợi nhuận ròng {financialCostBasis==='payroll'?'tạm tính ':''}({netMargin.toFixed(1)}%)</p>
                   <p className={cn("text-xl md:text-2xl lg:text-3xl font-mono font-bold truncate", netMargin >= 15 ? "text-emerald-600 dark:text-emerald-500" : netMargin > 0 ? "text-amber-600 dark:text-amber-500" : "text-rose-600 dark:text-rose-500")}>
                     {isCostUnavailable ? '—' : `${netProfit.toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ`}
                   </p>
@@ -2884,11 +2086,11 @@ export const SummaryView = ({
               {isAdminOrManager && (
               <div className="flex gap-4">
                 <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2">
-                  <p className="text-[10px] text-gray-500 uppercase font-bold">Tiền mặt</p>
+                  <p className="text-[10px] text-gray-500 uppercase font-bold">Phát sinh ròng tiền mặt</p>
                   <p className="text-sm font-mono font-bold text-emerald-600 dark:text-emerald-500">{cashStats.cashBalance.toLocaleString('vi-VN')}đ</p>
                 </div>
                 <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2">
-                  <p className="text-[10px] text-gray-500 uppercase font-bold">Ngân hàng</p>
+                  <p className="text-[10px] text-gray-500 uppercase font-bold">Phát sinh ròng chuyển khoản</p>
                   <p className="text-sm font-mono font-bold text-blue-600 dark:text-blue-500">{cashStats.bankBalance.toLocaleString('vi-VN')}đ</p>
                 </div>
               </div>
@@ -3200,19 +2402,6 @@ export const SummaryView = ({
                     if (deleted !== true) return;
                     setHistoricalInvoices(prev => prev.filter(inv => inv.id !== deletedId));
                     setHistoricalCash(prev => prev.filter(c => (c as any).invoiceId !== deletedId));
-                    setDailyStats(prev => prev.map(s => {
-                      if (s.date === invDateStr) {
-                        return {
-                          ...s,
-                          totalRevenue: Math.max(0, (s.totalRevenue || 0) - confirmDeleteInvoice.total),
-                          totalCash: Math.max(0, (s.totalCash || 0) - (confirmDeleteInvoice.paymentMethod === 'cash' ? confirmDeleteInvoice.total : 0)),
-                          totalTransfer: Math.max(0, (s.totalTransfer || 0) - (confirmDeleteInvoice.paymentMethod === 'transfer' ? confirmDeleteInvoice.total : 0)),
-                          invoiceCount: Math.max(0, (s.invoiceCount || 0) - 1),
-                          totalDiscount: Math.max(0, (s.totalDiscount || 0) - (confirmDeleteInvoice.discount || 0))
-                        };
-                      }
-                      return s;
-                    }));
                     summaryPeriodCache.clear();
                     setConfirmDeleteInvoice(null);
                   } catch (err) {
@@ -3382,6 +2571,7 @@ export const SummaryView = ({
 
             <button 
               onClick={handleAddCash}
+              disabled={isSavingCash}
               className={cn(
                 "w-full py-4 rounded-xl font-bold transition-all shadow-lg",
                 showAddCashModal === 'income' ? "bg-emerald-500 text-white shadow-emerald-500/20" : "bg-rose-500 text-white shadow-rose-500/20"

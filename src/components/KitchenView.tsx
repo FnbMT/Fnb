@@ -295,7 +295,7 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
       return o;
     });
 
-    await onUpdateTableOrders(table.id, updatedOrders);
+    try { await onUpdateTableOrders(table.id, updatedOrders); } catch(error) { alert(error instanceof Error ? error.message : 'Không thể cập nhật món; vui lòng thử lại.'); }
   };
 
   // Handler: Toggle single item completion
@@ -331,7 +331,7 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
       return o;
     });
 
-    await onUpdateTableOrders(table.id, updatedOrders);
+    try { await onUpdateTableOrders(table.id, updatedOrders); } catch(error) { alert(error instanceof Error ? error.message : 'Không thể cập nhật món; vui lòng thử lại.'); }
   };
 
   // Handler: Re-print Kitchen Ticket

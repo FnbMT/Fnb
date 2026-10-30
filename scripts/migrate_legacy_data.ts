@@ -1,4 +1,5 @@
 import { adminDb } from '../api/_firebaseAdmin';
+import { randomUUID } from 'node:crypto';
 
 export function getVietnamBusinessDate(dateStr?: string | Date): string {
   try {
@@ -63,7 +64,8 @@ export function classifyMenuItem(item: any, recipeIngredientIds: Set<string>): b
 
 export function calculateInvoiceCost(items: any[]): { totalCost: number; hasEstimated: boolean } {
   if (!items || !Array.isArray(items)) return { totalCost: 0, hasEstimated: false };
-  let hasEstimated = false;
+  // Reconstructing a legacy cost cannot certify historical ingredient/add-on prices.
+  let hasEstimated = items.length > 0;
 
   const totalCost = items.reduce((sum, item) => {
     const costPrice = Number(item.costPrice);
@@ -226,7 +228,8 @@ export async function migrateStoreInvoices(storeId: string, options: MigrationOp
       const inv = docSnap.data();
       const updates: Record<string, any> = {};
 
-      const vnDate = inv.businessDate || getVietnamBusinessDate(inv.date || new Date().toISOString());
+      if(!inv.businessDate && (!inv.date || !Number.isFinite(Date.parse(inv.date)))) throw new Error(`Hóa đơn ${docSnap.id} thiếu ngày hợp lệ; không tự gán ngày hôm nay.`);
+      const vnDate = inv.businessDate || getVietnamBusinessDate(inv.date);
       if (!inv.businessDate) updates.businessDate = vnDate;
       if (!inv.businessMonth) updates.businessMonth = vnDate.slice(0, 7);
       if (!inv.businessYear) updates.businessYear = parseInt(vnDate.slice(0, 4), 10);
@@ -395,30 +398,19 @@ export async function migrateStoreCash(storeId: string, options: MigrationOption
 }
 
 // Khóa tác vụ theo quán để đảm bảo an toàn tuyệt đối
-export async function acquireStoreLock(storeId: string): Promise<boolean> {
-  const lockRef = adminDb.doc(`migration_locks/${storeId}`);
-  const snap = await lockRef.get();
-  if (snap.exists) {
-    const data = snap.data();
-    const lockTime = new Date(data.lockedAt || 0).getTime();
-    const now = Date.now();
-    // Khóa có hiệu lực tối đa 15 phút để tự phục hồi khi crash
-    if (now - lockTime < 15 * 60 * 1000) {
-      return false;
-    }
-  }
-  await lockRef.set({
-    storeId,
-    lockedAt: new Date().toISOString(),
-    lockedBy: 'migration_job'
+export async function acquireStoreLock(storeId: string): Promise<string | null> {
+  const ref=adminDb.doc(`migration_locks/${storeId}`),token=randomUUID();
+  return adminDb.runTransaction(async txn=>{
+    const snap=await txn.get(ref),data=snap.data();
+    if(data&&Date.now()-Date.parse(data.lockedAt||'')<15*60*1000)return null;
+    txn.set(ref,{storeId,lockedAt:new Date().toISOString(),lockedBy:'migration_job',token});
+    return token;
   });
-  return true;
 }
-
-export async function releaseStoreLock(storeId: string) {
-  try {
-    await adminDb.doc(`migration_locks/${storeId}`).delete();
-  } catch (err) {
-    console.warn('[LOCK] Không thể giải phóng lock:', err);
-  }
+export async function releaseStoreLock(storeId: string, token: string) {
+  const ref=adminDb.doc(`migration_locks/${storeId}`);
+  await adminDb.runTransaction(async txn=>{
+    const snap=await txn.get(ref);
+    if(snap.exists&&snap.data()?.token===token)txn.delete(ref);
+  });
 }

@@ -44,6 +44,8 @@ export const CustomerView = ({
       setRemoteResults([]);
       return;
     }
+    let active=true;
+    setRemoteResults([]);
     const cleanSearch = search.trim();
     const timer = setTimeout(async () => {
       try {
@@ -55,15 +57,15 @@ export const CustomerView = ({
         );
         const snap = await getDocs(q);
         const found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
-        setRemoteResults(found);
+        if(active)setRemoteResults(found);
       } catch (err) {
         console.warn('Lỗi tìm kiếm khách hàng từ xa:', err);
       } finally {
-        setIsSearchingRemote(false);
+        if(active)setIsSearchingRemote(false);
       }
     }, 350);
 
-    return () => clearTimeout(timer);
+    return () => {active=false;clearTimeout(timer);};
   }, [search, currentUser?.storeId]);
 
   const allDisplayCustomers = useMemo(() => {

@@ -2,11 +2,13 @@ import React, { useState, useMemo } from 'react';
 import { UserPlus, Search, Shield, User as UserIcon, Trash2, Key, Phone, CreditCard, MapPin, DollarSign, Clock, Calendar, CheckCircle2, XCircle, Plus, Minus, Edit2 } from 'lucide-react';
 import { User, UserRole, AttendanceRecord, PayrollRecord, ROLE_LABELS } from '../types';
 import { cn } from '../lib/utils';
+import { attendanceTotals } from '../utils/dataIntegrity';
 import { CurrencyInput } from './CurrencyInput';
 import { format, parseISO, startOfMonth, endOfMonth, isWithinInterval } from 'date-fns';
 
 export const UserMgmtView = ({ 
-  users, 
+  users,
+  isDataReady = false,
   currentUser,
   attendanceRecords,
   payrollRecords,
@@ -16,14 +18,15 @@ export const UserMgmtView = ({
   onFinalizePayroll,
   checkFeatureLimit
 }: { 
-  users: User[], 
+  users: User[],
+  isDataReady?: boolean, 
   currentUser?: User,
   attendanceRecords: AttendanceRecord[],
   payrollRecords: PayrollRecord[],
   onAddUser: (user: User) => void,
   onDeleteUser: (id: string) => void,
   onUpdateUser: (user: User) => void,
-  onFinalizePayroll: (record: PayrollRecord) => void,
+  onFinalizePayroll: (record: PayrollRecord) => Promise<void>,
   checkFeatureLimit?: (feature: string, currentUsage: number) => boolean
 }) => {
   const isSuperAdmin = currentUser?.role === 'superadmin' || Boolean((currentUser as any)?.isSuperAdmin);
@@ -47,6 +50,7 @@ export const UserMgmtView = ({
   };
   const [newUser, setNewUser] = useState(defaultNewUser);
 
+  const [isFinalizing,setIsFinalizing]=useState(false);
   const [payrollMonth, setPayrollMonth] = useState(format(new Date(), 'yyyy-MM'));
   
   // Temporary state for bonus inputs
@@ -137,23 +141,7 @@ export const UserMgmtView = ({
         (r.status === 'present' || r.status === 'half-day' || r.status === 'late')
       );
       
-      let presentDays = 0;
-      let totalHours = 0;
-      records.forEach(r => {
-        if (r.status === 'present' || r.status === 'late') presentDays += 1;
-        if (r.status === 'half-day') presentDays += 0.5;
-        
-        if (user.salaryType === 'hourly') {
-          if (r.checkInTime && r.checkOutTime) {
-            const diffMs = new Date(r.checkOutTime).getTime() - new Date(r.checkInTime).getTime();
-            totalHours += diffMs / (1000 * 60 * 60);
-          } else if (r.status === 'present' || r.status === 'late') {
-            totalHours += 8;
-          } else if (r.status === 'half-day') {
-            totalHours += 4;
-          }
-        }
-      });
+      const {presentDays,totalHours,hasOpenSession}=attendanceTotals(records);
 
       let calculatedSalary = 0;
       if (user.salaryType === 'monthly') {
@@ -197,13 +185,15 @@ export const UserMgmtView = ({
         deductionReason: deductionReasonInputs[user.id] || '',
         totalSalary: calculatedSalary + bonus - deduction,
         records: sortedRecords,
-        finalized: false
+        finalized: false,
+        hasOpenSession
       };
     });
   }, [users, attendanceRecords, payrollMonth, payrollRecords, bonusInputs, bonusReasonInputs, deductionInputs, deductionReasonInputs]);
 
-  const handleFinalize = (data: any) => {
-    if (data.finalized) return;
+  const handleFinalize = async (data: any) => {
+    if (data.finalized || isFinalizing) return;
+    if(!isDataReady || data.hasOpenSession){alert('Cần đồng bộ đủ dữ liệu và hoàn tất các lượt chấm công trước khi chốt.');return;}
     
     const record: PayrollRecord = {
       id: '', // Set by App.tsx
@@ -222,7 +212,8 @@ export const UserMgmtView = ({
       status: 'finalized',
       finalizedAt: new Date().toISOString()
     };
-    onFinalizePayroll(record);
+    setIsFinalizing(true);
+    try{await onFinalizePayroll(record);}catch(error){alert(error instanceof Error?error.message:'Không thể chốt lương.');}finally{setIsFinalizing(false);}
   };
 
   const handlePrintPayroll = (data: any) => {
@@ -309,6 +300,7 @@ export const UserMgmtView = ({
 
   return (
     <div className="p-4 md:p-8 space-y-6 h-full overflow-y-auto">
+      {!isDataReady && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Dữ liệu chấm công/lương chưa được server xác nhận đầy đủ; số tiền hiện là tạm tính.</div>}
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
           <Shield className="w-6 h-6 text-emerald-600 dark:text-emerald-500" />
@@ -605,6 +597,7 @@ export const UserMgmtView = ({
                                   {!row.finalized && (
                                     <button
                                       onClick={() => handleFinalize(row)}
+                                      disabled={!isDataReady || row.hasOpenSession || isFinalizing}
                                       className="px-6 py-2 bg-emerald-500 text-white font-bold rounded-lg hover:bg-emerald-400 transition-colors shadow-lg shadow-emerald-500/20"
                                     >
                                       Chốt lương

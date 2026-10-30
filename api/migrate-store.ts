@@ -89,7 +89,9 @@ export default async function handler(req: any, res: any) {
       backfill: backfillResult,
       message: dryRun 
         ? 'Chạy thử nghiệm (dry-run) thành công. Không có dữ liệu nào bị ghi đè.'
-        : 'Migration, chuẩn hóa dữ liệu và đối soát daily_stats hoàn tất an toàn 100%.'
+        : backfillResult?.skippedChangedDays?.length
+          ? `Đã bỏ qua ${backfillResult.skippedChangedDays.length} ngày có chứng từ thay đổi trong lúc đối soát. Vui lòng chạy lại các ngày đó.`
+          : 'Đã hoàn tất chuẩn hóa và đối soát các ngày được chọn. Giá vốn ước tính vẫn được giữ nhãn ước tính.'
     });
   } catch (err: any) {
     console.error('[API /api/migrate-store] Lỗi:', err);
@@ -99,6 +101,6 @@ export default async function handler(req: any, res: any) {
     });
   } finally {
     // Luôn giải phóng khóa tác vụ
-    await releaseStoreLock(targetStoreId);
+    await releaseStoreLock(targetStoreId, lockAcquired);
   }
 }

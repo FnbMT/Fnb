@@ -3,15 +3,18 @@ import { User, AttendanceRecord, SystemSettings, PayrollRecord } from '../types'
 import { Calendar, DollarSign, Clock, MapPin, CheckCircle2, QrCode } from 'lucide-react';
 import { format, parseISO, startOfMonth, endOfMonth, isWithinInterval } from 'date-fns';
 import { cn } from '../lib/utils';
+import { attendanceTotals } from '../utils/dataIntegrity';
 
 export const MyPayrollView = ({ 
-  currentUser, 
+  currentUser,
+  isDataReady = false,
   attendanceRecords,
   payrollRecords,
   settings,
   onCheckIn
 }: { 
   currentUser: User | null;
+  isDataReady?: boolean;
   attendanceRecords: AttendanceRecord[];
   payrollRecords: PayrollRecord[];
   settings: SystemSettings | null;
@@ -34,23 +37,7 @@ export const MyPayrollView = ({
       (r.status === 'present' || r.status === 'half-day' || r.status === 'late')
     );
     
-    let presentDays = 0;
-    let totalHours = 0;
-    records.forEach(r => {
-      if (r.status === 'present' || r.status === 'late') presentDays += 1;
-      if (r.status === 'half-day') presentDays += 0.5;
-      
-      if (currentUser.salaryType === 'hourly') {
-        if (r.checkInTime && r.checkOutTime) {
-          const diffMs = new Date(r.checkOutTime).getTime() - new Date(r.checkInTime).getTime();
-          totalHours += diffMs / (1000 * 60 * 60);
-        } else if (r.status === 'present' || r.status === 'late') {
-          totalHours += 8;
-        } else if (r.status === 'half-day') {
-          totalHours += 4;
-        }
-      }
-    });
+    const {presentDays,totalHours,hasOpenSession}=attendanceTotals(records);
 
     let calculatedSalary = 0;
     if (currentUser.salaryType === 'monthly') {
@@ -84,7 +71,8 @@ export const MyPayrollView = ({
         if (a.date === b.date) return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
         return b.date.localeCompare(a.date);
       }),
-      finalized: false
+      finalized: false,
+      hasOpenSession
     };
   }, [currentUser, attendanceRecords, payrollMonth, payrollRecords]);
 
@@ -92,6 +80,7 @@ export const MyPayrollView = ({
 
   return (
     <div className="p-8 space-y-6 h-full overflow-y-auto">
+      {!isDataReady && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Dữ liệu chấm công/lương chưa được server xác nhận đầy đủ; số tiền hiện là tạm tính.</div>}
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
           <DollarSign className="w-6 h-6 text-emerald-600 dark:text-emerald-500" />

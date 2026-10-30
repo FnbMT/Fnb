@@ -1,26 +1,30 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Package, Plus, Search, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, X, Edit2, Trash2, ClipboardCheck, History, List, ChevronRight, Info } from 'lucide-react';
 import { MenuItem, InventoryAudit, AuditItem, StockCardEntry, User } from '../types';
 import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
 import { format } from 'date-fns';
+import { operationId } from '../utils/dataIntegrity';
 
 export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, onDeleteItem, categories, onUpdateCategories, audits, onAudit, stockCard, currentUser }: { 
   menu: MenuItem[], 
-  onImportStock: (itemId: string, quantity: number, unitPrice: number) => void,
-  onAddItem: (item: MenuItem) => void,
-  onUpdateItem: (item: MenuItem) => void,
+  onImportStock: (itemId: string, quantity: number, unitPrice: number, id?: string) => Promise<void>,
+  onAddItem: (item: MenuItem) => Promise<void>,
+  onUpdateItem: (item: MenuItem, expected?: MenuItem) => Promise<void>,
   onDeleteItem: (id: string) => void,
   categories: string[],
   onUpdateCategories: (cats: string[]) => void,
   audits: InventoryAudit[],
-  onAudit: (audit: InventoryAudit) => void,
+  onAudit: (audit: InventoryAudit) => Promise<void>,
   stockCard: StockCardEntry[],
   currentUser: User | null
 }) => {
   const [activeTab, setActiveTab] = useState<'items' | 'audit' | 'history' | 'stock_card'>('items');
   const [search, setSearch] = useState('');
   const [showImport, setShowImport] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const importOperationRef=useRef<{id:string;signature:string}|null>(null);
+  const auditOperationRef=useRef<{id:string;signature:string;date:string}|null>(null);
   const [showAddNew, setShowAddNew] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [importData, setImportData] = useState({ itemId: '', quantity: 0, unitPrice: 0 });
@@ -47,15 +51,22 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
     item.code.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleImport = () => {
-    if (!importData.itemId || importData.quantity <= 0) return;
-    onImportStock(importData.itemId, importData.quantity, importData.unitPrice);
-    setShowImport(false);
-    setImportData({ itemId: '', quantity: 0, unitPrice: 0 });
+  const handleImport = async () => {
+    if (!importData.itemId || importData.quantity <= 0 || isSaving) return;
+    const signature=JSON.stringify(importData);
+    if(importOperationRef.current?.signature!==signature)importOperationRef.current={id:operationId('import'),signature};
+    setIsSaving(true);
+    try {
+      await onImportStock(importData.itemId,importData.quantity,importData.unitPrice,importOperationRef.current!.id);
+      setShowImport(false);setImportData({itemId:'',quantity:0,unitPrice:0});importOperationRef.current=null;
+    } catch(error) {alert(error instanceof Error?error.message:'Không thể nhập kho. Nội dung đã được giữ để thử lại.');}
+    finally {setIsSaving(false);}
   };
 
-  const handleSaveItem = () => {
-    if (!newItem.name) return;
+  const handleSaveItem = async () => {
+    if (!newItem.name || isSaving) return;
+    setIsSaving(true);
+    try {
     
     if (editingItem) {
       // Giữ nguyên cờ isInventory của mặt hàng đã có (hàng bán type === 'goods' giữ isInventory: false)
@@ -65,7 +76,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
             ? editingItem.isInventory
             : (editingItem.category === 'Nguyên liệu' || (editingItem.price === 0 && editingItem.code?.startsWith('NL'))));
 
-      onUpdateItem({
+      await onUpdateItem({
         ...editingItem,
         name: newItem.name,
         unit: newItem.unit,
@@ -74,12 +85,12 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
         minStock: newItem.minStock,
         trackStock: newItem.trackStock,
         isInventory: isInv
-      });
+      }, editingItem);
     } else {
       const count = menu.filter(i => i.code.startsWith('NL')).length + 1;
       const code = `NL${count.toString().padStart(3, '0')}`;
 
-      onAddItem({
+      await onAddItem({
         id: Math.random().toString(36).substr(2, 9),
         code,
         name: newItem.name,
@@ -98,10 +109,11 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
     setShowAddNew(false);
     setEditingItem(null);
     setNewItem({ name: '', unit: 'kg', category: 'Nguyên liệu', costPrice: 0, minStock: 10, trackStock: true });
+    } catch(error) {alert(error instanceof Error?error.message:'Không thể lưu mặt hàng.');} finally {setIsSaving(false);}
   };
 
-  const handleConfirmAudit = () => {
-    if (!currentUser) return;
+  const handleConfirmAudit = async () => {
+    if (!currentUser || isSaving) return;
 
     const auditData: AuditItem[] = inventoryItems.map(item => {
       const actual = auditItems[item.id] ?? item.stock;
@@ -120,9 +132,13 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
       return;
     }
 
-    onAudit({
-      id: Math.random().toString(36).substr(2, 9),
-      date: new Date().toISOString(),
+    const signature=JSON.stringify(auditData);
+    if(auditOperationRef.current?.signature!==signature)auditOperationRef.current={id:operationId('audit'),signature,date:new Date().toISOString()};
+    setIsSaving(true);
+    try {
+    await onAudit({
+      id: auditOperationRef.current!.id,
+      date: auditOperationRef.current!.date,
       items: auditData,
       staffId: currentUser.id,
       staffName: currentUser.name
@@ -130,7 +146,8 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
 
     setAuditItems({});
     setShowAuditConfirm(false);
-    setActiveTab('history');
+    setActiveTab('history');auditOperationRef.current=null;
+    }catch(error){alert(error instanceof Error?error.message:'Không thể lưu kiểm kho.');}finally{setIsSaving(false);}
   };
 
   const renderItems = () => (
@@ -553,7 +570,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Số lượng nhập <span className="text-rose-600 dark:text-rose-500">*</span></label>
                 <input 
                   type="number" 
-                  step="0.1"
+                  step="0.001"
                   className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                   value={importData.quantity}
                   onChange={(e) => setImportData({...importData, quantity: Number(e.target.value)})}
@@ -579,6 +596,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               </button>
               <button 
                 onClick={handleImport}
+                disabled={isSaving}
                 className="flex-1 py-3 rounded-xl bg-emerald-500 text-white font-bold hover:bg-emerald-400 cursor-pointer"
               >
                 Xác nhận nhập
@@ -682,6 +700,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               </button>
               <button 
                 onClick={handleSaveItem}
+                disabled={isSaving}
                 className="flex-1 py-3 rounded-xl bg-emerald-500 text-white font-bold hover:bg-emerald-400 cursor-pointer"
               >
                 {editingItem ? 'Cập nhật' : 'Xác nhận'}
@@ -705,6 +724,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               </button>
               <button 
                 onClick={handleConfirmAudit}
+                disabled={isSaving}
                 className="flex-1 py-3 rounded-xl bg-emerald-500 text-white font-bold hover:bg-emerald-400 cursor-pointer"
               >
                 Xác nhận
