@@ -8,8 +8,21 @@ import {
 import { getAuth, initializeAuth, indexedDBLocalPersistence } from 'firebase/auth';
 import { getStorage } from 'firebase/storage';
 
-// Cấu hình log Firestore
-setLogLevel('error');
+// Tắt log nội bộ của Firestore để tránh gRPC stream lifecycle warning bị ghi nhận như lỗi
+try {
+  setLogLevel('silent');
+} catch (_) {}
+
+if (typeof window !== 'undefined') {
+  const _origError = console.error;
+  console.error = (...args: any[]) => {
+    const msg = args.map(a => String(a?.message || a || '')).join(' ');
+    if (msg.includes('Disconnecting idle stream') || msg.includes('Timed out waiting for new targets')) {
+      return;
+    }
+    _origError.apply(console, args);
+  };
+}
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyCoyF_ArTx73XrHPjRTfzLXdV8yYjF24kE",

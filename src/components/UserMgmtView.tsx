@@ -127,11 +127,15 @@ export const UserMgmtView = ({
     setNewUser(prev => ({ ...prev, shifts: newShifts }));
   };
 
+  const staffUsers = useMemo(() => {
+    return users.filter(u => u.role !== 'admin' && !(u as any).isDeleted && (u as any).status !== 'deleted');
+  }, [users]);
+
   const payrollData = useMemo(() => {
     const start = startOfMonth(parseISO(`${payrollMonth}-01`));
     const end = endOfMonth(start);
     
-    return users.filter(u => u.role !== 'admin').map(user => {
+    return staffUsers.map(user => {
       // Check if finalized payroll exists
       const finalized = payrollRecords.find(p => p.userId === user.id && p.month === payrollMonth && p.status === 'finalized');
 
@@ -310,7 +314,7 @@ export const UserMgmtView = ({
         {activeTab === 'accounts' && (
           <button 
             onClick={() => {
-              if (checkFeatureLimit && !checkFeatureLimit('maxUsers', users.filter(u => u.role !== 'admin').length)) {
+              if (checkFeatureLimit && !checkFeatureLimit('maxUsers', staffUsers.length)) {
                 return;
               }
               setEditingUserId(null);
@@ -350,7 +354,7 @@ export const UserMgmtView = ({
 
       {activeTab === 'accounts' && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {users.filter(u => u.role !== 'admin').map((user) => (
+          {staffUsers.map((user) => (
             <div key={user.id} className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-6 relative group flex flex-col">
               {user.role !== 'admin' && (
                 <div className="absolute top-4 right-4 flex gap-2">

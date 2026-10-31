@@ -2784,7 +2784,7 @@ export default function App() {
           const data = doc.data();
           const { password, ...safeData } = data as any;
           return { ...safeData, id: doc.id } as User;
-        });
+        }).filter(u => !(u as any).isDeleted && (u as any).status !== 'deleted');
         setUsers(usersData);
       });
       unsubs.push(unsubUsers);
@@ -3902,6 +3902,7 @@ export default function App() {
 
   const handleDeleteUser = async (id: string) => {
     if (!currentUser) return;
+    if (!window.confirm('Bạn có chắc chắn muốn xóa tài khoản nhân viên này không?')) return;
     try {
       const resp = await fetch(apiUrl('/api/delete-user'), {
         method: 'POST',
@@ -3916,6 +3917,8 @@ export default function App() {
       if (!resp.ok) {
         const errData = await resp.json().catch(() => ({}));
         alert(errData.error || 'Có lỗi xảy ra khi xóa tài khoản');
+      } else {
+        setUsers(prev => prev.filter(u => u.id !== id));
       }
     } catch (err) {
       console.error('Error deleting user:', err);
@@ -4315,6 +4318,9 @@ export default function App() {
                     onPrint={triggerPrint}
                     activeOrdersCount={activeOrdersCount}
                     businessDate={currentBusinessDate}
+                    menu={menu}
+                    inventoryItems={menu.filter(m => m.isInventory)}
+                    onNavigateToMenu={() => setView('menu_mgmt')}
                   />
                 )
               )}
@@ -4893,7 +4899,7 @@ const Header = ({
       allNotifications.push({
         id: `low-stock-${item.id}`,
         title: `📦 Sắp hết nguyên liệu: ${item.name}`,
-        description: `Mã ${item.code || '---'}: Tồn kho còn ${Number(item.stock ?? 0).toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ${item.unit || 'đv'} (Định mức: ${threshold}). Cần nhập thêm ngay.`,
+        description: `Mã ${item.code || '---'}: Tồn kho còn ${Number(item.stock ?? 0).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })} ${item.unit || 'đv'} (Định mức: ${threshold}). Cần nhập thêm ngay.`,
         type: 'error',
         actionText: 'Nhập kho',
         action: () => { setShowNotifications(false); setView('inventory'); },

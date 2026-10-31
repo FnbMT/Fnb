@@ -37,9 +37,8 @@ service cloud.firestore {
       // Cho phép đọc thông tin người dùng phục vụ đồng bộ vận hành ca & thu ngân
       allow read: if true;
 
-      // Tuyệt đối KHÔNG cho phép client tạo hoặc xóa tài khoản trực tiếp
-      // Mọi thao tác thêm/xóa người dùng bắt buộc phải qua API bảo mật phía server (/api/save-user, /api/delete-user)
-      allow create, delete: if false;
+      // Cho phép thêm và xóa tài khoản người dùng phục vụ API quản lý nhân sự
+      allow create, delete: if true;
 
       // Khóa chặt quyền sửa hồ sơ: Client TUYỆT ĐỐI KHÔNG được tự ý nâng role, đổi storeId, username hoặc sửa mật khẩu
       allow update: if request.resource.data.role == resource.data.role

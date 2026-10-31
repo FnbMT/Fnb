@@ -5,6 +5,15 @@ import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
 import { format } from 'date-fns';
 import { operationId } from '../utils/dataIntegrity';
+import { getVietnamBusinessDate } from '../utils/firestoreDateHelper';
+
+const formatStock = (val: number | undefined | null): string => {
+  if (val === undefined || val === null || isNaN(Number(val))) return '0';
+  return Number(val).toLocaleString('vi-VN', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 3
+  });
+};
 
 export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, onDeleteItem, categories, onUpdateCategories, audits, onAudit, stockCard, currentUser }: { 
   menu: MenuItem[], 
@@ -191,7 +200,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                       "px-2 py-1 rounded-lg",
                       item.stock < (item.minStock || 10) ? "bg-rose-500/20 text-rose-600 dark:text-rose-500" : "text-emerald-600 dark:text-emerald-400"
                     )}>
-                      {item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                      {formatStock(item.stock)}
                     </span>
                   ) : (
                     <span className="text-gray-500 text-xs">-</span>
@@ -284,14 +293,15 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                     <p className="text-xs text-gray-500">{item.unit}</p>
                   </td>
                   <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono text-gray-600 dark:text-gray-400">
-                    {item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                    {formatStock(item.stock)}
                   </td>
                   <td className="px-4 py-3 md:px-6 md:py-4">
                     <input 
                       type="number" 
+                      step="0.001"
                       className="w-full bg-gray-100 dark:bg-black/20 border border-black/10 dark:border-white/10 rounded-lg py-2 px-3 text-center text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                       value={auditItems[item.id] ?? ''}
-                      placeholder={item.stock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                      placeholder={formatStock(item.stock)}
                       onChange={(e) => setAuditItems({...auditItems, [item.id]: e.target.value === '' ? item.stock : Number(e.target.value)})}
                     />
                   </td>
@@ -299,9 +309,9 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                     {diff === 0 ? (
                       <span className="text-gray-500">0</span>
                     ) : diff > 0 ? (
-                      <span className="text-emerald-600 dark:text-emerald-500">+{diff.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+                      <span className="text-emerald-600 dark:text-emerald-500">+{formatStock(diff)}</span>
                     ) : (
-                      <span className="text-rose-600 dark:text-rose-500">{diff.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+                      <span className="text-rose-600 dark:text-rose-500">{formatStock(diff)}</span>
                     )}
                   </td>
                 </tr>
@@ -368,10 +378,16 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
       : stockCard;
 
     if (stockStartDate) {
-      filteredEntries = filteredEntries.filter(e => e.date.substring(0, 10) >= stockStartDate);
+      filteredEntries = filteredEntries.filter(e => {
+        const vnDate = (e as any).businessDate || getVietnamBusinessDate(e.date);
+        return vnDate >= stockStartDate;
+      });
     }
     if (stockEndDate) {
-      filteredEntries = filteredEntries.filter(e => e.date.substring(0, 10) <= stockEndDate);
+      filteredEntries = filteredEntries.filter(e => {
+        const vnDate = (e as any).businessDate || getVietnamBusinessDate(e.date);
+        return vnDate <= stockEndDate;
+      });
     }
 
     return (
@@ -451,13 +467,13 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                     </td>
                     <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono font-bold">
                       {entry.change > 0 ? (
-                        <span className="text-emerald-600 dark:text-emerald-500">+{entry.change.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+                        <span className="text-emerald-600 dark:text-emerald-500">+{formatStock(entry.change)}</span>
                       ) : (
-                        <span className="text-rose-600 dark:text-rose-500">{entry.change.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+                        <span className="text-rose-600 dark:text-rose-500">{formatStock(entry.change)}</span>
                       )}
                     </td>
                     <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono font-bold text-gray-900 dark:text-white">
-                      {entry.remaining.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                      {formatStock(entry.remaining)}
                     </td>
                     <td className="px-4 py-3 md:px-6 md:py-4 text-xs text-gray-500 max-w-xs truncate">
                       {entry.note}
@@ -759,13 +775,13 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                   {viewingAudit.items.map((item, i) => (
                     <tr key={i} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
                       <td className="py-3 text-sm text-gray-900 dark:text-white sticky left-0 z-10 bg-white dark:bg-[#1a1b1e] group-hover:bg-[#f9fafb] dark:group-hover:bg-[#25262b] shadow-[1px_0_0_0_rgba(0,0,0,0.05)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.05)]">{item.itemName}</td>
-                      <td className="py-3 text-right font-mono text-gray-600 dark:text-gray-400">{item.systemStock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</td>
-                    <td className="py-3 text-right font-mono text-gray-900 dark:text-white">{item.actualStock.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</td>
+                      <td className="py-3 text-right font-mono text-gray-600 dark:text-gray-400">{formatStock(item.systemStock)}</td>
+                    <td className="py-3 text-right font-mono text-gray-900 dark:text-white">{formatStock(item.actualStock)}</td>
                     <td className="py-3 text-right font-mono font-bold">
                       {item.discrepancy > 0 ? (
-                        <span className="text-emerald-600 dark:text-emerald-500">+{item.discrepancy.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+                        <span className="text-emerald-600 dark:text-emerald-500">+{formatStock(item.discrepancy)}</span>
                       ) : (
-                        <span className="text-rose-600 dark:text-rose-500">{item.discrepancy.toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+                        <span className="text-rose-600 dark:text-rose-500">{formatStock(item.discrepancy)}</span>
                       )}
                     </td>
                   </tr>

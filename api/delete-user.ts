@@ -52,10 +52,24 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // Xóa trong collection users
-    await userDocRef.delete();
+    // Xóa trong collection users:
+    // Thử xóa vĩnh viễn document trước; nếu Firestore Rules chặn hard-delete (do allow delete: if false trong môi trường client-bridge),
+    // tự động soft-delete bằng cách cập nhật isDeleted: true và status: 'deleted' (tuân thủ 100% quy tắc update của Firestore).
+    try {
+      await userDocRef.delete();
+    } catch (delErr: any) {
+      console.warn("Direct user delete failed, falling back to soft-delete:", delErr?.message || delErr);
+      await userDocRef.update({
+        role: targetRole,
+        storeId: targetStoreId,
+        username: userData.username || '',
+        isDeleted: true,
+        status: 'deleted',
+        deletedAt: new Date().toISOString()
+      });
+    }
 
-    // Xóa trong collection user_secrets
+    // Xóa trong collection user_secrets để vô hiệu hóa hoàn toàn mật khẩu & quyền đăng nhập
     try {
       await adminDb.collection('user_secrets').doc(cleanUserId).delete();
     } catch (secErr) {}

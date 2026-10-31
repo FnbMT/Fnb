@@ -93,7 +93,10 @@ export default async function handler(req: any, res: any) {
         .limit(1)
         .get();
 
-      if (!existingUserQuery.empty) {
+      const existingDoc = !existingUserQuery.empty ? existingUserQuery.docs[0] : null;
+      const existingData = existingDoc ? existingDoc.data() : null;
+
+      if (existingDoc && !existingData?.isDeleted && existingData?.status !== 'deleted') {
         return res.status(400).json({ error: 'Tên đăng nhập này đã tồn tại trong quán. Vui lòng chọn tên khác.' });
       }
 
@@ -114,11 +117,19 @@ export default async function handler(req: any, res: any) {
         shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
         requiresAttendance: Boolean(user.requiresAttendance),
         tokenVersion: 1,
+        isDeleted: false,
+        status: 'active',
         createdAt: new Date().toISOString()
       };
 
-      const newUserDocRef = await adminDb.collection('users').add(userDocData);
-      const newUserId = newUserDocRef.id;
+      let newUserId: string;
+      if (existingDoc && (existingData?.isDeleted || existingData?.status === 'deleted')) {
+        newUserId = existingDoc.id;
+        await adminDb.collection('users').doc(newUserId).set(userDocData, { merge: true });
+      } else {
+        const newUserDocRef = await adminDb.collection('users').add(userDocData);
+        newUserId = newUserDocRef.id;
+      }
 
       // 2. Lưu thông tin băm vào vùng tối mật user_secrets
       const secretPayload: Record<string, any> = {

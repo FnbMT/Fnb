@@ -1,13 +1,13 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { BarChart3, Search, Calendar, ArrowDownToLine, ArrowUpFromLine, FileText, Download, X, Eye, Wallet, Plus, Printer, ChevronLeft, ChevronRight, Trash2, Check, Banknote, CreditCard, Loader2 } from 'lucide-react';
-import { Invoice, InventoryTransaction, CashTransaction, User, SystemSettings, PayrollRecord, Shift, DailyStats } from '../types';
+import { BarChart3, Search, Calendar, ArrowDownToLine, ArrowUpFromLine, FileText, Download, X, Eye, Wallet, Plus, Printer, ChevronLeft, ChevronRight, Trash2, Check, Banknote, CreditCard, Loader2, AlertTriangle, ArrowRight } from 'lucide-react';
+import { Invoice, InventoryTransaction, CashTransaction, User, SystemSettings, PayrollRecord, Shift, DailyStats, MenuItem } from '../types';
 import { format, isSameDay, isSameMonth, isSameYear, parseISO, startOfMonth, endOfMonth, isBefore, startOfDay, subDays, eachDayOfInterval } from 'date-fns';
 import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot, onSnapshot, writeBatch, updateDoc } from 'firebase/firestore';
 import { getDateRangeIso, getVietnamBusinessDate, getVietnamYesterdayDate } from '../utils/firestoreDateHelper';
-import { calculateInvoiceCost } from '../utils/costHelper';
+import { calculateInvoiceCost, calculateInvoiceCostSnapshot } from '../utils/costHelper';
 import { isCashPayment, isReconciledDailyStat } from '../utils/reportDataIntegrity';
 import { dailyStatsFromSources, invoiceCostIsComplete, operationId, receiptMismatch, isSalesCategory, allocatedItemRevenue } from '../utils/dataIntegrity';
 import { subscribeDateRange } from '../utils/completeDataSource';
@@ -245,7 +245,10 @@ export const SummaryView = ({
   onUpdateSettings, 
   onPrint, 
   activeOrdersCount = 0,
-  businessDate
+  businessDate,
+  menu = [],
+  inventoryItems = [],
+  onNavigateToMenu
 }: { 
   invoices: Invoice[], 
   isInvoicesReady?: boolean,
@@ -261,7 +264,10 @@ export const SummaryView = ({
   onUpdateSettings: (s: SystemSettings) => void,
   onPrint: (data: any) => void,
   activeOrdersCount?: number,
-  businessDate?: string
+  businessDate?: string,
+  menu?: MenuItem[],
+  inventoryItems?: any[],
+  onNavigateToMenu?: () => void
 }) => {
   const isAdmin = currentUser?.role === 'admin';
   const isAdminOrManager = currentUser?.role === 'admin' || currentUser?.role === 'manager';
@@ -276,6 +282,8 @@ export const SummaryView = ({
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [confirmDeleteInvoice, setConfirmDeleteInvoice] = useState<Invoice | null>(null);
   const [isDeletingInvoice, setIsDeletingInvoice] = useState(false);
+  const [showMissingCostModal, setShowMissingCostModal] = useState(false);
+  const [onlyShowMissingCostItems, setOnlyShowMissingCostItems] = useState(false);
 
   // Non-admin/manager can only view sales invoices and cash transactions
   useEffect(() => {
@@ -892,6 +900,209 @@ export const SummaryView = ({
 
   const sortedItemSales = itemSales;
 
+  // Danh sách các món bán trong kỳ nhưng thiếu giá vốn trực tiếp hoặc thiếu định lượng nguyên liệu kho
+  interface MissingCostItemInfo {
+    id: string;
+    name: string;
+    quantitySold: number;
+    revenue: number;
+    reason: 'no_cost_price' | 'incomplete_recipe';
+  }
+
+  const missingCostItems = useMemo<MissingCostItemInfo[]>(() => {
+    const missingMap = new Map<string, MissingCostItemInfo>();
+    const menuMap = new Map((menu || []).map(m => [m.id, m]));
+    const menuByName = new Map((menu || []).map(m => [m.name.toLowerCase().trim(), m]));
+    const invMap = new Map((inventoryItems || []).map(i => [i.id, i]));
+    const invByName = new Map((inventoryItems || []).map(i => [i.name.toLowerCase().trim(), i]));
+
+    const checkCostValid = (num: unknown): boolean =>
+      typeof num === 'number' && Number.isFinite(num) && num > 0;
+
+    const findSource = (id: string, name?: string) => {
+      let found = menuMap.get(id) || invMap.get(id);
+      if (!found && name) {
+        const clean = name.toLowerCase().trim();
+        found = menuByName.get(clean) || invByName.get(clean);
+      }
+      return found;
+    };
+
+    periodInvoices.forEach(inv => {
+      if (inv.status === 'cancelled') return;
+      const revenues = allocatedItemRevenue(inv);
+      (inv.items || []).forEach((item, index) => {
+        const menuItem = findSource(item.id, item.name);
+        
+        let hasValidCost = false;
+        let reason: 'no_cost_price' | 'incomplete_recipe' = 'no_cost_price';
+
+        // 1. Kiểm tra định lượng công thức (recipe)
+        const recipe = (menuItem?.recipe && menuItem.recipe.length > 0)
+          ? menuItem.recipe
+          : (item.recipe && item.recipe.length > 0) ? item.recipe : null;
+
+        if (recipe && recipe.length > 0) {
+          const allIngredientsValid = recipe.every(r => {
+            const ing = findSource(r.ingredientId, r.name);
+            return checkCostValid(ing?.costPrice) && Number.isFinite(r.quantity) && r.quantity > 0;
+          });
+          if (allIngredientsValid) {
+            hasValidCost = true;
+          } else {
+            reason = 'incomplete_recipe';
+          }
+        } else {
+          // 2. Kiểm tra giá vốn trực tiếp (direct costPrice)
+          const directCost = checkCostValid(menuItem?.costPrice)
+            ? menuItem!.costPrice
+            : checkCostValid(item.costPrice) ? item.costPrice : 0;
+          if (checkCostValid(directCost)) {
+            hasValidCost = true;
+          } else {
+            reason = 'no_cost_price';
+          }
+        }
+
+        if (!hasValidCost) {
+          const key = item.id || item.name;
+          const rev = revenues[index] ?? ((item.price || 0) * (item.quantity || 1));
+          const existing = missingMap.get(key);
+          if (existing) {
+            existing.quantitySold += (item.quantity || 1);
+            existing.revenue += rev;
+          } else {
+            missingMap.set(key, {
+              id: item.id,
+              name: item.name,
+              quantitySold: item.quantity || 1,
+              revenue: rev,
+              reason
+            });
+          }
+        }
+      });
+    });
+
+    return Array.from(missingMap.values()).sort((a, b) => b.quantitySold - a.quantitySold);
+  }, [periodInvoices, menu, inventoryItems]);
+
+  const missingCostIdSet = useMemo(() => new Set(missingCostItems.map(m => m.id)), [missingCostItems]);
+  const missingCostNameSet = useMemo(() => new Set(missingCostItems.map(m => m.name.toLowerCase().trim())), [missingCostItems]);
+
+  const displayedItemSales = useMemo(() => {
+    if (!onlyShowMissingCostItems) return sortedItemSales;
+    return sortedItemSales.filter(item => 
+      missingCostIdSet.has(item.id) || missingCostNameSet.has(item.name.toLowerCase().trim())
+    );
+  }, [sortedItemSales, onlyShowMissingCostItems, missingCostIdSet, missingCostNameSet]);
+
+  // Tính toán lại giá vốn thực tế cho từng hóa đơn khi người dùng đã cập nhật giá vốn món ăn trong Thực đơn / Kho
+  const { recomputedInvoices, totalRecomputedCost, hasAnyIncompleteInvoice } = useMemo(() => {
+    const menuMap = new Map((menu || []).map(m => [m.id, m]));
+    const menuByName = new Map((menu || []).map(m => [m.name.toLowerCase().trim(), m]));
+    const invMap = new Map((inventoryItems || []).map(i => [i.id, i]));
+    const invByName = new Map((inventoryItems || []).map(i => [i.name.toLowerCase().trim(), i]));
+    const getCostSource = (id: string, name?: string) => {
+      let found = menuMap.get(id) || invMap.get(id);
+      if (!found && name) {
+        const clean = name.toLowerCase().trim();
+        found = menuByName.get(clean) || invByName.get(clean);
+      }
+      return found;
+    };
+
+    let totalCost = 0;
+    let anyIncomplete = false;
+    const recomputed = periodInvoices.map(inv => {
+      if (inv.status === 'cancelled') {
+        return { ...inv, effectiveCost: 0, isCostComplete: true, shouldUpdateInDb: false };
+      }
+
+      // NGUYÊN TẮC BẤT BIẾN KẾ TOÁN (IMMUTABLE COST SNAPSHOT):
+      // Nếu hóa đơn đã có giá vốn hoàn tất từ trước (costStatus === 'complete' và costVersion >= 2):
+      // TUYỆT ĐỐI KHÔNG GHI ĐÈ! Giữ nguyên giá vốn lịch sử tại thời điểm bán, việc sửa thực đơn sau này không được làm sai lệch sổ sách cũ.
+      if (inv.costStatus === 'complete' && (inv.costVersion || 0) >= 2 && typeof inv.totalCost === 'number' && inv.totalCost >= 0) {
+        totalCost += inv.totalCost;
+        return {
+          ...inv,
+          effectiveCost: inv.totalCost,
+          isCostComplete: true,
+          shouldUpdateInDb: false
+        };
+      }
+      
+      // CHỈ bổ sung cho các hóa đơn chưa có giá vốn hoặc đang bị ước tính (costStatus === 'estimated' / thiếu vốn):
+      const snapshot = calculateInvoiceCostSnapshot(inv.items || [], getCostSource);
+      
+      // Nếu sau khi điền giá vốn trong thực đơn, hóa đơn này đã đủ 100% giá vốn:
+      if (snapshot.isComplete) {
+        totalCost += snapshot.totalCost;
+        return {
+          ...inv,
+          effectiveCost: snapshot.totalCost,
+          isCostComplete: true,
+          shouldUpdateInDb: true // Nâng cấp từ estimated sang complete
+        };
+      }
+
+      // Nếu vẫn còn món thiếu giá vốn:
+      anyIncomplete = true;
+      const fallbackCost = typeof inv.totalCost === 'number' && inv.totalCost > 0 ? inv.totalCost : snapshot.totalCost;
+      totalCost += fallbackCost;
+      return {
+        ...inv,
+        effectiveCost: fallbackCost,
+        isCostComplete: false,
+        shouldUpdateInDb: false
+      };
+    });
+
+    return {
+      recomputedInvoices: recomputed,
+      totalRecomputedCost: totalCost,
+      hasAnyIncompleteInvoice: anyIncomplete
+    };
+  }, [periodInvoices, menu, inventoryItems]);
+
+  const [isSyncingCosts, setIsSyncingCosts] = useState(false);
+  const [costSyncDone, setCostSyncDone] = useState(false);
+
+  // Tự động đồng bộ giá vốn mới vào tài liệu hóa đơn trên Firestore khi đã đủ 100% giá vốn
+  useEffect(() => {
+    if (!isAdminOrManager || isSyncingCosts || costSyncDone) return;
+    const toUpdate = recomputedInvoices.filter(i => i.shouldUpdateInDb);
+    if (toUpdate.length === 0 || hasAnyIncompleteInvoice || missingCostItems.length > 0) return;
+
+    let cancelled = false;
+    const syncInvoices = async () => {
+      setIsSyncingCosts(true);
+      try {
+        for (let i = 0; i < toUpdate.length; i += 100) {
+          if (cancelled) break;
+          const batch = writeBatch(db);
+          const chunk = toUpdate.slice(i, i + 100);
+          chunk.forEach(inv => {
+            batch.update(doc(db, 'invoices', inv.id), {
+              totalCost: inv.effectiveCost,
+              costStatus: 'complete',
+              costVersion: 2
+            });
+          });
+          await batch.commit();
+        }
+        if (!cancelled) setCostSyncDone(true);
+      } catch (err) {
+        console.warn('Lỗi tự động đồng bộ giá vốn vào hóa đơn Firestore:', err);
+      } finally {
+        if (!cancelled) setIsSyncingCosts(false);
+      }
+    };
+
+    syncInvoices();
+    return () => { cancelled = true; };
+  }, [isAdminOrManager, recomputedInvoices, hasAnyIncompleteInvoice, missingCostItems.length, isSyncingCosts, costSyncDone]);
+
   // Tổng hợp dữ liệu đa tầng theo từng ngày (Per-day Single Source of Truth, 100% toàn vẹn)
   const sourceMismatch=useMemo(()=>receiptMismatch(periodInvoices,periodCash),[periodInvoices,periodCash]);
   const statsAggregates = useMemo(() => {
@@ -902,8 +1113,30 @@ export const SummaryView = ({
     const totals:any={totalRevenue:0,totalCash:0,totalTransfer:0,invoiceCount:0,totalDiscount:0,totalCost:0,totalIncome:0,totalExpense:0,cashExpense:0,transferExpense:0,cashIncome:0,transferIncome:0,expenseInventory:0,expenseSalary:0,expenseRent:0,expenseOther:0};
     for(const stat of stats)for(const key of Object.keys(totals))totals[key]+=Number((stat as any)[key])||0;
     const sales=periodInvoices.filter(i=>i.status!=='cancelled');
-    return {...totals,hasExpenseBreakdown:true,costStatus:!reportDataReady?'partial':sales.every(invoiceCostIsComplete)?'complete':'estimated',coverageStatus:reportDataReady&&!sourceMismatch?'reconciled':'partial',missingDaysCount:reportDataReady?0:dates.length,reconciledDaysCount:reportDataReady?dates.length:0,daysWithSales:stats.filter(s=>s.invoiceCount>0).length,daysWithCompleteCost:stats.filter(s=>s.invoiceCount>0&&s.costStatus==='complete').length,daysWithEstimatedCost:stats.filter(s=>s.costStatus==='estimated').length,daysWithMissingCost:0,zeroActivityDaysCount:stats.filter(s=>!s.hasData).length,daysUsingFallbackInvoices:0,daysUsingFallbackCash:0,isInvoicePartial:!reportDataReady,isCashPartial:!reportDataReady,hasSalesInStats:sales.length>0,hasCostInStats:reportDataReady,hasExpenseInStats:totals.totalExpense>0,hasIncomeInStats:totals.totalIncome>0};
-  },[periodInvoices,periodCash,reportDataReady,dateFilter,filterType,todayVietnam,currentUser?.storeId,sourceMismatch]);
+    const isCostFullyResolved = periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
+    return {
+      ...totals,
+      totalCost: isCostFullyResolved ? totalRecomputedCost : totals.totalCost,
+      hasExpenseBreakdown:true,
+      costStatus: !reportDataReady ? 'partial' : isCostFullyResolved ? 'complete' : sales.every(invoiceCostIsComplete) ? 'complete' : 'estimated',
+      coverageStatus:reportDataReady&&!sourceMismatch?'reconciled':'partial',
+      missingDaysCount:reportDataReady?0:dates.length,
+      reconciledDaysCount:reportDataReady?dates.length:0,
+      daysWithSales:stats.filter(s=>s.invoiceCount>0).length,
+      daysWithCompleteCost:stats.filter(s=>s.invoiceCount>0&&s.costStatus==='complete').length,
+      daysWithEstimatedCost:stats.filter(s=>s.costStatus==='estimated').length,
+      daysWithMissingCost:0,
+      zeroActivityDaysCount:stats.filter(s=>!s.hasData).length,
+      daysUsingFallbackInvoices:0,
+      daysUsingFallbackCash:0,
+      isInvoicePartial:!reportDataReady,
+      isCashPartial:!reportDataReady,
+      hasSalesInStats:sales.length>0,
+      hasCostInStats:reportDataReady,
+      hasExpenseInStats:totals.totalExpense>0,
+      hasIncomeInStats:totals.totalIncome>0
+    };
+  },[periodInvoices,periodCash,reportDataReady,dateFilter,filterType,todayVietnam,currentUser?.storeId,sourceMismatch,hasAnyIncompleteInvoice,missingCostItems.length,totalRecomputedCost]);
 
   // Cash Book Stats - Tính toán chuẩn xác: Tổng thu = salesReceipts + nonSaleIncome
   const cashStats = useMemo(() => {
@@ -1087,39 +1320,73 @@ export const SummaryView = ({
   let isCostUnavailable = false;
   let costEstimateReason = '';
 
+  // 0. Ưu tiên cao nhất: Nếu các món bán trong kỳ đã được cài đặt đầy đủ 100% giá vốn
+  // (toàn bộ các món bán đều có giá vốn/định lượng kho và toàn bộ hóa đơn đã tính đủ giá vốn)
+  if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
+    finalCost = totalRecomputedCost;
+    isCostEstimated = false;
+    costEstimateReason = '';
+  }
   // 1. Nếu daily_stats có giá vốn đầy đủ toàn bộ các ngày (costStatus === 'complete' và totalCost là số, kể cả 0đ)
-  if (statsAggregates && statsAggregates.costStatus === 'complete' && typeof statsAggregates.totalCost === 'number') {
+  else if (statsAggregates && statsAggregates.costStatus === 'complete' && typeof statsAggregates.totalCost === 'number') {
     finalCost = statsAggregates.totalCost;
+    isCostEstimated = false;
+    costEstimateReason = '';
   }
   // 2. Nếu daily_stats có giá vốn nhưng là ước tính (costStatus === 'estimated')
   else if (statsAggregates && statsAggregates.costStatus === 'estimated' && typeof statsAggregates.totalCost === 'number') {
-    finalCost = statsAggregates.totalCost;
-    isCostEstimated = true;
-    costEstimateReason = 'Một số ngày hoặc món hàng sử dụng giá vốn ước tính (chưa có định lượng chuẩn)';
+    if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
+      finalCost = totalRecomputedCost;
+      isCostEstimated = false;
+      costEstimateReason = '';
+    } else {
+      finalCost = totalRecomputedCost > 0 ? totalRecomputedCost : statsAggregates.totalCost;
+      isCostEstimated = true;
+      costEstimateReason = missingCostItems.length > 0
+        ? `Có ${missingCostItems.length} món chưa có giá vốn: ${missingCostItems.slice(0, 3).map(m => m.name).join(', ')}${missingCostItems.length > 3 ? '...' : ''}`
+        : 'Một số ngày hoặc món hàng sử dụng giá vốn ước tính (chưa có định lượng chuẩn)';
+    }
   }
   // 3. Nếu daily_stats có giá vốn một phần (costStatus === 'partial')
   else if (statsAggregates && statsAggregates.costStatus === 'partial' && typeof statsAggregates.totalCost === 'number') {
-    finalCost = statsAggregates.totalCost;
-    isCostEstimated = true;
-    costEstimateReason = (statsAggregates.isInvoicePartial && hasMoreInvoices)
-      ? `Mới tải ${periodInvoices.length} hóa đơn đầu tiên (chưa tải hết toàn kỳ)`
-      : `Kỳ này còn ${(statsAggregates.missingDaysCount || 0) + (statsAggregates.daysWithMissingCost || 0)} ngày chưa đối soát đủ giá vốn`;
+    if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0 && !hasMoreInvoices) {
+      finalCost = totalRecomputedCost;
+      isCostEstimated = false;
+      costEstimateReason = '';
+    } else {
+      finalCost = statsAggregates.totalCost;
+      isCostEstimated = true;
+      costEstimateReason = (statsAggregates.isInvoicePartial && hasMoreInvoices)
+        ? `Mới tải ${periodInvoices.length} hóa đơn đầu tiên (chưa tải hết toàn kỳ)`
+        : `Kỳ này còn ${(statsAggregates.missingDaysCount || 0) + (statsAggregates.daysWithMissingCost || 0)} ngày chưa đối soát đủ giá vốn`;
+    }
   }
   // 4. Nếu daily_stats có ghi nhận totalCost > 0 nhưng rơi vào status khác (dữ liệu migrate hoặc legacy)
   // TUYỆT ĐỐI KHÔNG VỨT BỎ GIÁ VỐN ĐÃ BIẾT ĐỂ RƠI VỀ 35%!
   else if (statsAggregates && typeof statsAggregates.totalCost === 'number' && statsAggregates.totalCost > 0) {
-    finalCost = statsAggregates.totalCost;
-    isCostEstimated = true;
-    costEstimateReason = 'Sử dụng tổng giá vốn đã ghi nhận trong hệ thống';
+    if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
+      finalCost = totalRecomputedCost;
+      isCostEstimated = false;
+      costEstimateReason = '';
+    } else {
+      finalCost = statsAggregates.totalCost;
+      isCostEstimated = true;
+      costEstimateReason = missingCostItems.length > 0
+        ? `Có ${missingCostItems.length} món chưa có giá vốn: ${missingCostItems.slice(0, 3).map(m => m.name).join(', ')}${missingCostItems.length > 3 ? '...' : ''}`
+        : 'Sử dụng tổng giá vốn đã ghi nhận trong hệ thống';
+    }
   }
   // 5. Nếu đã tải toàn bộ hóa đơn chi tiết (hoặc đang xem hôm nay), dùng trực tiếp tổng giá vốn từ hóa đơn
   else if (periodInvoices.length > 0 && (!hasMoreInvoices || isViewingTodayOnly)) {
-    finalCost = sampleCost;
-    const items = periodInvoices.flatMap(i => i.items || []);
-    const hasAnyEst = items.some(i => !(typeof i.costPrice === 'number' && i.costPrice > 0) && (!i.recipe || i.recipe.length === 0));
-    if (hasAnyEst) {
+    finalCost = totalRecomputedCost > 0 ? totalRecomputedCost : sampleCost;
+    if (missingCostItems.length > 0 || hasAnyIncompleteInvoice) {
       isCostEstimated = true;
-      costEstimateReason = 'Một số món bán chưa có giá vốn chuẩn xác từ nguyên liệu';
+      costEstimateReason = missingCostItems.length > 0
+        ? `Có ${missingCostItems.length} món chưa có giá vốn: ${missingCostItems.slice(0, 3).map(m => m.name).join(', ')}${missingCostItems.length > 3 ? '...' : ''}`
+        : 'Một số món bán chưa có giá vốn chuẩn xác từ nguyên liệu';
+    } else {
+      isCostEstimated = false;
+      costEstimateReason = '';
     }
   }
   // 6. Nếu có mẫu hóa đơn nhưng chưa nạp hết (phân trang), ước tính theo tỷ lệ mẫu thực tế
@@ -1316,8 +1583,32 @@ export const SummaryView = ({
                 <div className="flex items-center justify-between">
                   <p className="text-xs text-gray-500 uppercase font-bold">Lợi nhuận gộp</p>
                   {isCostEstimated && (
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 font-medium" title={costEstimateReason}>
-                      Ước tính
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      {missingCostItems.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowMissingCostModal(true)}
+                          className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-400 border border-rose-500/30 font-bold flex items-center gap-1 transition-all cursor-pointer animate-pulse"
+                          title={`Có ${missingCostItems.length} món chưa có giá vốn. Bấm để xem danh sách chi tiết.`}
+                        >
+                          <AlertTriangle className="w-3 h-3 text-rose-500" />
+                          <span>{missingCostItems.length} món thiếu vốn</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => missingCostItems.length > 0 && setShowMissingCostModal(true)}
+                        className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 font-medium cursor-pointer hover:bg-amber-500/20 transition-all"
+                        title={costEstimateReason}
+                      >
+                        Ước tính
+                      </button>
+                    </div>
+                  )}
+                  {!isCostEstimated && totalSales > 0 && (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 font-medium flex items-center gap-1">
+                      <Check className="w-3 h-3" />
+                      {isSyncingCosts ? 'Đang lưu vào HĐ...' : 'Chuẩn xác'}
                     </span>
                   )}
                 </div>
@@ -1375,6 +1666,60 @@ export const SummaryView = ({
           )}
         </div>
       ) : null}
+
+      {/* Thông báo chi tiết các món chưa có giá vốn - Chỉ hiển thị cho tài khoản Quản trị viên (Admin) */}
+      {isAdmin && isCostEstimated && missingCostItems.length > 0 && (
+        <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-900 dark:text-amber-300 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm">
+          <div className="flex items-start gap-3">
+            <span className="p-2 rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5">
+              <AlertTriangle className="w-5 h-5" />
+            </span>
+            <div className="space-y-1.5">
+              <div className="font-bold text-sm text-amber-950 dark:text-amber-200 flex items-center gap-2 flex-wrap">
+                <span>Phát hiện {missingCostItems.length} món bán trong kỳ chưa có giá vốn</span>
+                <span className="text-[11px] font-normal px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-900 dark:text-amber-300 border border-amber-500/30">
+                  Giá vốn đang tính 0đ &rarr; Lợi nhuận gộp bị [Ước tính]
+                </span>
+              </div>
+              <p className="text-amber-800/90 dark:text-amber-300/80 leading-relaxed">
+                Các món dưới đây chưa được cài đặt giá vốn trực tiếp hoặc nguyên liệu kho chưa có giá nhập. Vui lòng bổ sung để số liệu lợi nhuận chuẩn xác 100%:
+              </p>
+              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                {missingCostItems.slice(0, 6).map(m => (
+                  <span key={m.id || m.name} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/10 font-medium text-gray-900 dark:text-white border border-black/5 dark:border-white/10 text-xs">
+                    <span>{m.name}</span>
+                    <span className="opacity-70 font-mono text-[10px]">({m.quantitySold} suất)</span>
+                  </span>
+                ))}
+                {missingCostItems.length > 6 && (
+                  <span className="text-gray-500 dark:text-gray-400 font-medium italic text-xs self-center">
+                    +{missingCostItems.length - 6} món khác...
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
+            <button
+              type="button"
+              onClick={() => setShowMissingCostModal(true)}
+              className="px-3 py-2 bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-gray-900 dark:text-white font-bold rounded-xl transition-all cursor-pointer text-xs"
+            >
+              Xem danh sách ({missingCostItems.length})
+            </button>
+            {onNavigateToMenu && isAdminOrManager && (
+              <button
+                type="button"
+                onClick={onNavigateToMenu}
+                className="px-3.5 py-2 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer text-xs shadow-sm shadow-emerald-500/20"
+              >
+                <span>Bổ sung giá vốn</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {statsAggregates?.coverageStatus === 'partial' && (
         <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-xs text-amber-700 dark:text-amber-400 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
@@ -1826,7 +2171,7 @@ export const SummaryView = ({
                           </span>
                         </td>
                         <td className="px-6 py-4 text-sm">{log.itemName}</td>
-                        <td className="px-6 py-4 text-right font-mono">{log.quantity.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</td>
+                        <td className="px-6 py-4 text-right font-mono">{log.quantity.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })}</td>
                         <td className="px-6 py-4 text-right font-mono font-bold">{(log.totalPrice || 0).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</td>
                         <td className="px-6 py-4 text-right">
                           <button 
@@ -2034,6 +2379,55 @@ export const SummaryView = ({
                 </div>
               </div>
             )}
+            {/* Bộ lọc xem tất cả món hoặc chỉ xem món thiếu giá vốn */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOnlyShowMissingCostItems(false);
+                    setCurrentPage(1);
+                  }}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                    !onlyShowMissingCostItems
+                      ? "bg-emerald-500 text-white shadow-sm"
+                      : "bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                  )}
+                >
+                  Tất cả món ({sortedItemSales.length})
+                </button>
+                {missingCostItems.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOnlyShowMissingCostItems(true);
+                      setCurrentPage(1);
+                    }}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5",
+                      onlyShowMissingCostItems
+                        ? "bg-rose-500 text-white shadow-sm"
+                        : "bg-rose-500/10 text-rose-600 dark:text-rose-400 hover:bg-rose-500/20 border border-rose-500/20"
+                    )}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>Món chưa có giá vốn ({missingCostItems.length})</span>
+                  </button>
+                )}
+              </div>
+              {missingCostItems.length > 0 && onNavigateToMenu && isAdminOrManager && (
+                <button
+                  type="button"
+                  onClick={onNavigateToMenu}
+                  className="px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  <span>Cập nhật trong Thực đơn</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
             <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl overflow-hidden overflow-x-auto custom-scrollbar">
               <table className="w-full text-left border-collapse min-w-[700px]">
                 <thead>
@@ -2044,23 +2438,43 @@ export const SummaryView = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/5 dark:divide-white/5">
-                  {sortedItemSales.length === 0 ? (
+                  {displayedItemSales.length === 0 ? (
                     <tr>
-                      <td colSpan={3} className="px-6 py-12 text-center text-gray-500 italic">Không có dữ liệu bán hàng</td>
+                      <td colSpan={3} className="px-6 py-12 text-center text-gray-500 italic">
+                        {onlyShowMissingCostItems ? 'Tất cả các món đã bán đều có đầy đủ giá vốn!' : 'Không có dữ liệu bán hàng'}
+                      </td>
                     </tr>
                   ) : (
-                    paginate(sortedItemSales).map((item, idx) => (
-                      <tr key={idx} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                        <td className="px-6 py-4 text-sm font-bold text-gray-900 dark:text-white">{item.name}</td>
-                        <td className="px-6 py-4 text-right font-mono">{item.quantity.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</td>
-                        <td className="px-6 py-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-500">{item.revenue.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</td>
-                      </tr>
-                    ))
+                    paginate(displayedItemSales).map((item, idx) => {
+                      const isItemMissingCost = missingCostIdSet.has(item.id) || missingCostNameSet.has(item.name.toLowerCase().trim());
+                      return (
+                        <tr key={idx} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                          <td className="px-6 py-4 text-sm font-bold text-gray-900 dark:text-white">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span>{item.name}</span>
+                              {isItemMissingCost && (
+                                <button
+                                  type="button"
+                                  onClick={() => setShowMissingCostModal(true)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 hover:bg-rose-500/25 transition-all cursor-pointer"
+                                  title="Món này chưa có giá vốn trực tiếp hoặc nguyên liệu kho. Bấm để xem chi tiết."
+                                >
+                                  <AlertTriangle className="w-2.5 h-2.5" />
+                                  <span>Chưa có giá vốn</span>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-right font-mono">{item.quantity.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</td>
+                          <td className="px-6 py-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-500">{item.revenue.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
             </div>
-            {sortedItemSales.length > rowsPerPage && (
+            {displayedItemSales.length > rowsPerPage && (
               <div className="flex justify-center items-center gap-4">
                 <button 
                   disabled={currentPage === 1}
@@ -2069,9 +2483,9 @@ export const SummaryView = ({
                 >
                   <ChevronLeft className="w-4 h-4" />
                 </button>
-                <span className="text-sm text-gray-500">Trang {currentPage} / {totalPages(sortedItemSales)}</span>
+                <span className="text-sm text-gray-500">Trang {currentPage} / {totalPages(displayedItemSales)}</span>
                 <button 
-                  disabled={currentPage === totalPages(sortedItemSales)}
+                  disabled={currentPage === totalPages(displayedItemSales)}
                   onClick={() => setCurrentPage(prev => prev + 1)}
                   className="p-2 rounded-lg bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 disabled:opacity-30"
                 >
@@ -2678,6 +3092,103 @@ export const SummaryView = ({
             >
               Đóng
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal danh sách món chưa có giá vốn */}
+      {showMissingCostModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md p-4">
+          <div className="bg-white dark:bg-[#1a1b1e] w-full max-w-2xl rounded-3xl p-6 md:p-8 border border-black/10 dark:border-white/10 shadow-2xl space-y-6 max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-start">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="p-2 rounded-xl bg-rose-500/10 text-rose-500">
+                    <AlertTriangle className="w-5 h-5" />
+                  </span>
+                  <h3 className="text-lg md:text-xl font-bold text-gray-900 dark:text-white">
+                    Món chưa có giá vốn ({missingCostItems.length} món)
+                  </h3>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                  Các món này đã bán trong kỳ nhưng chưa có giá vốn trực tiếp hoặc nguyên liệu kho chưa có đơn giá nhập. Hệ thống đang tính giá vốn các món này bằng 0đ khiến Lợi nhuận gộp bị gắn nhãn <strong>[Ước tính]</strong>.
+                </p>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowMissingCostModal(false)}
+                className="p-1.5 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl transition-all cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar border border-black/10 dark:border-white/10 rounded-2xl">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 font-semibold uppercase tracking-wider sticky top-0 backdrop-blur bg-white/90 dark:bg-[#1a1b1e]/90">
+                    <th className="px-4 py-3">STT</th>
+                    <th className="px-4 py-3">Tên món</th>
+                    <th className="px-4 py-3 text-right">Đã bán</th>
+                    <th className="px-4 py-3 text-right">Doanh thu</th>
+                    <th className="px-4 py-3">Tình trạng</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-black/5 dark:divide-white/5">
+                  {missingCostItems.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-8 text-center text-gray-500 italic">
+                        Tuyệt vời! Tất cả các món đã bán trong kỳ đều có giá vốn đầy đủ.
+                      </td>
+                    </tr>
+                  ) : (
+                    missingCostItems.map((item, index) => (
+                      <tr key={item.id || item.name} className="hover:bg-black/5 dark:hover:bg-white/5">
+                        <td className="px-4 py-3 font-mono text-gray-500">{index + 1}</td>
+                        <td className="px-4 py-3 font-bold text-gray-900 dark:text-white">{item.name}</td>
+                        <td className="px-4 py-3 text-right font-mono font-medium">{item.quantitySold}</td>
+                        <td className="px-4 py-3 text-right font-mono font-bold text-emerald-600 dark:text-emerald-500">
+                          {item.revenue.toLocaleString('vi-VN')}đ
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20 whitespace-nowrap">
+                            {item.reason === 'incomplete_recipe' ? 'Thiếu giá nguyên liệu' : 'Chưa có giá vốn (0đ)'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pt-2 border-t border-black/5 dark:border-white/5 text-xs">
+              <span className="text-gray-500 dark:text-gray-400">
+                💡 <strong>Cách xử lý:</strong> Vào <em>Thực đơn</em> &rarr; Chọn món &rarr; Điền <em>Giá vốn</em> hoặc kiểm tra <em>Kho hàng</em> để nhập phiếu nhập nguyên liệu.
+              </span>
+              <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowMissingCostModal(false)}
+                  className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl border border-black/10 dark:border-white/10 text-gray-700 dark:text-gray-300 font-bold hover:bg-black/5 dark:hover:bg-white/5 transition-all cursor-pointer"
+                >
+                  Đóng
+                </button>
+                {onNavigateToMenu && isAdminOrManager && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMissingCostModal(false);
+                      onNavigateToMenu();
+                    }}
+                    className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-500/20"
+                  >
+                    <span>Cập nhật trong Thực đơn</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}

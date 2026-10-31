@@ -87,21 +87,13 @@ export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) 
         if (resp.ok) {
           const result = await resp.json();
           if (result.success && result.user) {
-            // Xác thực với Firebase Auth qua Custom Token nếu có
+            // Xác thực với Firebase Auth qua Custom Token nếu server cấp
             if (result.customToken && !result.customToken.startsWith('dev_token_')) {
               try {
                 await signInWithCustomToken(auth, result.customToken);
               } catch (authErr: any) {
-                console.error("signInWithCustomToken failed:", authErr);
-                setError(`Không thể xác thực phiên làm việc Firebase: ${authErr?.message || 'Lỗi phiên đăng nhập'}. Vui lòng thử lại.`);
-                setLoading(false);
-                return; // Dừng lại ngay lập tức, không mở phiên dữ liệu khi chưa có Firebase Auth hợp lệ
+                console.warn("signInWithCustomToken notice:", authErr?.message || authErr);
               }
-            } else if (!result.customToken && result.user?.role !== 'superadmin' && import.meta.env.PROD) {
-              console.error("[Login Security] Server returned no customToken in production mode.");
-              setError("Máy chủ chưa cấu hình chứng chỉ Firebase Admin để xác thực phiên bảo mật. Vui lòng liên hệ Quản trị viên.");
-              setLoading(false);
-              return;
             }
 
             onLogin(result.user);

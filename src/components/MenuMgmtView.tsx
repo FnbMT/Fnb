@@ -1,5 +1,5 @@
 import React, { useState, useRef, useMemo } from 'react';
-import { UtensilsCrossed, Plus, Edit2, Trash2, Search, Image as ImageIcon, Check, X, Layers, ListPlus, Info, Download, Upload, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, ChevronDown, Filter } from 'lucide-react';
+import { UtensilsCrossed, Plus, Edit2, Trash2, Search, Image as ImageIcon, Check, X, Layers, ListPlus, Info, Download, Upload, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, ChevronDown, Filter, Loader2 } from 'lucide-react';
 import { MenuItem, CATEGORIES, MenuItemType, RecipeItem, AddOnItem } from '../types';
 import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
@@ -23,9 +23,9 @@ export const MenuMgmtView = ({
   onUpdateInventoryCategories
 }: { 
   menu: MenuItem[], 
-  onAddItem: (item: MenuItem) => void,
+  onAddItem: (item: MenuItem) => Promise<void> | void,
   onDeleteItem: (id: string) => void,
-  onUpdateItem: (item: MenuItem) => void,
+  onUpdateItem: (item: MenuItem) => Promise<void> | void,
   categories: string[],
   inventoryCategories: string[],
   onAddCategory: (cat: string) => void,
@@ -49,6 +49,8 @@ export const MenuMgmtView = ({
   const [editingCategoryError, setEditingCategoryError] = useState('');
   const [isQuickUpdate, setIsQuickUpdate] = useState(false);
   const [quickPrices, setQuickPrices] = useState<Record<string, number>>({});
+  const [isImporting, setIsImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ current: number; total: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSaveRenameCategory = () => {
@@ -117,8 +119,12 @@ export const MenuMgmtView = ({
         return `${ingredient?.code || r.ingredientId}:${r.quantity}`;
       }).join('|') || '';
 
-      // Format add-ons as NAME:PRICE:QUANTITY
-      const addOnsStr = item.addOns?.map(a => `${a.name}:${a.price}:${a.quantity || 1}`).join('|') || '';
+      // Format add-ons as NAME_OR_CODE:PRICE:QUANTITY (liên kết với mặt hàng trong kho)
+      const addOnsStr = item.addOns?.map(a => {
+        const inv = menu.find(m => m.id === a.inventoryItemId);
+        const nameOrCode = inv?.code || a.name;
+        return `${nameOrCode}:${a.price}:${a.quantity || 1}`;
+      }).join('|') || '';
 
       return {
         'Mã món': item.code,
@@ -210,35 +216,48 @@ export const MenuMgmtView = ({
         }
 
         const prefix = isInventory ? 'NL' : 'MA';
-        let code = row['Mã món'] || row['Mã hàng'] || row['Mã'];
+        const rawCode = (row['Mã món'] || row['Mã hàng'] || row['Mã'] || '').toString().trim();
+        const rawName = (row['Tên món'] || row['Tên hàng'] || '').toString().trim();
+
+        // Match existing item by Code or by Name
+        let existingItem = rawCode ? allItemsMap.get(rawCode.toLowerCase()) : undefined;
+        if (!existingItem && rawName) {
+          existingItem = allItemsByName.get(rawName.toLowerCase());
+        }
+
+        let code = rawCode;
         if (!code) {
-           const count = isInventory ? ++goodsCount : ++dishCount;
-           code = `${prefix}${count.toString().padStart(3, '0')}`;
+          if (existingItem) {
+            code = existingItem.code;
+          } else {
+            const count = isInventory ? ++goodsCount : ++dishCount;
+            code = `${prefix}${count.toString().padStart(3, '0')}`;
+          }
         }
         
         let item: MenuItem;
         let isNew = false;
-        const existingItem = allItemsMap.get(code.toLowerCase());
 
         if (existingItem) {
           item = { ...existingItem }; // copy existing
-          item.name = (row['Tên món'] || row['Tên hàng'] || item.name).trim();
-          if (row['Giá bán'] !== undefined) item.price = Number(row['Giá bán']) || 0;
-          if (row['Giá vốn'] !== undefined) item.costPrice = Number(row['Giá vốn']) || 0;
+          item.name = rawName || item.name;
+          if (row['Giá bán'] !== undefined && row['Giá bán'] !== '') item.price = Number(row['Giá bán']) || 0;
+          if (row['Giá vốn'] !== undefined && row['Giá vốn'] !== '') item.costPrice = Number(row['Giá vốn']) || 0;
           item.category = category;
-          if (row['Đơn vị']) item.unit = row['Đơn vị'];
+          if (row['Đơn vị']) item.unit = String(row['Đơn vị']).trim();
           if (row['Trạng thái']) item.status = row['Trạng thái'] === 'Hết món' ? 'out_of_stock' : 'available';
-          if (row['Tồn kho'] !== undefined) item.stock = Number(row['Tồn kho']) || 0;
+          if (row['Tồn kho'] !== undefined && row['Tồn kho'] !== '') item.stock = Number(row['Tồn kho']) || 0;
           item.type = type;
           item.isInventory = isInventory;
-          item.recipe = [];
-          item.addOns = [];
+          // BẢO VỆ DỮ LIỆU: Mặc định giữ nguyên công thức và món kèm hiện có của món, không được xóa trắng!
+          item.recipe = existingItem.recipe ? existingItem.recipe.map(r => ({ ...r })) : [];
+          item.addOns = existingItem.addOns ? existingItem.addOns.map(a => ({ ...a })) : [];
         } else {
           isNew = true;
           item = {
             id: Math.random().toString(36).substr(2, 9),
             code: code,
-            name: (row['Tên món'] || row['Tên hàng'] || 'Món mới').trim(),
+            name: rawName || 'Món mới',
             price: Number(row['Giá bán']) || 0,
             costPrice: Number(row['Giá vốn']) || 0,
             category: category,
@@ -267,7 +286,7 @@ export const MenuMgmtView = ({
         onUpdateInventoryCategories(Array.from(newInventoryCategories));
       }
 
-      // Helper to generate missing ingredients
+      // Helper to generate missing ingredients/warehouse items
       const getOrCreateIngredient = (nameOrCode: string): MenuItem => {
         const query = nameOrCode.toLowerCase().trim();
         if (allItemsMap.has(query)) return allItemsMap.get(query)!;
@@ -310,31 +329,51 @@ export const MenuMgmtView = ({
         return newIng;
       };
 
+      // Helper to look up an existing or processed warehouse item
+      const findWarehouseItem = (nameOrCode: string): MenuItem | undefined => {
+        const query = nameOrCode.trim().toLowerCase();
+        const inMenu = menu.find(m => 
+          (m.isInventory || m.type === 'goods' || m.category === 'Nguyên liệu') &&
+          (m.code.toLowerCase() === query || m.name.toLowerCase().trim() === query)
+        );
+        if (inMenu) return inMenu;
+        const matchInMap = allItemsMap.get(query) || allItemsByName.get(query);
+        if (matchInMap && (matchInMap.isInventory || matchInMap.type === 'goods' || matchInMap.category === 'Nguyên liệu')) {
+          return matchInMap;
+        }
+        return undefined;
+      };
+
       // Second pass: Process recipes, addons and cost prices
       for (const processed of processedItems) {
         const item = processed.item;
         const row = (item as any)._rawRow;
         if (!row) continue;
 
-        // Parse recipe
+        // Parse recipe: Chỉ ghi đè khi trong file Excel có cung cấp dữ liệu công thức cụ thể
         let calculatedCostPrice = 0;
-        const recipeStr = row['Thành phần (Công thức)'];
-        if (recipeStr && typeof recipeStr === 'string') {
-          // Split by |, or , or +
+        const recipeColKey = Object.keys(row).find(k => {
+          const l = k.toLowerCase();
+          return l.includes('thành phần') || l.includes('công thức') || l.includes('recipe');
+        });
+        const rawRecipeVal = recipeColKey ? row[recipeColKey] : undefined;
+        if (rawRecipeVal !== undefined && rawRecipeVal !== null && String(rawRecipeVal).trim() !== '') {
+          const recipeStr = String(rawRecipeVal).trim();
+          item.recipe = []; // Thay thế công thức bằng dữ liệu mới từ Excel
           const parts = recipeStr.split(/[|,+]/);
           parts.forEach(part => {
             const [ingNameOrCode, qtyStr] = part.split(':');
             if (ingNameOrCode && qtyStr) {
               const qty = Number(qtyStr.trim().replace(/[^0-9.]/g, ''));
               if (!isNaN(qty) && qty > 0) {
-                 const ingredient = getOrCreateIngredient(ingNameOrCode);
+                 const ingredient = findWarehouseItem(ingNameOrCode) || getOrCreateIngredient(ingNameOrCode);
                  item.recipe!.push({
                    ingredientId: ingredient.id,
                    name: ingredient.name,
                    quantity: qty,
                    unit: ingredient.unit
                  });
-                 calculatedCostPrice += (ingredient.costPrice * qty);
+                 calculatedCostPrice += ((ingredient.costPrice || 0) * qty);
               }
             }
           });
@@ -345,28 +384,39 @@ export const MenuMgmtView = ({
           item.costPrice = calculatedCostPrice;
         }
 
-        // Parse add-ons
-        const addOnsStr = row['Món thêm'];
-        if (addOnsStr && typeof addOnsStr === 'string') {
+        // Parse add-ons: Món ăn kèm BẮT BUỘC phải liên kết với mặt hàng trong Kho hàng
+        const addOnsColKey = Object.keys(row).find(k => {
+          const l = k.toLowerCase();
+          return l.includes('món thêm') || l.includes('món kèm') || l.includes('topping') || l.includes('addon');
+        });
+        const rawAddOnsVal = addOnsColKey ? row[addOnsColKey] : undefined;
+        if (rawAddOnsVal !== undefined && rawAddOnsVal !== null && String(rawAddOnsVal).trim() !== '') {
+          const addOnsStr = String(rawAddOnsVal).trim();
+          item.addOns = []; // Thay thế món kèm bằng dữ liệu mới từ Excel
           const parts = addOnsStr.split(/[|]/);
           parts.forEach(part => {
             const [nameOrCode, priceStr, qtyStr] = part.split(':');
             if (nameOrCode && priceStr) {
               const price = Number(priceStr.trim().replace(/[^0-9.]/g, ''));
               const qty = qtyStr ? Number(qtyStr.trim().replace(/[^0-9.]/g, '')) : 1;
-              const inv = menu.find(m => 
-                (m.isInventory || m.type === 'goods' || m.category === 'Nguyên liệu') &&
-                (m.code.toLowerCase() === nameOrCode.trim().toLowerCase() || m.name.toLowerCase() === nameOrCode.trim().toLowerCase())
-              );
-              if (!isNaN(price)) {
+              
+              // Món ăn kèm bắt buộc phải là một nguyên liệu/mặt hàng trong Kho hàng!
+              let inv = findWarehouseItem(nameOrCode);
+              // Nếu chưa có trong kho, tự động tạo mặt hàng này trong Kho hàng (Nhóm Nguyên liệu)
+              // để đảm bảo inventoryItemId luôn luôn hợp lệ, phục vụ trừ kho và tính giá vốn chuẩn xác!
+              if (!inv) {
+                inv = getOrCreateIngredient(nameOrCode);
+              }
+
+              if (!isNaN(price) && inv) {
                 item.addOns!.push({
                   id: Math.random().toString(36).substr(2, 7),
-                  inventoryItemId: inv ? inv.id : '',
-                  name: inv ? inv.name : nameOrCode.trim(),
-                  unit: inv ? inv.unit : 'cái',
+                  inventoryItemId: inv.id, // BẮT BUỘC có inventoryItemId từ Kho hàng
+                  name: inv.name,
+                  unit: inv.unit || 'cái',
                   quantity: qty || 1,
                   price: price,
-                  costPrice: inv ? (inv.costPrice || 0) : 0
+                  costPrice: inv.costPrice || 0
                 });
               }
             }
@@ -377,23 +427,38 @@ export const MenuMgmtView = ({
       }
 
       // Add or update all items
-      // Ensure inventory/ingredients are added first
+      // Ensure inventory/ingredients are added first so dishes referencing them find them
       processedItems.sort((a, b) => {
         const aIsInv = a.item.isInventory || a.item.type === 'goods' ? 1 : 0;
         const bIsInv = b.item.isInventory || b.item.type === 'goods' ? 1 : 0;
         return bIsInv - aIsInv;
       });
 
-      for (const processed of processedItems) {
-        if (processed.isNew) {
-           onAddItem(processed.item);
-        } else {
-           onUpdateItem(processed.item);
+      setIsImporting(true);
+      setImportProgress({ current: 0, total: processedItems.length });
+
+      try {
+        let savedCount = 0;
+        for (const processed of processedItems) {
+          if (processed.isNew) {
+             await onAddItem(processed.item);
+          } else {
+             await onUpdateItem(processed.item);
+          }
+          savedCount++;
+          setImportProgress({ current: savedCount, total: processedItems.length });
         }
+        
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        alert(`Đã nhập và lưu thành công ${savedCount} món/nguyên liệu vào hệ thống!`);
+      } catch (err: any) {
+        console.error('Lỗi khi lưu dữ liệu nhập Excel:', err);
+        alert(`Có lỗi xảy ra khi lưu vào hệ thống: ${err?.message || 'Vui lòng kiểm tra lại kết nối mạng'}`);
+      } finally {
+        setIsImporting(false);
+        setImportProgress(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
       }
-      
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      alert(`Đã nhập thành công ${processedItems.length} món/nguyên liệu!`);
     };
     reader.readAsBinaryString(file);
   };
@@ -604,10 +669,15 @@ export const MenuMgmtView = ({
           </button>
           
           <button 
+            disabled={isImporting}
             onClick={() => fileInputRef.current?.click()}
-            className="order-2 lg:order-none flex-1 lg:flex-none flex flex-col md:flex-row items-center justify-center gap-1 md:gap-2 px-2 md:px-4 py-2 bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl text-[10px] md:text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-black/10 dark:hover:bg-white/10 transition-all cursor-pointer"
+            className={cn(
+              "order-2 lg:order-none flex-1 lg:flex-none flex flex-col md:flex-row items-center justify-center gap-1 md:gap-2 px-2 md:px-4 py-2 bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl text-[10px] md:text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-black/10 dark:hover:bg-white/10 transition-all cursor-pointer",
+              isImporting && "opacity-50 cursor-not-allowed"
+            )}
           >
-            <Upload className="w-4 h-4" /> <span>Import<span className="hidden md:inline"> Excel</span></span>
+            {isImporting ? <Loader2 className="w-4 h-4 animate-spin text-emerald-500" /> : <Upload className="w-4 h-4" />}
+            <span>{isImporting ? 'Đang lưu...' : <>Import<span className="hidden md:inline"> Excel</span></>}</span>
           </button>
           <button 
             onClick={handleExport}
@@ -875,7 +945,7 @@ export const MenuMgmtView = ({
                 <div className="text-right">
                   <p className="text-[9px] md:text-[10px] text-gray-500 uppercase hidden md:block">Tồn kho</p>
                   <p className="text-xs md:text-sm font-mono text-gray-600 dark:text-gray-400">
-                    {Number(item.stock || 0).toLocaleString('vi-VN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} {item.unit}
+                    {Number(item.stock || 0).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })} {item.unit}
                   </p>
                 </div>
               </div>
@@ -1343,6 +1413,35 @@ export const MenuMgmtView = ({
                 Lưu thay đổi
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal hiển thị tiến trình khi nhập Excel */}
+      {isImporting && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl p-6 max-w-md w-full shadow-2xl text-center space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 text-emerald-500 flex items-center justify-center mx-auto">
+              <Loader2 className="w-7 h-7 animate-spin" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white">Đang nhập dữ liệu từ Excel</h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Đang lưu dữ liệu an toàn vào cơ sở dữ liệu hệ thống. Vui lòng không đóng trang web hoặc chuyển trang.</p>
+            </div>
+            {importProgress && (
+              <div className="space-y-2 pt-2">
+                <div className="flex justify-between text-xs text-gray-600 dark:text-gray-400 font-semibold">
+                  <span>Tiến độ lưu</span>
+                  <span>{importProgress.current} / {importProgress.total} ({Math.round((importProgress.current / (importProgress.total || 1)) * 100)}%)</span>
+                </div>
+                <div className="w-full bg-black/10 dark:bg-white/10 h-2.5 rounded-full overflow-hidden">
+                  <div 
+                    className="bg-emerald-500 h-full transition-all duration-200 rounded-full"
+                    style={{ width: `${Math.round((importProgress.current / (importProgress.total || 1)) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

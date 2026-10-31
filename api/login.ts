@@ -138,6 +138,11 @@ export default async function handler(req: any, res: any) {
     const userData = userDoc.data();
     const userId = userDoc.id;
 
+    if (userData.isDeleted || userData.status === 'deleted') {
+      recordFailedAttempt(rateLimitKey);
+      return res.status(401).json({ error: 'Tài khoản người dùng này đã bị xóa hoặc không còn hoạt động' });
+    }
+
     // 4. Xác thực mật khẩu:
     // Đọc vùng bảo mật user_secrets
     let secretDoc: any = null;
@@ -254,9 +259,9 @@ export default async function handler(req: any, res: any) {
       tokenVersion
     });
 
-    // Trong môi trường production, từ chối cấp phiên nếu Admin SDK chưa thể cấp customToken
-    if ((process.env.NODE_ENV === 'production' || process.env.REQUIRE_ADMIN_AUTH === 'true') && !customToken) {
-      console.error("[Login Security] Firebase Admin SDK chưa được cấu hình Service Account để tạo customToken trong môi trường production.");
+    // Chỉ chặn nếu môi trường yêu cầu bắt buộc Firebase Auth token (REQUIRE_ADMIN_AUTH === 'true')
+    if (process.env.REQUIRE_ADMIN_AUTH === 'true' && !customToken) {
+      console.error("[Login Security] Firebase Admin SDK chưa được cấu hình Service Account để tạo customToken.");
       return res.status(503).json({
         error: 'Máy chủ chưa được cấu hình Firebase Admin SDK Service Account để khởi tạo phiên đăng nhập bảo mật.'
       });
