@@ -52,16 +52,16 @@ export default async function handler(req: any, res: any) {
 
   try {
     // 1. Kiểm tra tài khoản Quản trị viên tối cao (Superadmin)
-    // NGUYÊN TẮC AN TOÀN: Bắt buộc SUPERADMIN_PASSWORD phải được cấu hình rõ ràng trong biến môi trường!
-    // TUYỆT ĐỐI KHÔNG mở endpoint đặc quyền bằng mật khẩu mặc định cố định.
-    const expectedSuperUser = process.env.SUPERADMIN_USERNAME || 'superadmin';
-    const expectedSuperPass = process.env.SUPERADMIN_PASSWORD;
+    // CHỈ áp dụng khi username là 'superadmin' VÀ storeCode là 'admin' hoặc 'superadmin'
+    // Tuyệt đối không can thiệp hay hiển thị thông tin SuperAdmin cho tài khoản quán thông thường (admin)
+    const isSuperAdmin = (cleanStoreCode === 'admin' || cleanStoreCode === 'superadmin') && cleanUsername === 'superadmin';
 
-    if (cleanStoreCode === 'admin' && cleanUsername === expectedSuperUser) {
+    if (isSuperAdmin) {
+      const expectedSuperPass = process.env.SUPERADMIN_PASSWORD;
       if (!expectedSuperPass || expectedSuperPass.trim().length === 0) {
         console.error("[Auth Security] Đăng nhập SuperAdmin bị từ chối: Biến môi trường SUPERADMIN_PASSWORD chưa được cấu hình trên máy chủ.");
         return res.status(401).json({
-          error: 'Tính năng đăng nhập Quản trị viên tối cao chưa được kích hoạt cấu hình an toàn trên máy chủ.'
+          error: 'Tên đăng nhập hoặc mật khẩu không đúng'
         });
       }
 
@@ -70,7 +70,7 @@ export default async function handler(req: any, res: any) {
 
         const sessionToken = generateAuthToken({
           uid: 'superadmin',
-          username: expectedSuperUser,
+          username: 'superadmin',
           role: 'superadmin',
           storeId: 'superadmin',
           isSuperAdmin: true,
@@ -90,7 +90,7 @@ export default async function handler(req: any, res: any) {
           customToken,
           user: {
             id: 'superadmin',
-            username: expectedSuperUser,
+            username: 'superadmin',
             name: 'Super Admin',
             role: 'superadmin',
             storeId: 'superadmin',

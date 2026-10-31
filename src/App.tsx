@@ -238,8 +238,8 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
     { id: 'inventory', label: 'Kho hàng', icon: Package },
     { id: 'customers', label: 'Khách hàng', icon: Users },
     { id: 'shifts', label: 'Ca làm việc', icon: Wallet },
-    { id: 'reports', label: 'Báo cáo doanh thu', icon: BarChart3 },
-    { id: 'tax_report', label: 'Báo cáo bán hàng', icon: FileText }
+    { id: 'reports', label: 'Doanh Thu', icon: BarChart3 },
+    { id: 'tax_report', label: 'Bán Hàng', icon: FileText }
   ];
 
   const currentPackageIdForMenu = currentUser?.store?.subscription?.packageId || 'trial';
@@ -356,7 +356,7 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
       </div>
 
       {/* Mobile Bottom Navigation */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-white dark:bg-[#151619] border-t border-black/10 dark:border-white/10 flex items-center justify-start px-4 z-40 overflow-x-auto no-scrollbar gap-2">
+      <div className="md:hidden fixed bottom-0 left-0 right-0 h-[calc(4rem+env(safe-area-inset-bottom))] pb-[env(safe-area-inset-bottom)] bg-white dark:bg-[#151619] border-t border-black/10 dark:border-white/10 flex items-center justify-start px-3 z-40 overflow-x-auto no-scrollbar gap-1.5">
         {menuItems.map((item) => {
           const isAllowed = isFeatureAllowedInMenu(item.id);
           return (
@@ -364,9 +364,9 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
               key={item.id}
               onClick={() => setView(item.id as ViewType)}
               className={cn(
-                "flex flex-col items-center justify-center min-w-[60px] h-full gap-1 transition-all duration-200 relative",
+                "flex flex-col items-center justify-center min-w-[58px] px-1 h-full gap-1 transition-all duration-200 relative shrink-0",
                 activeView === item.id 
-                  ? "text-emerald-600 dark:text-emerald-500" 
+                  ? "text-emerald-600 dark:text-emerald-500 font-bold" 
                   : "text-gray-500 hover:text-gray-900 dark:hover:text-white"
               )}
             >
@@ -387,7 +387,7 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
         })}
         <button 
             onClick={onLogout}
-            className="flex flex-col items-center justify-center min-w-[60px] h-full gap-1 text-rose-600 dark:text-rose-500/70 hover:text-rose-500"
+            className="flex flex-col items-center justify-center min-w-[58px] px-1 h-full gap-1 text-rose-600 dark:text-rose-500/70 hover:text-rose-500 shrink-0"
           >
             <LogOut className="w-5 h-5" />
             <span className="text-[10px] font-medium whitespace-nowrap">Thoát</span>
@@ -4248,7 +4248,7 @@ export default function App() {
               )}
               {view === 'reports' && (
                 !checkStoreTabPermission('reports', currentUser, packages) ? (
-                  <LockedTabView title="Báo cáo doanh thu" onUpgrade={() => setShowUpgradeModal(true)} />
+                  <LockedTabView title="Doanh Thu" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
                   <ReportsView isDataReady={invoicesReady} invoices={invoices} activeOrdersCount={activeOrdersCount} businessDate={currentBusinessDate} />
                 )
@@ -4288,7 +4288,7 @@ export default function App() {
               )}
               {view === 'tax_report' && (
                 !checkStoreTabPermission('tax_report', currentUser, packages) ? (
-                  <LockedTabView title="Báo cáo bán hàng" onUpgrade={() => setShowUpgradeModal(true)} />
+                  <LockedTabView title="Bán Hàng" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
                   <TaxReportView 
                     invoices={invoices}
@@ -5054,15 +5054,15 @@ const Header = ({
     tables: 'Sơ đồ phòng bàn',
     menu_mgmt: 'Quản lý thực đơn',
     kitchen: 'Điều phối nhà bếp',
-    reports: 'Báo cáo doanh thu',
+    reports: 'Doanh Thu',
     inventory: 'Quản lý kho hàng',
     customers: 'Khách hàng (CRM)',
     shifts: 'Quản lý ca làm việc',
     user_mgmt: 'Quản lý nhân viên',
-    summary: 'Tổng kết & Báo cáo',
+    summary: currentUser?.role === 'admin' ? 'Tổng kết & Báo cáo' : 'Hóa đơn & In ấn',
     settings: 'Cài đặt hệ thống',
     my_payroll: 'Lương & Chấm công',
-    tax_report: 'Báo cáo thuế'
+    tax_report: 'Bán Hàng'
   };
 
   const store = currentUser?.store;

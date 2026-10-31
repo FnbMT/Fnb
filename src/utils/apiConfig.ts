@@ -22,7 +22,7 @@ export function getApiBaseUrl(): string {
     }
 
     // URL Cloud Run production mặc định của ứng dụng
-    return 'https://ais-dev-ztxgz7o3wbfwmnadict5eu-77884896237.asia-southeast1.run.app';
+    return 'https://ais-dev-6ow7kxztfy55cvar3b722d-91599679751.asia-southeast1.run.app';
   }
 
   // 3. Môi trường trình duyệt Web: dùng đường dẫn tương đối

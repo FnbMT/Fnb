@@ -1501,15 +1501,15 @@ export const SummaryView = ({
 
   return (
     <div className="p-8 space-y-6 h-full overflow-y-auto">
-      {activeTab==='items'&&periodInvoices.some(i=>i.total>0&&!i.items?.length)&&<div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Có hóa đơn thiếu chi tiết món. Thống kê theo món chưa đầy đủ; cần đối soát hóa đơn gốc.</div>}
-      {sourceMismatch && <div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{sourceMismatch}</div>}
-      {(!reportDataReady || reportError) && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{reportError || 'Đang đồng bộ toàn bộ chứng từ. Số liệu dưới đây chưa được xác nhận đầy đủ; chưa thể xuất báo cáo.'}</div>}
-      {activeTab === 'financial' && <div className="text-sm text-gray-500">Lợi nhuận dùng doanh thu gồm VAT theo hóa đơn; doanh thu món là trước VAT, sau giảm giá. Lương: {financialCostBasis==='payroll' ? 'tạm tính theo các bảng lương đã chốt; chưa bao gồm nhân viên chưa chốt, phân bổ theo ngày khi xem ngày' : 'theo phiếu chi lương thực tế trong kỳ'}. {financialCostBasis==='payroll'&&!payrollDataReady ? 'Bảng lương đang đồng bộ.' : ''}<select className="ml-2 rounded border bg-transparent p-1" value={financialCostBasis} onChange={event=>setFinancialCostBasis(event.target.value as 'cash'|'payroll')}><option value="cash">Chi lương thực tế</option><option value="payroll">Bảng lương đã chốt (tạm tính)</option></select></div>}
+      {isAdmin && activeTab==='items'&&periodInvoices.some(i=>i.total>0&&!i.items?.length)&&<div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Có hóa đơn thiếu chi tiết món. Thống kê theo món chưa đầy đủ; cần đối soát hóa đơn gốc.</div>}
+      {isAdmin && sourceMismatch && <div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{sourceMismatch}</div>}
+      {isAdmin && (!reportDataReady || reportError) && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{reportError || 'Đang đồng bộ toàn bộ chứng từ. Số liệu dưới đây chưa được xác nhận đầy đủ; chưa thể xuất báo cáo.'}</div>}
+      {isAdmin && activeTab === 'financial' && <div className="text-sm text-gray-500">Lợi nhuận dùng doanh thu gồm VAT theo hóa đơn; doanh thu món là trước VAT, sau giảm giá. Lương: {financialCostBasis==='payroll' ? 'tạm tính theo các bảng lương đã chốt; chưa bao gồm nhân viên chưa chốt, phân bổ theo ngày khi xem ngày' : 'theo phiếu chi lương thực tế trong kỳ'}. {financialCostBasis==='payroll'&&!payrollDataReady ? 'Bảng lương đang đồng bộ.' : ''}<select className="ml-2 rounded border bg-transparent p-1" value={financialCostBasis} onChange={event=>setFinancialCostBasis(event.target.value as 'cash'|'payroll')}><option value="cash">Chi lương thực tế</option><option value="payroll">Bảng lương đã chốt (tạm tính)</option></select></div>}
       <div className="flex justify-between items-center">
         <div className="flex items-center gap-4">
           <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
             <BarChart3 className="w-6 h-6 text-emerald-600 dark:text-emerald-500" />
-            {isAdminOrManager ? 'Tổng kết & Báo cáo' : 'Hóa đơn & Tổng kết'}
+            {isAdmin ? 'Tổng kết & Báo cáo' : 'Hóa đơn & In ấn'}
           </h3>
           {isAdminOrManager && activeOrdersCount > 0 && (
             <div className="px-3 py-1 bg-amber-500/10 border border-amber-500/30 rounded-full flex items-center gap-2">
@@ -1721,7 +1721,7 @@ export const SummaryView = ({
         </div>
       )}
 
-      {statsAggregates?.coverageStatus === 'partial' && (
+      {isAdmin && statsAggregates?.coverageStatus === 'partial' && (
         <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-xs text-amber-700 dark:text-amber-400 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="text-base">⚠️</span>
@@ -2397,7 +2397,7 @@ export const SummaryView = ({
                 >
                   Tất cả món ({sortedItemSales.length})
                 </button>
-                {missingCostItems.length > 0 && (
+                {isAdmin && missingCostItems.length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
@@ -2416,7 +2416,7 @@ export const SummaryView = ({
                   </button>
                 )}
               </div>
-              {missingCostItems.length > 0 && onNavigateToMenu && isAdminOrManager && (
+              {isAdmin && missingCostItems.length > 0 && onNavigateToMenu && (
                 <button
                   type="button"
                   onClick={onNavigateToMenu}

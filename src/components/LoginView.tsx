@@ -111,6 +111,13 @@ export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) 
       }
 
       // 2. FALLBACK NGOẠI TUYẾN / MẤT KẾT NỐI SERVER (Chỉ áp dụng khi máy chủ không phản hồi)
+      const isSuperAttempt = (storeCode.toLowerCase().trim() === 'admin' || storeCode.toLowerCase().trim() === 'superadmin') && username.toLowerCase().trim() === 'superadmin';
+      if (isSuperAttempt) {
+        setError('Không thể kết nối đến máy chủ bảo mật. Vui lòng kiểm tra lại kết nối mạng.');
+        setLoading(false);
+        return;
+      }
+
       const storeQuery = query(collection(db, 'stores'), where('code', '==', storeCode.toLowerCase().trim()));
       const storeSnapshot = await getDocs(storeQuery);
       

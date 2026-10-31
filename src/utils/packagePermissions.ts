@@ -24,12 +24,12 @@ export const APP_PACKAGE_TABS: PackageTabDefinition[] = [
   },
   { 
     id: 'reports', 
-    label: 'Báo cáo doanh thu', 
+    label: 'Doanh Thu', 
     description: 'Báo cáo doanh thu bán hàng theo ca, theo ngày, phương thức thanh toán' 
   },
   { 
     id: 'tax_report', 
-    label: 'Báo cáo bán hàng', 
+    label: 'Bán Hàng', 
     description: 'Báo cáo hóa đơn chi tiết bán lẻ, xuất báo cáo doanh số' 
   },
   { 
