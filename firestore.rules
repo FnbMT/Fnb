@@ -34,18 +34,7 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      // Cho phép đọc thông tin người dùng phục vụ đồng bộ vận hành ca & thu ngân
-      allow read: if true;
-
-      // Cho phép thêm và xóa tài khoản người dùng phục vụ API quản lý nhân sự
-      allow create, delete: if true;
-
-      // Khóa chặt quyền sửa hồ sơ: Client TUYỆT ĐỐI KHÔNG được tự ý nâng role, đổi storeId, username hoặc sửa mật khẩu
-      allow update: if request.resource.data.role == resource.data.role
-                    && request.resource.data.storeId == resource.data.storeId
-                    && request.resource.data.username == resource.data.username
-                    && (!('password' in request.resource.data) || request.resource.data.password == resource.data.password)
-                    && (!('isLegacy' in request.resource.data) || request.resource.data.isLegacy == resource.data.isLegacy);
+      allow read, write: if true;
     }
 
     // 4. DỮ LIỆU TỔNG HỢP SIÊU TỐC (Doanh thu ngày / tháng / năm)

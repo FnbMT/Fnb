@@ -8,6 +8,7 @@ import { collection, query, where, getDocs, limit, doc, getDoc, updateDoc } from
 import { Capacitor } from '@capacitor/core';
 
 import { apiUrl } from '../utils/apiConfig';
+import { computeSha256 } from '../utils/cryptoHelper';
 
 export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) => void, onRegisterClick?: () => void }) => {
   const isNative = Capacitor.isNativePlatform();
@@ -140,29 +141,56 @@ export const LoginView = ({ onLogin, onRegisterClick }: { onLogin: (user: User) 
       const q = query(
         collection(db, 'users'), 
         where('storeId', '==', storeId), 
-        where('username', '==', username.toLowerCase().trim()), 
-        where('password', '==', password.trim())
+        where('username', '==', username.toLowerCase().trim())
       );
       const querySnapshot = await getDocs(q);
 
       if (!querySnapshot.empty) {
         const userDoc = querySnapshot.docs[0];
         const userData = userDoc.data();
-        
-        try {
-          await updateDoc(doc(db, 'users', userDoc.id), {
-            lastLogin: new Date().toISOString()
-          });
-        } catch (e) {}
+        let isAuthSuccess = false;
 
-        onLogin({
-          ...userData,
-          id: userDoc.id,
-          store: storeData
-        } as any);
-      } else {
-        setError('Tên đăng nhập hoặc mật khẩu không đúng');
+        // A. Kiểm tra mật khẩu trực tiếp (tương thích các tài khoản legacy)
+        if (userData.password && String(userData.password).trim() === password.trim()) {
+          isAuthSuccess = true;
+        }
+
+        // B. Nếu không có trường password (tài khoản đã nâng cấp bảo mật như luontv37):
+        // Kiểm tra đối chiếu với system/user_secret_${userDoc.id}
+        if (!isAuthSuccess) {
+          try {
+            const secretSnap = await getDoc(doc(db, 'system', `user_secret_${userDoc.id}`));
+            if (secretSnap.exists()) {
+              const secData = secretSnap.data();
+              if (secData.clientHash) {
+                const userHash = await computeSha256(password.trim());
+                if (userHash === secData.clientHash) {
+                  isAuthSuccess = true;
+                }
+              }
+            }
+          } catch (secErr) {
+            console.warn("Lỗi kiểm tra secret fallback:", secErr);
+          }
+        }
+
+        if (isAuthSuccess) {
+          try {
+            await updateDoc(doc(db, 'users', userDoc.id), {
+              lastLogin: new Date().toISOString()
+            });
+          } catch (e) {}
+
+          onLogin({
+            ...userData,
+            id: userDoc.id,
+            store: storeData
+          } as any);
+          return;
+        }
       }
+
+      setError('Tên đăng nhập hoặc mật khẩu không đúng');
     } catch (err: any) {
       console.error(err);
       setError('Lỗi kết nối. Hãy thử lại hoặc kiểm tra kết nối mạng.');

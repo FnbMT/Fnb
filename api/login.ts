@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import crypto from 'node:crypto';
 import { adminDb, adminAuth } from './_firebaseAdmin';
 import { hashPassword, verifyPassword, encryptAes, decryptAes } from './_crypto';
 import { generateAuthToken } from './_token';
@@ -185,13 +186,11 @@ export default async function handler(req: any, res: any) {
         return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
       }
 
-      // Nếu tài khoản cũ vẫn còn trường password thô trong users, dọn dẹp an toàn khi đã xác thực đúng
-      if (userData.password) {
+      // Đồng bộ clientHash (SHA-256) vào user_secrets phục vụ xác thực ngoại tuyến mượt mà trên App Native
+      if (!secretData?.clientHash) {
         try {
-          await adminDb.collection('users').doc(userId).update({
-            password: FieldValue.delete(),
-            isLegacy: FieldValue.delete()
-          });
+          const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
+          await adminDb.collection('user_secrets').doc(userId).update({ clientHash });
         } catch (_) {}
       }
     } else {
@@ -199,14 +198,16 @@ export default async function handler(req: any, res: any) {
       if (userData.password && String(userData.password).trim() === cleanPassword) {
         isPasswordValid = true;
 
-        // DI CHUYỂN AN TOÀN VÀO USER_SECRETS
+        // DI CHUYỂN AN TOÀN VÀO USER_SECRETS (kèm SHA-256 clientHash)
         try {
           const passwordHash = hashPassword(cleanPassword);
+          const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
           const secretPayload: Record<string, any> = {
             userId,
             storeId,
             role: userData.role,
             passwordHash,
+            clientHash,
             tokenVersion: 1,
             migratedAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()

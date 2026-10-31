@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import crypto from 'node:crypto';
 import { adminDb, adminAuth } from './_firebaseAdmin';
 import { hashPassword, encryptAes } from './_crypto';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token';
@@ -68,11 +69,13 @@ export default async function handler(req: any, res: any) {
 
     // 4. BĂM MẬT KHẨU MỘT CHIỀU SCRYPT VÀ LƯU VÀO VÙNG BẢO MẬT USER_SECRETS
     const passwordHash = hashPassword(cleanPassword);
+    const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
     const secretPayload: Record<string, any> = {
       userId: cleanUserId,
       storeId,
       role,
       passwordHash,
+      clientHash,
       tokenVersion: nextTokenVersion,
       passwordChangedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -92,16 +95,14 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // 5. CẬP NHẬT USERS: ĐỒNG BỘ TOKEN_VERSION VÀ XÓA TRIỆT ĐỂ BẢN RÕ
+    // 5. CẬP NHẬT USERS: ĐỒNG BỘ TOKEN_VERSION VÀ THỜI GIAN ĐỔI MẬT KHẨU
     try {
       await userDocRef.update({
         tokenVersion: nextTokenVersion,
-        password: FieldValue.delete(),
-        isLegacy: FieldValue.delete(),
         passwordUpdatedAt: new Date().toISOString()
       });
     } catch (e) {
-      console.warn("Could not clean plaintext password in users:", e);
+      console.warn("Could not update tokenVersion in users:", e);
     }
 
     // 6. THU HỒI TỨC THÌ TRONG CACHE VÀ FIREBASE AUTH REFRESH TOKENS

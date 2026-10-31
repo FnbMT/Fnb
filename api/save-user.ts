@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import crypto from 'node:crypto';
 import { adminDb, adminAuth } from './_firebaseAdmin';
 import { hashPassword, encryptAes } from './_crypto';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token';
@@ -132,11 +133,13 @@ export default async function handler(req: any, res: any) {
       }
 
       // 2. Lưu thông tin băm vào vùng tối mật user_secrets
+      const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
       const secretPayload: Record<string, any> = {
         userId: newUserId,
         storeId: targetStoreId,
         role: role,
         passwordHash,
+        clientHash,
         tokenVersion: 1,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
@@ -258,14 +261,13 @@ export default async function handler(req: any, res: any) {
       if (passwordChanged) {
         const cleanPassword = String(user.password).trim();
         secretPayload.passwordHash = hashPassword(cleanPassword);
+        secretPayload.clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
         secretPayload.passwordChangedAt = new Date().toISOString();
         if (role === 'admin') {
           secretPayload.encryptedPassword = encryptAes(cleanPassword);
         } else {
           secretPayload.encryptedPassword = FieldValue.delete();
         }
-        updates.password = FieldValue.delete();
-        updates.isLegacy = FieldValue.delete();
       }
 
       try {
