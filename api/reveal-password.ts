@@ -1,6 +1,6 @@
-import { adminDb } from './_firebaseAdmin';
-import { decryptAes } from './_crypto';
-import { getAuthenticatedCaller } from './_token';
+import { adminDb } from './_firebaseAdmin.js';
+import { decryptAes } from './_crypto.js';
+import { getAuthenticatedCaller } from './_token.js';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {

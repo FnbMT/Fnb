@@ -20,7 +20,7 @@ export default async function handler(req: any, res: any) {
   };
 
   try {
-    const { getAdminStatus } = await import('./_firebaseAdmin');
+    const { getAdminStatus } = await import('./_firebaseAdmin.js');
     const status = getAdminStatus();
     firebaseAdminInfo.initialized = status.isInitialized;
     firebaseAdminInfo.hasCredential = status.hasCredential;

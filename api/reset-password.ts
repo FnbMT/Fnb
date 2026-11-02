@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
-import { adminDb, adminAuth } from './_firebaseAdmin';
-import { hashPassword, encryptAes } from './_crypto';
-import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token';
+import { adminDb, adminAuth } from './_firebaseAdmin.js';
+import { hashPassword, encryptAes } from './_crypto.js';
+import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
 import { FieldValue } from 'firebase-admin/firestore';
 
 export default async function handler(req: any, res: any) {

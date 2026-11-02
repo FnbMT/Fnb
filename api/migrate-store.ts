@@ -1,13 +1,13 @@
 import type { Request, Response } from 'express';
-import { getAuthenticatedCaller } from './_token';
+import { getAuthenticatedCaller } from './_token.js';
 import { 
   migrateStoreMenu, 
   migrateStoreInvoices, 
   migrateStoreCash,
   acquireStoreLock,
   releaseStoreLock
-} from '../scripts/migrate_legacy_data';
-import { backfillStoreDailyStats } from '../scripts/backfill_daily_stats';
+} from '../scripts/migrate_legacy_data.js';
+import { backfillStoreDailyStats } from '../scripts/backfill_daily_stats.js';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {

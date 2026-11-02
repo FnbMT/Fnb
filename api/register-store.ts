@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
-import { adminDb } from './_firebaseAdmin';
-import { hashPassword, encryptAes } from './_crypto';
+import { adminDb } from './_firebaseAdmin.js';
+import { hashPassword, encryptAes } from './_crypto.js';
 
 const INITIAL_MENU = [
   { name: 'Cà phê đen', price: 20000, category: 'Cà phê', unit: 'Ly' },
