@@ -24,6 +24,14 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 export default async function handler(req: any, res: any) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -62,7 +70,7 @@ export default async function handler(req: any, res: any) {
       if (!expectedSuperPass || expectedSuperPass.trim().length === 0) {
         console.error("[Auth Security] Đăng nhập SuperAdmin bị từ chối: Biến môi trường SUPERADMIN_PASSWORD chưa được cấu hình trên máy chủ.");
         return res.status(401).json({
-          error: 'Tên đăng nhập hoặc mật khẩu không đúng'
+          error: 'Biến môi trường SUPERADMIN_PASSWORD chưa được cấu hình trên máy chủ Vercel.'
         });
       }
 
@@ -78,12 +86,17 @@ export default async function handler(req: any, res: any) {
           tokenVersion: 1
         });
 
-        const customToken = await adminAuth.createCustomToken('superadmin', {
-          role: 'superadmin',
-          isSuperAdmin: true,
-          storeId: 'superadmin',
-          tokenVersion: 1
-        });
+        let customToken: string | null = null;
+        try {
+          customToken = await adminAuth.createCustomToken('superadmin', {
+            role: 'superadmin',
+            isSuperAdmin: true,
+            storeId: 'superadmin',
+            tokenVersion: 1
+          });
+        } catch (tokenErr) {
+          console.warn("[Auth Security] createCustomToken error for superadmin:", tokenErr);
+        }
 
         return res.status(200).json({
           success: true,
@@ -100,7 +113,7 @@ export default async function handler(req: any, res: any) {
         });
       } else {
         recordFailedAttempt(rateLimitKey);
-        return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
+        return res.status(401).json({ error: 'Mật khẩu SuperAdmin không chính xác' });
       }
     }
 

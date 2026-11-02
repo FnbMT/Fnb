@@ -175,7 +175,10 @@ export const LoginView = ({
         } else {
           // Server đã phản hồi từ chối (401, 403, 404, 429, 500, 503) -> Dừng lại và hiển thị lỗi, KHÔNG fallback
           const errData = await resp.json().catch(() => ({}));
-          setError(errData.error || 'Tên đăng nhập hoặc mật khẩu không đúng');
+          const fallbackError = resp.status >= 500 
+            ? `Máy chủ Vercel gặp sự cố nội bộ (HTTP ${resp.status}: FUNCTION_INVOCATION_FAILED). Vui lòng xem tab Logs trên Vercel.`
+            : 'Tên đăng nhập hoặc mật khẩu không đúng';
+          setError(errData.error || fallbackError);
           setLoading(false);
           return;
         }

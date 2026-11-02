@@ -69,11 +69,21 @@ if (hasAdminCredential) {
     if (existing.length > 0) {
       rawAdminApp = existing[0];
     } else if (serviceAccountRaw) {
-      const parsed = JSON.parse(serviceAccountRaw);
-      rawAdminApp = initAdminApp({
-        credential: cert(parsed),
-        projectId: parsed.project_id || projectId
-      });
+      let parsed: any;
+      try {
+        parsed = typeof serviceAccountRaw === 'string' ? JSON.parse(serviceAccountRaw) : serviceAccountRaw;
+      } catch (jsonErr) {
+        console.warn("[FirebaseAdmin] Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:", jsonErr);
+      }
+      if (parsed) {
+        if (parsed.private_key && typeof parsed.private_key === 'string') {
+          parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+        }
+        rawAdminApp = initAdminApp({
+          credential: cert(parsed),
+          projectId: parsed.project_id || projectId
+        });
+      }
     } else if (clientEmail && privateKey) {
       rawAdminApp = initAdminApp({
         credential: cert({
@@ -94,17 +104,32 @@ if (hasAdminCredential) {
 }
 
 // 2. Khởi tạo Firebase Client SDK trên server (làm cầu nối fallback siêu tốc và an toàn cho dev/preview)
+let _cachedClientDb: any = null;
 const getClientDbInstance = () => {
-  const apps = getClientApps();
-  const cApp = apps.find(a => a.name === 'server-client-bridge') || initClientApp({
-    apiKey,
-    authDomain,
-    projectId,
-  }, 'server-client-bridge');
-  return getClientFirestore(cApp);
+  if (_cachedClientDb) return _cachedClientDb;
+  try {
+    const apps = getClientApps();
+    const cApp = apps.find(a => a.name === 'server-client-bridge') || initClientApp({
+      apiKey,
+      authDomain,
+      projectId,
+    }, 'server-client-bridge');
+    _cachedClientDb = getClientFirestore(cApp);
+    return _cachedClientDb;
+  } catch (err) {
+    console.warn("[FirebaseAdmin] getClientDbInstance fallback failed:", err);
+    return null;
+  }
 };
 
-const cDb = getClientDbInstance();
+const cDb: any = new Proxy({} as any, {
+  get(_target, prop) {
+    const instance = getClientDbInstance();
+    if (!instance) return undefined;
+    const val = (instance as any)[prop];
+    return typeof val === 'function' ? val.bind(instance) : val;
+  }
+});
 
 // Hàm chuẩn hóa dữ liệu khi gửi qua Client SDK (thay thế FieldValue.delete)
 const sanitizeDataForClient = (data: any): any => {
