@@ -139,6 +139,15 @@
       ]
     },
     {
+      "collectionGroup": "stock_card",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "storeId", "order": "ASCENDING" },
+        { "fieldPath": "itemId", "order": "ASCENDING" },
+        { "fieldPath": "date", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "inventory_audits",
       "queryScope": "COLLECTION",
       "fields": [

@@ -10,6 +10,8 @@ export const UserMgmtView = ({
   users,
   isDataReady = false,
   currentUser,
+  payrollMonth: propPayrollMonth,
+  onPayrollMonthChange,
   attendanceRecords,
   payrollRecords,
   onAddUser, 
@@ -21,6 +23,8 @@ export const UserMgmtView = ({
   users: User[],
   isDataReady?: boolean, 
   currentUser?: User,
+  payrollMonth?: string,
+  onPayrollMonthChange?: (month: string) => void,
   attendanceRecords: AttendanceRecord[],
   payrollRecords: PayrollRecord[],
   onAddUser: (user: User) => void,
@@ -51,7 +55,12 @@ export const UserMgmtView = ({
   const [newUser, setNewUser] = useState(defaultNewUser);
 
   const [isFinalizing,setIsFinalizing]=useState(false);
-  const [payrollMonth, setPayrollMonth] = useState(format(new Date(), 'yyyy-MM'));
+  const [internalMonth, setInternalMonth] = useState(format(new Date(), 'yyyy-MM'));
+  const payrollMonth = propPayrollMonth || internalMonth;
+  const handleMonthChange = (val: string) => {
+    setInternalMonth(val);
+    onPayrollMonthChange?.(val);
+  };
   
   // Temporary state for bonus inputs
   const [bonusInputs, setBonusInputs] = useState<Record<string, number>>({});
@@ -443,7 +452,7 @@ export const UserMgmtView = ({
             <input 
               type="month" 
               value={payrollMonth}
-              onChange={(e) => setPayrollMonth(e.target.value)}
+              onChange={(e) => handleMonthChange(e.target.value)}
               className="bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-xl px-4 py-2 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
             />
           </div>

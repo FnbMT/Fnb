@@ -5,6 +5,10 @@ import {
   increment,
   deleteField,
   arrayUnion,
+  query,
+  where,
+  limit,
+  getDocs,
   type Transaction,
   type DocumentReference,
 } from "firebase/firestore";
@@ -33,7 +37,7 @@ import {
   businessDateOf,
   isSalesCategory,
 } from "../utils/dataIntegrity";
-import { getVietnamBusinessDate } from "../utils/firestoreDateHelper";
+import { getVietnamBusinessDate, getVietnamYesterdayDate } from "../utils/firestoreDateHelper";
 import {
   fetchStoreRows,
   fetchMatchingStoreRows,
@@ -871,22 +875,47 @@ export async function recordAttendanceAtomic(
   user: User,
   input: Partial<AttendanceRecord>
 ) {
-  const history = (
-    await fetchMatchingStoreRows<AttendanceRecord>(
-      "attendance_records",
-      user.storeId,
-      "userId",
-      user.id
-    )
-  ).filter((r) => r.checkInTime && !r.checkOutTime);
+  const now = new Date().toISOString(),
+    day = getVietnamBusinessDate(now);
   const guardRef = doc(
       db,
       "checkout_locks",
       `attendance_${user.storeId}_${user.id}`
     ),
     freshRef = doc(collection(db, "attendance_records"));
-  const now = new Date().toISOString(),
-    day = getVietnamBusinessDate(now);
+
+  // Tối ưu: Chỉ tìm các lượt chấm công đang mở trong các ngày gần nhất (tối đa 5 bản ghi), tránh quét toàn bộ lịch sử
+  let history: AttendanceRecord[] = [];
+  try {
+    const snap = await getDocs(
+      query(
+        collection(db, "attendance_records"),
+        where("storeId", "==", user.storeId),
+        where("userId", "==", user.id),
+        where("date", ">=", getVietnamYesterdayDate(day)),
+        limit(5)
+      )
+    );
+    history = snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as AttendanceRecord))
+      .filter((r) => r.checkInTime && !r.checkOutTime);
+  } catch (_) {
+    try {
+      const snap = await getDocs(
+        query(
+          collection(db, "attendance_records"),
+          where("storeId", "==", user.storeId),
+          where("userId", "==", user.id),
+          limit(10)
+        )
+      );
+      history = snap.docs
+        .map((d) => ({ ...d.data(), id: d.id } as AttendanceRecord))
+        .filter((r) => r.checkInTime && !r.checkOutTime);
+    } catch (e) {
+      console.warn("Không thể tìm lượt chấm công mở theo index:", e);
+    }
+  }
   return runTransaction(db, async (txn) => {
     const guardSnap = await txn.get(guardRef),
       guard = guardSnap.data();

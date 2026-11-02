@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { FileText, Download, Printer, Save, Loader2, AlertCircle, RefreshCw, CheckCircle2 } from 'lucide-react';
-import { Invoice, User, DailyStats } from '../types';
+import { Invoice, User, DailyStats, CashTransaction } from '../types';
 import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { format, parseISO, isSameDay, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameYear } from 'date-fns';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, limit, startAfter, orderBy, QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
+import { collection, query, where, getDocs, limit, startAfter, orderBy, onSnapshot, QueryDocumentSnapshot, DocumentData, doc, setDoc } from 'firebase/firestore';
 import { getVietnamBusinessDate, getVietnamDayBoundariesIso } from '../utils/firestoreDateHelper';
 import { dailyStatsFromSources } from '../utils/dataIntegrity';
 import { subscribeDateRange } from '../utils/completeDataSource';
@@ -113,27 +113,158 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
   const [loadingStatusText, setLoadingStatusText] = useState('');
   const activeRequestId = useRef(0);
 
-  const [refreshKey,setRefreshKey]=useState(0);
-  const [taxDataReady,setTaxDataReady]=useState(false);
-  const [taxError,setTaxError]=useState('');
-  const reconcileDays=useCallback(async (_days:string[])=>{setRefreshKey(value=>value+1);},[]);
-  useEffect(()=>{
-    setTaxDataReady(false);setTaxError('');setIsLoadingYear(true);setLoadingStatusText('Đang tải đủ hóa đơn của năm từ server...');
-    setDailyStats([]);setYearInvoices([]);setCoveredDays(new Set());setConfirmedZeroDays(new Set());
-    if(!currentUser?.storeId)return;
-    const first=`${selectedYear}-01-01`, last=`${selectedYear}-12-31`;
-    const dates=eachDayOfInterval({start:parseISO(first),end:parseISO(last)}).map(d=>format(d,'yyyy-MM-dd')).filter(d=>d<=getVietnamBusinessDate());
-    return subscribeDateRange<Invoice>('invoices',currentUser.storeId,first,last,(rows,confirmed)=>{
-      const active=rows.filter(i=>i.status!=='cancelled');
-      try {
-        const stats=dailyStatsFromSources(currentUser.storeId,dates,active,[],confirmed);
-        setYearInvoices(active);setDailyStats(stats);setTaxDataReady(confirmed);if(confirmed)setTaxError('');
-        setCoveredDays(new Set(confirmed?dates:[]));
-        setConfirmedZeroDays(new Set(confirmed?stats.filter(s=>s.invoiceCount===0).map(s=>s.date):[]));
-        setIsLoadingYear(!confirmed);setLoadingStatusText(confirmed?'':'Đang chờ xác nhận dữ liệu từ server...');
-      }catch(error){setTaxDataReady(false);setIsLoadingYear(false);setTaxError(error instanceof Error?error.message:'Chứng từ không hợp lệ.');}
-    },error=>{setTaxDataReady(false);setIsLoadingYear(false);setTaxError(error.message);setLoadingStatusText('');});
-  },[currentUser?.storeId,selectedYear,refreshKey,todayVn]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [taxDataReady, setTaxDataReady] = useState(false);
+  const [taxError, setTaxError] = useState('');
+  const [isReconciling, setIsReconciling] = useState(false);
+
+  const reconcileDays = useCallback(async (daysToReconcile: string[]) => {
+    if (!currentUser?.storeId || !daysToReconcile.length || isReconciling) return;
+    setIsReconciling(true);
+    setLoadingStatusText(`Đang đối soát dữ liệu ${daysToReconcile.length} ngày...`);
+    try {
+      const storeId = currentUser.storeId;
+      for (const day of daysToReconcile) {
+        const { startIso, endExclusiveIso } = getVietnamDayBoundariesIso(day);
+
+        // Lấy hóa đơn trong ngày
+        const invQ = query(
+          collection(db, 'invoices'),
+          where('storeId', '==', storeId),
+          where('date', '>=', startIso),
+          where('date', '<', endExclusiveIso),
+          orderBy('date', 'asc')
+        );
+        const invSnap = await getDocs(invQ);
+        const dayInvoices = invSnap.docs
+          .map(d => ({ ...d.data(), id: d.id } as Invoice))
+          .filter(i => i.status !== 'cancelled');
+
+        // Lấy sổ quỹ trong ngày
+        const cashQ = query(
+          collection(db, 'cash_transactions'),
+          where('storeId', '==', storeId),
+          where('date', '>=', startIso),
+          where('date', '<', endExclusiveIso),
+          orderBy('date', 'asc')
+        );
+        const cashSnap = await getDocs(cashQ);
+        const dayCash = cashSnap.docs.map(d => ({ ...d.data(), id: d.id } as CashTransaction));
+
+        // Tính DailyStats chuẩn và đánh dấu coverageStatus: reconciled (hoặc zero_activity)
+        const computed = dailyStatsFromSources(storeId, [day], dayInvoices, dayCash, true);
+        if (computed.length > 0) {
+          const stat = computed[0];
+          await setDoc(doc(db, 'daily_stats', `${storeId}_${day}`), stat, { merge: true });
+        }
+      }
+      setRefreshKey(v => v + 1);
+    } catch (err) {
+      console.error('Lỗi đối soát ngày thuế:', err);
+      alert(err instanceof Error ? err.message : 'Có lỗi khi đối soát dữ liệu.');
+    } finally {
+      setIsReconciling(false);
+      setLoadingStatusText('');
+    }
+  }, [currentUser?.storeId, isReconciling]);
+
+  useEffect(() => {
+    setTaxDataReady(false); setTaxError(''); setIsLoadingYear(true); setLoadingStatusText('Đang tải dữ liệu thống kê từ server...');
+    setDailyStats([]); setYearInvoices([]); setCoveredDays(new Set()); setConfirmedZeroDays(new Set());
+    if (!currentUser?.storeId) return;
+    const first = `${selectedYear}-01-01`, last = `${selectedYear}-12-31`;
+    const dates = eachDayOfInterval({ start: parseISO(first), end: parseISO(last) }).map(d => format(d, 'yyyy-MM-dd')).filter(d => d <= getVietnamBusinessDate());
+
+    let disposed = false;
+    let fallbackUnsub: (() => void) | null = null;
+
+    // 1. TỐI ƯU P0: Ưu tiên nghe trực tiếp từ daily_stats của năm với kiểm tra metadata server
+    const statsQ = query(
+      collection(db, 'daily_stats'),
+      where('storeId', '==', currentUser.storeId),
+      where('year', '==', selectedYear)
+    );
+
+    const unsubStats = onSnapshot(statsQ, { includeMetadataChanges: true }, (snapshot) => {
+      if (disposed) return;
+      const isFromServer = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
+
+      if (!snapshot.empty) {
+        // Hủy listener fallback ngay khi có snapshot stats
+        if (fallbackUnsub) {
+          fallbackUnsub();
+          fallbackUnsub = null;
+        }
+
+        const statsList = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as DailyStats));
+        setDailyStats(statsList);
+        setTaxDataReady(isFromServer);
+        setIsLoadingYear(!isFromServer);
+        setLoadingStatusText(isFromServer ? '' : 'Đang xác nhận dữ liệu từ server...');
+
+        const reconciledSet = new Set(
+          statsList
+            .filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity')
+            .map(s => s.date)
+        );
+        setCoveredDays(reconciledSet);
+        setConfirmedZeroDays(new Set(statsList.filter(s => s.coverageStatus === 'zero_activity' || (s.invoiceCount || 0) === 0).map(s => s.date)));
+      } else if (isFromServer) {
+        // Fallback an toàn: Chỉ khi server xác nhận daily_stats rỗng
+        if (!fallbackUnsub) {
+          fallbackUnsub = subscribeDateRange<Invoice>('invoices', currentUser.storeId, first, last, (rows, confirmed) => {
+            if (disposed) return;
+            const active = rows.filter(i => i.status !== 'cancelled');
+            try {
+              const stats = dailyStatsFromSources(currentUser.storeId, dates, active, [], confirmed);
+              setYearInvoices(active);
+              setDailyStats(stats);
+              setTaxDataReady(confirmed);
+              if (confirmed) setTaxError('');
+              setCoveredDays(new Set(confirmed ? dates : []));
+              setConfirmedZeroDays(new Set(confirmed ? stats.filter(s => s.invoiceCount === 0).map(s => s.date) : []));
+              setIsLoadingYear(!confirmed);
+              setLoadingStatusText(confirmed ? '' : 'Đang chờ xác nhận dữ liệu...');
+            } catch (error) {
+              setTaxDataReady(false);
+              setIsLoadingYear(false);
+              setTaxError(error instanceof Error ? error.message : 'Chứng từ không hợp lệ.');
+            }
+          }, error => {
+            if (disposed) return;
+            setTaxDataReady(false);
+            setIsLoadingYear(false);
+            setTaxError(error.message);
+          });
+        }
+      }
+    }, (error) => {
+      console.warn('daily_stats listener fallback sang invoices:', error);
+      if (!fallbackUnsub) {
+        fallbackUnsub = subscribeDateRange<Invoice>('invoices', currentUser.storeId, first, last, (rows, confirmed) => {
+          if (disposed) return;
+          const active = rows.filter(i => i.status !== 'cancelled');
+          const stats = dailyStatsFromSources(currentUser.storeId, dates, active, [], confirmed);
+          setYearInvoices(active);
+          setDailyStats(stats);
+          setTaxDataReady(confirmed);
+          setCoveredDays(new Set(confirmed ? dates : []));
+          setConfirmedZeroDays(new Set(confirmed ? stats.filter(s => s.invoiceCount === 0).map(s => s.date) : []));
+          setIsLoadingYear(false);
+        }, err => {
+          if (disposed) return;
+          setTaxError(err.message);
+          setIsLoadingYear(false);
+        });
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unsubStats();
+      if (fallbackUnsub) fallbackUnsub();
+    };
+  }, [currentUser?.storeId, selectedYear, refreshKey, todayVn]);
   const effectiveInvoices=yearInvoices;
 
   // Thông tin cố định của HKD
@@ -165,32 +296,33 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
     const todayStr = getVietnamBusinessDate();
     const elapsedDays = allQuarterDays.filter(d => format(d, 'yyyy-MM-dd') <= todayStr);
 
-    const statsDates = new Set(mergedDailyStats.filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity').map(s => s.date));
+    const reconciledDates = new Set(mergedDailyStats.filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity').map(s => s.date));
     const missingDays: string[] = [];
 
     elapsedDays.forEach(d => {
       const dStr = format(d, 'yyyy-MM-dd');
-      const isCovered = statsDates.has(dStr) || confirmedZeroDays.has(dStr) || coveredDays.has(dStr);
+      const isCovered = reconciledDates.has(dStr) || confirmedZeroDays.has(dStr);
       if (!isCovered) {
         missingDays.push(dStr);
       }
     });
 
-    // 1. Doanh thu từ dailyStats cho các ngày có stats
+    // 1. Doanh thu từ dailyStats cho toàn bộ các ngày có stats (kể cả live_tracking/partial cũng không được bỏ qua tiền)
     const statsRevenue = mergedDailyStats
       .filter(s => {
         const year = parseInt(s.date.slice(0, 4), 10);
         const month = parseInt(s.date.split('-')[1], 10);
-        return (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity') && year === selectedYear && month >= startMonth && month <= endMonth;
+        return year === selectedYear && month >= startMonth && month <= endMonth;
       })
       .reduce((sum, s) => sum + (s.totalRevenue || 0), 0);
 
     // 2. Doanh thu từ hóa đơn fallback cho các ngày không có trong mergedDailyStats
+    const existingStatDates = new Set(mergedDailyStats.map(s => s.date));
     const fallbackInvoicesRevenue = effectiveInvoices.filter(inv => {
       const invBDate = inv.businessDate || getVietnamBusinessDate(inv.date);
       const invYear = inv.businessYear || parseInt(invBDate.slice(0, 4), 10);
       const invMonth = parseInt(invBDate.slice(5, 7), 10);
-      return invYear === selectedYear && invMonth >= startMonth && invMonth <= endMonth && !statsDates.has(invBDate);
+      return invYear === selectedYear && invMonth >= startMonth && invMonth <= endMonth && !existingStatDates.has(invBDate);
     }).reduce((sum, inv) => sum + inv.total, 0);
 
     const revenue = statsRevenue + fallbackInvoicesRevenue;
@@ -247,13 +379,13 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
 
     const days = eachDayOfInterval({ start, end });
     const todayStr = getVietnamBusinessDate();
-    const statsDates = new Set(mergedDailyStats.filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity').map(s => s.date));
+    const reconciledDates = new Set(mergedDailyStats.filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity').map(s => s.date));
     const missing: string[] = [];
 
     days.forEach(d => {
       const dStr = format(d, 'yyyy-MM-dd');
       if (dStr <= todayStr) {
-        const isCovered = statsDates.has(dStr) || confirmedZeroDays.has(dStr) || coveredDays.has(dStr);
+        const isCovered = reconciledDates.has(dStr) || confirmedZeroDays.has(dStr);
         if (!isCovered) {
           missing.push(dStr);
         }
@@ -261,7 +393,7 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
     });
 
     return missing;
-  }, [fromDate, toDate, mergedDailyStats, confirmedZeroDays, coveredDays]);
+  }, [fromDate, toDate, mergedDailyStats, confirmedZeroDays]);
 
   // Calculate daily revenue for the selected date range
   const dailyData = useMemo(() => {
@@ -276,7 +408,7 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
       const dayStr = format(day, 'yyyy-MM-dd');
       
       let revenue = 0;
-      const stat = mergedDailyStats.find(s => s.date === dayStr && (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity'));
+      const stat = mergedDailyStats.find(s => s.date === dayStr);
       if (stat && typeof stat.totalRevenue === 'number' && (stat.invoiceCount !== undefined || stat.totalRevenue > 0)) {
         revenue = stat.totalRevenue;
       } else {

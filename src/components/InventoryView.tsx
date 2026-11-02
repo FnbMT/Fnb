@@ -1,11 +1,13 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Package, Plus, Search, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, X, Edit2, Trash2, ClipboardCheck, History, List, ChevronRight, Info, Banknote, CreditCard } from 'lucide-react';
 import { MenuItem, InventoryAudit, AuditItem, StockCardEntry, User } from '../types';
 import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
 import { format } from 'date-fns';
 import { operationId } from '../utils/dataIntegrity';
-import { getVietnamBusinessDate } from '../utils/firestoreDateHelper';
+import { getVietnamBusinessDate, getVietnamDayBoundariesIso } from '../utils/firestoreDateHelper';
+import { db } from '../lib/firebase';
+import { collection, query, where, getDocs, limit, startAfter, orderBy, QueryDocumentSnapshot } from 'firebase/firestore';
 
 const formatStock = (val: number | undefined | null): string => {
   if (val === undefined || val === null || isNaN(Number(val))) return '0';
@@ -50,6 +52,120 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
   const [selectedStockCardItem, setSelectedStockCardItem] = useState<string | null>(null);
   const [stockStartDate, setStockStartDate] = useState<string>('');
   const [stockEndDate, setStockEndDate] = useState<string>('');
+
+  // On-demand Stock Card querying with cursor pagination
+  const [stockCardRows, setStockCardRows] = useState<StockCardEntry[]>([]);
+  const [lastStockCardDoc, setLastStockCardDoc] = useState<QueryDocumentSnapshot | null>(null);
+  const [hasMoreStockCard, setHasMoreStockCard] = useState(false);
+  const [isLoadingStockCard, setIsLoadingStockCard] = useState(false);
+
+  // On-demand Audit History querying with cursor pagination
+  const [auditRows, setAuditRows] = useState<InventoryAudit[]>([]);
+  const [lastAuditDoc, setLastAuditDoc] = useState<QueryDocumentSnapshot | null>(null);
+  const [hasMoreAudits, setHasMoreAudits] = useState(false);
+  const [isLoadingAudits, setIsLoadingAudits] = useState(false);
+
+  const fetchStockCard = useCallback(async (isNext = false, currentLastDoc: QueryDocumentSnapshot | null = null) => {
+    if (!currentUser?.storeId) return;
+    setIsLoadingStockCard(true);
+    try {
+      const constraints: any[] = [
+        where('storeId', '==', currentUser.storeId)
+      ];
+      if (selectedStockCardItem) {
+        constraints.push(where('itemId', '==', selectedStockCardItem));
+      }
+      if (stockStartDate) {
+        const { startIso } = getVietnamDayBoundariesIso(stockStartDate);
+        constraints.push(where('date', '>=', startIso));
+      }
+      if (stockEndDate) {
+        const { endExclusiveIso } = getVietnamDayBoundariesIso(stockEndDate);
+        constraints.push(where('date', '<', endExclusiveIso));
+      }
+      constraints.push(orderBy('date', 'desc'));
+      constraints.push(limit(50));
+
+      const docCursor = isNext ? currentLastDoc : null;
+      if (docCursor) {
+        constraints.push(startAfter(docCursor));
+      }
+
+      let snap;
+      try {
+        snap = await getDocs(query(collection(db, 'stock_card'), ...constraints));
+      } catch (err: any) {
+        console.warn('Fallback truy vấn thẻ kho:', err);
+        const fallbackConstraints: any[] = [where('storeId', '==', currentUser.storeId)];
+        if (selectedStockCardItem) {
+          fallbackConstraints.push(where('itemId', '==', selectedStockCardItem));
+        }
+        fallbackConstraints.push(limit(100));
+        snap = await getDocs(query(collection(db, 'stock_card'), ...fallbackConstraints));
+      }
+
+      const rows = snap.docs.map(d => ({ ...d.data(), id: d.id } as StockCardEntry));
+      rows.sort((a, b) => b.date.localeCompare(a.date));
+
+      const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+      setLastStockCardDoc(lastDoc);
+      setHasMoreStockCard(snap.docs.length >= 50);
+
+      if (isNext) {
+        setStockCardRows(prev => [...prev, ...rows]);
+      } else {
+        setStockCardRows(rows);
+      }
+    } catch (error) {
+      console.error('Lỗi tải thẻ kho:', error);
+    } finally {
+      setIsLoadingStockCard(false);
+    }
+  }, [currentUser?.storeId, selectedStockCardItem, stockStartDate, stockEndDate]);
+
+  useEffect(() => {
+    if (activeTab === 'stock_card') {
+      fetchStockCard(false, null);
+    }
+  }, [activeTab, selectedStockCardItem, stockStartDate, stockEndDate, currentUser?.storeId]);
+
+  const fetchAudits = useCallback(async (isNext = false, currentLastDoc: QueryDocumentSnapshot | null = null) => {
+    if (!currentUser?.storeId) return;
+    setIsLoadingAudits(true);
+    try {
+      const constraints: any[] = [
+        where('storeId', '==', currentUser.storeId),
+        orderBy('date', 'desc'),
+        limit(25)
+      ];
+      const docCursor = isNext ? currentLastDoc : null;
+      if (docCursor) {
+        constraints.push(startAfter(docCursor));
+      }
+      const snap = await getDocs(query(collection(db, 'inventory_audits'), ...constraints));
+      const rows = snap.docs.map(d => ({ ...d.data(), id: d.id } as InventoryAudit));
+
+      const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+      setLastAuditDoc(lastDoc);
+      setHasMoreAudits(snap.docs.length >= 25);
+
+      if (isNext) {
+        setAuditRows(prev => [...prev, ...rows]);
+      } else {
+        setAuditRows(rows);
+      }
+    } catch (err) {
+      console.error('Lỗi tải lịch sử kiểm kho:', err);
+    } finally {
+      setIsLoadingAudits(false);
+    }
+  }, [currentUser?.storeId]);
+
+  useEffect(() => {
+    if (activeTab === 'history') {
+      fetchAudits(false, null);
+    }
+  }, [activeTab, currentUser?.storeId]);
 
   const inventoryItems = menu.filter(item => item.isInventory || item.type === 'goods' || item.category === 'Nguyên liệu');
   
@@ -352,12 +468,12 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
             </tr>
           </thead>
           <tbody className="divide-y divide-black/5 dark:divide-white/5">
-            {audits.length === 0 ? (
+            {(auditRows.length > 0 ? auditRows : audits).length === 0 ? (
               <tr>
                 <td colSpan={4} className="px-6 py-12 text-center text-gray-500 italic">Chưa có lịch sử kiểm kho</td>
               </tr>
             ) : (
-              audits.map(audit => (
+              (auditRows.length > 0 ? auditRows : audits).map(audit => (
                 <tr key={audit.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
                   <td className="px-4 py-3 md:px-6 md:py-4 text-sm sticky left-0 z-10 bg-[#f9fafb] dark:bg-[#1a1b1e] group-hover:bg-[#f3f4f6] dark:group-hover:bg-[#25262b] shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
                     {format(new Date(audit.date), 'HH:mm dd/MM/yyyy')}
@@ -379,22 +495,33 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
             )}
           </tbody>
         </table>
+        {hasMoreAudits && (
+          <div className="p-4 border-t border-black/10 dark:border-white/10 text-center">
+            <button
+              onClick={() => fetchAudits(true, lastAuditDoc)}
+              disabled={isLoadingAudits}
+              className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold rounded-xl transition-all disabled:opacity-50"
+            >
+              {isLoadingAudits ? 'Đang tải...' : 'Tải thêm đợt kiểm kho cũ hơn'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
 
   const renderStockCard = () => {
-    let filteredEntries = selectedStockCardItem 
-      ? stockCard.filter(e => e.itemId === selectedStockCardItem)
+    let filteredEntries = stockCardRows.length > 0 || selectedStockCardItem || stockStartDate || stockEndDate
+      ? stockCardRows
       : stockCard;
 
-    if (stockStartDate) {
+    if (stockStartDate && !stockCardRows.length) {
       filteredEntries = filteredEntries.filter(e => {
         const vnDate = (e as any).businessDate || getVietnamBusinessDate(e.date);
         return vnDate >= stockStartDate;
       });
     }
-    if (stockEndDate) {
+    if (stockEndDate && !stockCardRows.length) {
       filteredEntries = filteredEntries.filter(e => {
         const vnDate = (e as any).businessDate || getVietnamBusinessDate(e.date);
         return vnDate <= stockEndDate;
@@ -494,6 +621,17 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               )}
             </tbody>
           </table>
+          {hasMoreStockCard && (
+            <div className="p-4 border-t border-black/10 dark:border-white/10 text-center">
+              <button
+                onClick={() => fetchStockCard(true, lastStockCardDoc)}
+                disabled={isLoadingStockCard}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold rounded-xl transition-all disabled:opacity-50"
+              >
+                {isLoadingStockCard ? 'Đang tải...' : 'Tải thêm biến động cũ hơn'}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );

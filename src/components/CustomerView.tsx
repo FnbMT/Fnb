@@ -38,15 +38,18 @@ export const CustomerView = ({
     c.phone.includes(search)
   );
 
-  // Tìm kiếm từ máy chủ khi từ khóa là số điện thoại hoặc mã mà không có sẵn trong 100 khách nạp sẵn
+  // Tìm kiếm từ máy chủ khi từ khóa là số điện thoại và chưa có trong danh sách nạp sẵn
   useEffect(() => {
-    if (!currentUser?.storeId || !search.trim() || search.trim().length < 3) {
+    const cleanSearch = search.trim();
+    const isPhoneNumber = /^[0-9+]{8,15}$/.test(cleanSearch.replace(/\s+/g, ''));
+    const alreadyFoundLocally = filtered.some(c => c.phone && c.phone.replace(/\s+/g, '') === cleanSearch.replace(/\s+/g, ''));
+
+    if (!currentUser?.storeId || !isPhoneNumber || alreadyFoundLocally) {
       setRemoteResults([]);
       return;
     }
-    let active=true;
+    let active = true;
     setRemoteResults([]);
-    const cleanSearch = search.trim();
     const timer = setTimeout(async () => {
       try {
         setIsSearchingRemote(true);
@@ -57,16 +60,16 @@ export const CustomerView = ({
         );
         const snap = await getDocs(q);
         const found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
-        if(active)setRemoteResults(found);
+        if (active) setRemoteResults(found);
       } catch (err) {
         console.warn('Lỗi tìm kiếm khách hàng từ xa:', err);
       } finally {
-        if(active)setIsSearchingRemote(false);
+        if (active) setIsSearchingRemote(false);
       }
     }, 350);
 
-    return () => {active=false;clearTimeout(timer);};
-  }, [search, currentUser?.storeId]);
+    return () => { active = false; clearTimeout(timer); };
+  }, [search, currentUser?.storeId, filtered]);
 
   const allDisplayCustomers = useMemo(() => {
     const map = new Map<string, Customer>();

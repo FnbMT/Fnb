@@ -26,52 +26,46 @@ export function subscribeDateRange<
 ): () => void {
   let closed = false;
   let unsubscribe: (() => void) | undefined;
-  let usingFallback = false;
   const { startIso } = getVietnamDayBoundariesIso(firstDay);
   const { endExclusiveIso } = getVietnamDayBoundariesIso(lastDay);
-  const attach = (fallback: boolean) => {
-    const constraints: QueryConstraint[] = [where("storeId", "==", storeId)];
-    if (!fallback)
-      constraints.push(
-        where("date", ">=", startIso),
-        where("date", "<", endExclusiveIso),
-        orderBy("date", "asc")
-      );
-    unsubscribe = onSnapshot(
-      query(collection(db, name), ...constraints),
-      { includeMetadataChanges: true },
-      (snapshot) => {
-        if (closed) return;
-        try {
-          const rows = snapshot.docs
-            .map((d) => ({ ...d.data(), id: d.id } as unknown as T))
-            .filter((row) => {
-              const date = businessDateOf(row);
-              return date >= firstDay && date <= lastDay;
-            });
-          onData(
-            rows,
-            !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites
-          );
-        } catch (error) {
-          onError(error instanceof Error ? error : new Error(String(error)));
-        }
-      },
-      (error) => {
-        if (closed) return;
-        if (
-          !usingFallback &&
-          (error.code === "failed-precondition" ||
-            error.code === "invalid-argument")
-        ) {
-          usingFallback = true;
-          unsubscribe?.();
-          attach(true);
-        } else onError(error);
+
+  const constraints: QueryConstraint[] = [
+    where("storeId", "==", storeId),
+    where("date", ">=", startIso),
+    where("date", "<", endExclusiveIso),
+    orderBy("date", "asc")
+  ];
+
+  unsubscribe = onSnapshot(
+    query(collection(db, name), ...constraints),
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      if (closed) return;
+      try {
+        const rows = snapshot.docs
+          .map((d) => ({ ...d.data(), id: d.id } as unknown as T))
+          .filter((row) => {
+            const date = businessDateOf(row);
+            return date >= firstDay && date <= lastDay;
+          });
+        onData(
+          rows,
+          !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites
+        );
+      } catch (error) {
+        onError(error instanceof Error ? error : new Error(String(error)));
       }
-    );
-  };
-  attach(false);
+    },
+    (error) => {
+      if (closed) return;
+      if (error.code === "failed-precondition") {
+        onError(new Error(`Truy vấn ${name} cần index (storeId, date): ${error.message}`));
+      } else {
+        onError(error);
+      }
+    }
+  );
+
   return () => {
     closed = true;
     unsubscribe?.();

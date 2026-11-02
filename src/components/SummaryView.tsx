@@ -5,7 +5,7 @@ import { format, isSameDay, isSameMonth, isSameYear, parseISO, startOfMonth, end
 import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot, onSnapshot, writeBatch, updateDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot, onSnapshot, writeBatch, updateDoc, Query } from 'firebase/firestore';
 import { getDateRangeIso, getVietnamBusinessDate, getVietnamYesterdayDate } from '../utils/firestoreDateHelper';
 import { calculateInvoiceCost, calculateInvoiceCostSnapshot, isCostExplicitlyVerified } from '../utils/costHelper';
 import { isCashPayment, isReconciledDailyStat } from '../utils/reportDataIntegrity';
@@ -772,16 +772,15 @@ export const SummaryView = ({
     }
   };
 
-  // Financial totals come from complete, live source queries. List pagination is
-  // a display concern and cannot determine the financial total of a period.
+  // 1. Lắng nghe hóa đơn và sổ quỹ theo kỳ đã chọn (Độc lập khỏi activeTab để không tải lại khi chuyển tab)
   useEffect(() => {
     if (!currentUser?.storeId) return;
     const storeId = currentUser.storeId;
     ++activeRequestId.current;
-    setIsLoadingHistorical(true); setReportDataReady(false); setPayrollDataReady(false); setReportError('');
-    setHistoricalInvoices([]); setHistoricalCash([]); setHistoricalLogs([]); setPeriodPayrolls([]); setDailyStats([]);
-    setHasMoreInvoices(false); setHasMoreCash(false); setHasMoreLogs(false);
-    setLastInvoiceDoc(null); setLastCashDoc(null); setLastLogDoc(null);
+    setIsLoadingHistorical(true); setReportDataReady(false); setReportError('');
+    setHistoricalInvoices([]); setHistoricalCash([]); setDailyStats([]);
+    setHasMoreInvoices(false); setHasMoreCash(false);
+    setLastInvoiceDoc(null); setLastCashDoc(null);
     const expected = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
     if (!expected.length) { setIsLoadingHistorical(false); setReportError('Vui lòng chọn kỳ không vượt quá ngày hiện tại.'); return; }
     const first = expected[0], last = expected[expected.length-1];
@@ -792,15 +791,59 @@ export const SummaryView = ({
       subscribeDateRange<Invoice>('invoices',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalInvoices(rows);invoicesReady=confirmed;updateReady(); },error),
       subscribeDateRange<CashTransaction>('cash_transactions',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalCash(rows);cashReady=confirmed;updateReady(); },error)
     ];
-    if(activeTab==='inventory') unsubs.push(subscribeDateRange<InventoryTransaction>('inventory_logs',storeId,first,last,(rows)=>{ if(!disposed)setHistoricalLogs(rows); },error));
-    if(activeTab==='financial') unsubs.push(onSnapshot(query(collection(db,'payroll_records'),where('storeId','==',storeId)),{includeMetadataChanges:true},snapshot=>{
-      if(disposed)return;
-      const rows=snapshot.docs.map(d=>({...d.data(),id:d.id} as PayrollRecord));
-      setPeriodPayrolls(rows.filter(p=>filterType==='year'?p.month.slice(0,4)===dateFilter.slice(0,4):p.month===dateFilter.slice(0,7)));
-      setPayrollDataReady(!snapshot.metadata.fromCache&&!snapshot.metadata.hasPendingWrites);
-    },error));
     return () => {disposed=true;unsubs.forEach(fn=>fn());};
-  }, [currentUser?.storeId,dateFilter,filterType,activeTab,todayVietnam]);
+  }, [currentUser?.storeId,dateFilter,filterType,todayVietnam]);
+
+  // 2. Chỉ tải inventory_logs khi người dùng chủ động mở tab Kho
+  useEffect(() => {
+    if (!currentUser?.storeId || activeTab !== 'inventory') return;
+    const storeId = currentUser.storeId;
+    const expected = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
+    if (!expected.length) return;
+    const first = expected[0], last = expected[expected.length-1];
+    let disposed = false;
+    setHistoricalLogs([]); setHasMoreLogs(false); setLastLogDoc(null);
+    const unsub = subscribeDateRange<InventoryTransaction>('inventory_logs',storeId,first,last,(rows)=>{ if(!disposed)setHistoricalLogs(rows); },(err)=>console.warn('Lỗi tải inventory logs:',err));
+    return () => { disposed = true; unsub(); };
+  }, [currentUser?.storeId, dateFilter, filterType, activeTab, todayVietnam]);
+
+  // 3. Chỉ tải payroll_records khi người dùng chủ động mở tab Tài chính (cho đúng kỳ đang chọn, không bị cắt bởi limit)
+  useEffect(() => {
+    if (!currentUser?.storeId || activeTab !== 'financial') return;
+    const storeId = currentUser.storeId;
+    let disposed = false;
+    setPayrollDataReady(false);
+
+    let payrollQuery: Query;
+    if (filterType === 'year') {
+      const targetYear = dateFilter.slice(0, 4);
+      payrollQuery = query(
+        collection(db, 'payroll_records'),
+        where('storeId', '==', storeId),
+        where('month', '>=', `${targetYear}-01`),
+        where('month', '<=', `${targetYear}-12`),
+        orderBy('month', 'desc')
+      );
+    } else {
+      const targetMonth = dateFilter.slice(0, 7);
+      payrollQuery = query(
+        collection(db, 'payroll_records'),
+        where('storeId', '==', storeId),
+        where('month', '==', targetMonth)
+      );
+    }
+
+    const unsub = onSnapshot(payrollQuery, { includeMetadataChanges: true }, snapshot => {
+      if (disposed) return;
+      const rows = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as PayrollRecord));
+      setPeriodPayrolls(rows.filter(p => filterType === 'year' ? p.month.slice(0, 4) === dateFilter.slice(0, 4) : p.month === dateFilter.slice(0, 7)));
+      setPayrollDataReady(!snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites);
+    }, (err) => {
+      console.warn('Lỗi tải payroll trong Summary:', err);
+      if (!disposed) setPayrollDataReady(false);
+    });
+    return () => { disposed = true; unsub(); };
+  }, [currentUser?.storeId, dateFilter, filterType, activeTab]);
 
   // 1. Toàn bộ hóa đơn thuộc kỳ được chọn của cửa hàng (KHÔNG bị lọc bởi ô tìm kiếm) dùng để tính toán số liệu, KPI, COGS
   const periodInvoices = useMemo(() => {
@@ -1160,88 +1203,12 @@ export const SummaryView = ({
   const [isSyncingCosts, setIsSyncingCosts] = useState(false);
   const [costSyncDone, setCostSyncDone] = useState(false);
 
-  // Tự động đồng bộ giá vốn mới vào tài liệu hóa đơn và daily_stats trên Firestore khi đã đủ 100% giá vốn
+  // Báo cáo tuân thủ nguyên tắc Chỉ Đọc (Read-Only): Không tự động kích hoạt batch writes vào Firestore khi chỉ mở xem báo cáo
   useEffect(() => {
-    if (!isAdminOrManager || isSyncingCosts || costSyncDone) return;
-    const toUpdate = recomputedInvoices.filter(i => i.shouldUpdateInDb);
-    if (toUpdate.length === 0 || hasAnyIncompleteInvoice || missingCostItems.length > 0) return;
-
-    let cancelled = false;
-    const syncInvoices = async () => {
-      setIsSyncingCosts(true);
-      try {
-        // 1. Cập nhật các hóa đơn trong Firestore
-        for (let i = 0; i < toUpdate.length; i += 100) {
-          if (cancelled) break;
-          const batch = writeBatch(db);
-          const chunk = toUpdate.slice(i, i + 100);
-          chunk.forEach(inv => {
-            batch.update(doc(db, 'invoices', inv.id), {
-              totalCost: inv.effectiveCost,
-              costStatus: 'complete',
-              costVersion: 3
-            });
-          });
-          await batch.commit();
-        }
-
-        // 2. ĐỒNG BỘ ĐỒNG THỜI VÀO daily_stats CHO TẤT CẢ CÁC NGÀY BỊ ẢNH HƯỞNG
-        if (!cancelled && currentUser?.storeId) {
-          const affectedDates = new Set<string>();
-          toUpdate.forEach(inv => {
-            const bDate = inv.businessDate || (inv.date ? inv.date.slice(0, 10) : '');
-            if (bDate) affectedDates.add(bDate);
-          });
-
-          if (affectedDates.size > 0) {
-            const statsBatch = writeBatch(db);
-            let statsCount = 0;
-
-            for (const date of affectedDates) {
-              const dayInvoices = recomputedInvoices.filter(i => {
-                const bDate = i.businessDate || (i.date ? i.date.slice(0, 10) : '');
-                return bDate === date && i.status !== 'cancelled';
-              });
-
-              const dayTotalCost = Math.round(dayInvoices.reduce((sum, i) => sum + (i.effectiveCost || 0), 0));
-              const allDayComplete = dayInvoices.every(i => i.isCostComplete);
-              const targetStatus = allDayComplete ? 'complete' : 'estimated';
-
-              const statRef = doc(db, 'daily_stats', `${currentUser.storeId}_${date}`);
-              statsBatch.set(statRef, {
-                storeId: currentUser.storeId,
-                date: date,
-                year: parseInt(date.slice(0, 4), 10),
-                month: date.slice(0, 7),
-                totalCost: dayTotalCost,
-                costStatus: targetStatus,
-                updatedAt: new Date().toISOString()
-              }, { merge: true });
-
-              statsCount++;
-              if (statsCount >= 100) {
-                await statsBatch.commit();
-                statsCount = 0;
-              }
-            }
-
-            if (statsCount > 0) {
-              await statsBatch.commit();
-            }
-          }
-        }
-
-        if (!cancelled) setCostSyncDone(true);
-      } catch (err) {
-        console.warn('Lỗi tự động đồng bộ giá vốn vào hóa đơn & daily_stats Firestore:', err);
-      } finally {
-        if (!cancelled) setIsSyncingCosts(false);
-      }
-    };
-
-    syncInvoices();
-    return () => { cancelled = true; };
-  }, [isAdminOrManager, recomputedInvoices, hasAnyIncompleteInvoice, missingCostItems.length, isSyncingCosts, costSyncDone, currentUser?.storeId]);
+    // Giá vốn và KPI đã được tính toán động chính xác 100% trong bộ nhớ (recomputedInvoices/statsAggregates).
+    // Không ghi ngược vào Firestore để tránh kích hoạt vòng lặp docChanges và hàng nghìn reads lan truyền cho các máy khác.
+    return;
+  }, []);
 
   // Tổng hợp dữ liệu đa tầng theo từng ngày (Per-day Single Source of Truth, 100% toàn vẹn)
   const sourceMismatch=useMemo(()=>receiptMismatch(periodInvoices,periodCash),[periodInvoices,periodCash]);

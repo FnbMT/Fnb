@@ -2,6 +2,18 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
+
+// Load environment variables from .env and .env.local if present
+if (typeof process.loadEnvFile === "function") {
+  const envPath = path.join(process.cwd(), ".env");
+  const envLocal = path.join(process.cwd(), ".env.local");
+  if (fs.existsSync(envPath)) {
+    try { process.loadEnvFile(envPath); } catch (_) {}
+  }
+  if (fs.existsSync(envLocal)) {
+    try { process.loadEnvFile(envLocal); } catch (_) {}
+  }
+}
 import loginHandler from "./api/login";
 import revealPasswordHandler from "./api/reveal-password";
 import sepayWebhookHandler from "./api/sepay-webhook";

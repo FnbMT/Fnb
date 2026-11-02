@@ -597,13 +597,28 @@ const MenuOrdering = ({
   const [customerResults, setCustomerResults] = useState<Customer[]>(customers);
   useEffect(() => { setCustomerResults(customers); }, [customers]);
   useEffect(() => {
+    // Nếu đã có danh sách customers từ props (thu ngân/quản lý) thì lọc hoàn toàn tại client, không đọc lại Firestore
+    if (customers && customers.length > 0) return;
     if (!currentUser?.storeId || !customerSearch.trim()) return;
     let active = true;
-    const timer = setTimeout(() => {
-      fetchStoreRows<Customer>('customers', currentUser.storeId).then(rows => { if(active) setCustomerResults(rows); }).catch(error => { if(active) alert(error instanceof Error ? error.message : 'Không thể tải đủ khách hàng.'); });
+    const timer = setTimeout(async () => {
+      try {
+        const q = query(
+          collection(db, 'customers'),
+          where('storeId', '==', currentUser.storeId),
+          limit(20)
+        );
+        const snap = await getDocs(q);
+        if (active) {
+          const rows = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
+          setCustomerResults(rows);
+        }
+      } catch (error) {
+        if (active) console.warn('Không thể tải gợi ý khách hàng:', error);
+      }
     }, 300);
     return () => { active = false; clearTimeout(timer); };
-  }, [customerSearch, currentUser?.storeId]);
+  }, [customerSearch, currentUser?.storeId, customers]);
   
   // Sync local state with fresh table data from props
   const activeTable = tables.find(t => t.id === selectedTable.id) || selectedTable;
@@ -2213,6 +2228,7 @@ export default function App() {
   const [cashTransactions, setCashTransactions] = useState<CashTransaction[]>([]);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>([]);
+  const [payrollMonth, setPayrollMonth] = useState<string>(() => format(new Date(), 'yyyy-MM'));
   const [payrollSourceReady, setPayrollSourceReady] = useState(false);
   const [myTodayAttendance, setMyTodayAttendance] = useState<AttendanceRecord[]>([]);
   const [currentBusinessDate, setCurrentBusinessDate] = useState<string>(() => getVietnamBusinessDate());
@@ -2883,16 +2899,31 @@ export default function App() {
     const isOrderOnly = currentUser.role === 'order';
     const unsubs: (() => void)[] = [];
 
-    // 1. Điểm danh hôm nay của chính user
+    // 1. Điểm danh hôm nay của chính user (chỉ giới hạn từ hôm qua đến nay, tối đa 10 bản ghi, không tải toàn bộ năm cũ)
+    const yesterdayDate = getVietnamYesterdayDate(currentBusinessDate);
     const myAttendanceQuery = query(
       collection(db, 'attendance_records'),
       where('storeId', '==', storeId),
-      where('userId', '==', currentUser.id)
+      where('userId', '==', currentUser.id),
+      where('date', '>=', yesterdayDate)
     );
     const unsubMyAttendance = onSnapshot(myAttendanceQuery, (snapshot) => {
       const attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
       setMyTodayAttendance(attendanceData);
-    }, (err) => console.warn('User today attendance listener error:', err));
+    }, (err) => {
+      console.warn('User today attendance listener fallback to limit:', err);
+      const fallbackMyAttendance = query(
+        collection(db, 'attendance_records'),
+        where('storeId', '==', storeId),
+        where('userId', '==', currentUser.id),
+        limit(10)
+      );
+      const unsubFallback = onSnapshot(fallbackMyAttendance, (snapshot) => {
+        const attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
+        setMyTodayAttendance(attendanceData);
+      });
+      unsubs.push(unsubFallback);
+    });
     unsubs.push(unsubMyAttendance);
 
     // Bếp và Order không cần nghe hóa đơn hay sổ quỹ
@@ -2922,77 +2953,78 @@ export default function App() {
     };
   }, [currentUser?.storeId, currentUser?.id, currentUser?.role, currentBusinessDate]);
 
-  // ON-DEMAND SYNC: Kho hàng (Chỉ lắng nghe khi mở tab Kho)
-  useEffect(() => {
-    if (!currentUser || view !== 'inventory') return;
-    const storeId = currentUser.storeId;
-    const unsubs: (() => void)[] = [];
+  // ON-DEMAND SYNC: Kho hàng được quản lý truy vấn phân trang trực tiếp trong InventoryView khi người dùng mở tab tương ứng (tiết kiệm 150 reads mỗi lần vào kho)
 
-    const auditsQuery = query(
-      collection(db, 'inventory_audits'), 
-      where('storeId', '==', storeId), 
-      orderBy('date', 'desc')
-    );
-    const unsubAudits = onSnapshot(auditsQuery, (snapshot) => {
-      const auditsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as InventoryAudit));
-      setInventoryAudits(auditsData);
-    }, (err) => {
-      console.warn('Audits orderBy fallback to limit:', err);
-      const fallbackAudits = query(collection(db, 'inventory_audits'), where('storeId', '==', storeId));
-      const unsubFallback = onSnapshot(fallbackAudits, (snapshot) => {
-        const auditsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as InventoryAudit));
-        setInventoryAudits(auditsData.sort((a, b) => b.date.localeCompare(a.date)));
-      });
-      unsubs.push(unsubFallback);
-    });
-    unsubs.push(unsubAudits);
-
-    const stockCardQuery = query(
-      collection(db, 'stock_card'), 
-      where('storeId', '==', storeId), 
-      orderBy('date', 'desc')
-    );
-    const unsubStockCard = onSnapshot(stockCardQuery, (snapshot) => {
-      const stockCardData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StockCardEntry));
-      setStockCardEntries(stockCardData);
-    }, (err) => {
-      console.warn('Stock card orderBy fallback to limit:', err);
-      const fallbackStock = query(collection(db, 'stock_card'), where('storeId', '==', storeId));
-      const unsubFallback = onSnapshot(fallbackStock, (snapshot) => {
-        const stockCardData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StockCardEntry));
-        setStockCardEntries(stockCardData.sort((a, b) => b.date.localeCompare(a.date)));
-      });
-      unsubs.push(unsubFallback);
-    });
-    unsubs.push(unsubStockCard);
-
-    return () => {
-      unsubs.forEach(u => u());
-    };
-  }, [currentUser?.storeId, view]);
-
-  // Complete source for payroll: never calculate salaries from a display-page limit.
+  // Complete source for payroll: scoped to the selected month without truncation.
   useEffect(() => {
     setPayrollSourceReady(false);
+    setAttendanceRecords([]);
+    setPayrollRecords([]);
     if (!currentUser || (view !== 'user_mgmt' && view !== 'my_payroll')) return;
     const storeId = currentUser.storeId;
     const personal = view === 'my_payroll' || !['admin','manager'].includes(currentUser.role);
     let attendanceReady = false, payrollReady = false;
-    const constraints = [where('storeId', '==', storeId)];
-    if (personal) constraints.push(where('userId','==',currentUser.id));
-    const error = (err: Error) => { setPayrollSourceReady(false); console.error('Không thể tải đầy đủ dữ liệu lương:',err); };
-    const a = onSnapshot(query(collection(db,'attendance_records'),...constraints), {includeMetadataChanges:true}, snapshot => {
-      setAttendanceRecords(snapshot.docs.map(d => ({...d.data(),id:d.id} as AttendanceRecord)).sort((a,b)=>b.date.localeCompare(a.date)));
-      attendanceReady=!snapshot.metadata.fromCache&&!snapshot.metadata.hasPendingWrites;
-      setPayrollSourceReady(attendanceReady&&payrollReady);
-    },error);
-    const p = onSnapshot(query(collection(db,'payroll_records'),...constraints), {includeMetadataChanges:true}, snapshot => {
-      setPayrollRecords(snapshot.docs.map(d=>({...d.data(),id:d.id} as PayrollRecord)).sort((a,b)=>b.month.localeCompare(a.month)));
-      payrollReady=!snapshot.metadata.fromCache&&!snapshot.metadata.hasPendingWrites;
-      setPayrollSourceReady(attendanceReady&&payrollReady);
-    },error);
-    return () => { a();p(); };
-  }, [currentUser?.storeId,currentUser?.id,currentUser?.role,view]);
+    let disposed = false;
+
+    const startDay = `${payrollMonth}-01`;
+    const endDay = `${payrollMonth}-31`;
+
+    const error = (err: Error) => { 
+      if (disposed) return;
+      setPayrollSourceReady(false); 
+      console.error('Không thể tải đầy đủ dữ liệu lương:', err); 
+    };
+
+    // 1. Chấm công đúng theo tháng được chọn (thay vì limit(300) cắt ngang nhân viên)
+    const attendanceConstraints: any[] = [where('storeId', '==', storeId)];
+    if (personal) {
+      attendanceConstraints.push(where('userId', '==', currentUser.id));
+    }
+    attendanceConstraints.push(
+      where('date', '>=', startDay),
+      where('date', '<=', endDay),
+      orderBy('date', 'desc')
+    );
+
+    const a = onSnapshot(
+      query(collection(db, 'attendance_records'), ...attendanceConstraints),
+      { includeMetadataChanges: true },
+      snapshot => {
+        if (disposed) return;
+        setAttendanceRecords(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as AttendanceRecord)).sort((a, b) => b.date.localeCompare(a.date)));
+        attendanceReady = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
+        setPayrollSourceReady(attendanceReady && payrollReady);
+      },
+      error
+    );
+
+    // 2. Bảng lương đúng theo tháng được chọn (thay vì limit(36) cắt ngang nhân viên)
+    const payrollConstraints: any[] = [
+      where('storeId', '==', storeId),
+      where('month', '==', payrollMonth)
+    ];
+    if (personal) {
+      payrollConstraints.push(where('userId', '==', currentUser.id));
+    }
+
+    const p = onSnapshot(
+      query(collection(db, 'payroll_records'), ...payrollConstraints),
+      { includeMetadataChanges: true },
+      snapshot => {
+        if (disposed) return;
+        setPayrollRecords(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as PayrollRecord)).sort((a, b) => b.month.localeCompare(a.month)));
+        payrollReady = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
+        setPayrollSourceReady(attendanceReady && payrollReady);
+      },
+      error
+    );
+
+    return () => {
+      disposed = true;
+      a();
+      p();
+    };
+  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, view, payrollMonth]);
 
 
   // Authentication
@@ -3810,7 +3842,38 @@ export default function App() {
     if(!currentUser)return;
     if(!Number.isFinite(startCash)||startCash<0){alert('Tiền đầu ca không hợp lệ.');return;}
     try {
-      const legacy=(await fetchStoreRows<Shift>('shifts',currentUser.storeId)).find(s=>s.staffId===currentUser.id&&s.status==='open');
+      // Tìm ca mở của nhân viên với query có điều kiện và limit(1) thay vì tải toàn bộ lịch sử ca
+      let legacy: Shift | undefined = undefined;
+      try {
+        const openShiftsSnap = await getDocs(
+          query(
+            collection(db, 'shifts'),
+            where('storeId', '==', currentUser.storeId),
+            where('staffId', '==', currentUser.id),
+            where('status', '==', 'open'),
+            limit(1)
+          )
+        );
+        if (!openShiftsSnap.empty) {
+          legacy = { ...openShiftsSnap.docs[0].data(), id: openShiftsSnap.docs[0].id } as Shift;
+        }
+      } catch (_) {
+        try {
+          const fallbackSnap = await getDocs(
+            query(
+              collection(db, 'shifts'),
+              where('storeId', '==', currentUser.storeId),
+              where('status', '==', 'open'),
+              limit(10)
+            )
+          );
+          legacy = fallbackSnap.docs
+            .map(d => ({ ...d.data(), id: d.id } as Shift))
+            .find(s => s.staffId === currentUser.id && s.status === 'open');
+        } catch (e) {
+          console.warn('Kiểm tra ca mở trực tiếp qua guard lock:', e);
+        }
+      }
       const guardRef=doc(db,'checkout_locks',`shift_open_${currentUser.storeId}_${currentUser.id}`);
       const freshRef=doc(collection(db,'shifts'));
       await runTransaction(db,async txn=>{
@@ -3945,7 +4008,7 @@ export default function App() {
   const handleChangePassword = async (newPassword: string) => {
     if (!currentUser) return;
     try {
-      const resp = await fetch('/api/change-password', {
+      const resp = await fetch(apiUrl('/api/change-password'), {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -4414,7 +4477,9 @@ export default function App() {
               )}
               {view === 'user_mgmt' && (
                 <UserMgmtView 
-                    isDataReady={payrollSourceReady}
+                  isDataReady={payrollSourceReady}
+                  payrollMonth={payrollMonth}
+                  onPayrollMonthChange={setPayrollMonth}
                   users={users} 
                   currentUser={currentUser}
                   attendanceRecords={attendanceRecords}
@@ -4427,7 +4492,10 @@ export default function App() {
                 />
               )}
               {view === 'my_payroll' && (
-                <MyPayrollView isDataReady={payrollSourceReady} 
+                <MyPayrollView 
+                  isDataReady={payrollSourceReady} 
+                  payrollMonth={payrollMonth}
+                  onPayrollMonthChange={setPayrollMonth}
                   currentUser={currentUser} 
                   attendanceRecords={attendanceRecords}
                   payrollRecords={payrollRecords}

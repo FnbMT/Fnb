@@ -8,6 +8,8 @@ import { attendanceTotals } from '../utils/dataIntegrity';
 export const MyPayrollView = ({ 
   currentUser,
   isDataReady = false,
+  payrollMonth: propPayrollMonth,
+  onPayrollMonthChange,
   attendanceRecords,
   payrollRecords,
   settings,
@@ -15,12 +17,19 @@ export const MyPayrollView = ({
 }: { 
   currentUser: User | null;
   isDataReady?: boolean;
+  payrollMonth?: string;
+  onPayrollMonthChange?: (month: string) => void;
   attendanceRecords: AttendanceRecord[];
   payrollRecords: PayrollRecord[];
   settings: SystemSettings | null;
   onCheckIn: (record: Partial<AttendanceRecord>) => Promise<any>;
 }) => {
-  const [payrollMonth, setPayrollMonth] = useState(format(new Date(), 'yyyy-MM'));
+  const [internalMonth, setInternalMonth] = useState(format(new Date(), 'yyyy-MM'));
+  const payrollMonth = propPayrollMonth || internalMonth;
+  const handleMonthChange = (val: string) => {
+    setInternalMonth(val);
+    onPayrollMonthChange?.(val);
+  };
 
   const payrollData = useMemo(() => {
     if (!currentUser) return null;
@@ -132,7 +141,7 @@ export const MyPayrollView = ({
               <input 
                 type="month" 
                 value={payrollMonth}
-                onChange={(e) => setPayrollMonth(e.target.value)}
+                onChange={(e) => handleMonthChange(e.target.value)}
                 className="bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-lg px-2 py-1 text-gray-900 dark:text-white text-xs outline-none"
               />
             </div>

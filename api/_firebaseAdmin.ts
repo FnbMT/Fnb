@@ -126,14 +126,12 @@ const getClientDbInstance = () => {
   }
 };
 
-const cDb: any = new Proxy({} as any, {
-  get(_target, prop) {
-    const instance = getClientDbInstance();
-    if (!instance) return undefined;
-    const val = (instance as any)[prop];
-    return typeof val === 'function' ? val.bind(instance) : val;
-  }
-});
+let cDb: any = null;
+try {
+  cDb = getClientDbInstance();
+} catch (err) {
+  console.warn("[FirebaseAdmin] Failed to initialize client Firestore bridge:", err);
+}
 
 // Hàm chuẩn hóa dữ liệu khi gửi qua Client SDK (thay thế FieldValue.delete)
 const sanitizeDataForClient = (data: any): any => {

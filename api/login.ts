@@ -36,13 +36,15 @@ export default async function handler(req: any, res: any) {
   }
 
   const { storeCode, username, password } = req.body || {};
+  const cleanUsername = String(username || '').toLowerCase().trim();
+  const configuredSuperUser = (process.env.SUPERADMIN_USERNAME || 'superadmin').toLowerCase().trim();
+  const isSuperAdminUser = cleanUsername === 'superadmin' || cleanUsername === configuredSuperUser;
 
-  if (!storeCode || !username || !password) {
+  if (!username || !password || (!storeCode && !isSuperAdminUser)) {
     return res.status(400).json({ error: 'Vui lòng cung cấp đầy đủ Mã cửa hàng, Tên đăng nhập và Mật khẩu' });
   }
 
-  const cleanStoreCode = String(storeCode).toLowerCase().trim();
-  const cleanUsername = String(username).toLowerCase().trim();
+  const cleanStoreCode = String(storeCode || 'admin').toLowerCase().trim();
   const cleanPassword = String(password).trim();
 
   const clientIp = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown';
@@ -60,25 +62,30 @@ export default async function handler(req: any, res: any) {
 
   try {
     // 1. Kiểm tra tài khoản Quản trị viên tối cao (Superadmin)
-    // CHỈ áp dụng khi username là 'superadmin' VÀ storeCode là 'admin' hoặc 'superadmin'
-    // Tuyệt đối không can thiệp hay hiển thị thông tin SuperAdmin cho tài khoản quán thông thường (admin)
-    const isSuperAdmin = (cleanStoreCode === 'admin' || cleanStoreCode === 'superadmin') && cleanUsername === 'superadmin';
+    // Hỗ trợ cả username mặc định 'superadmin' lẫn username cấu hình qua SUPERADMIN_USERNAME
+    const configuredSuperUser = (process.env.SUPERADMIN_USERNAME || 'superadmin').toLowerCase().trim();
+    const isSuperAdmin = 
+      (cleanStoreCode === 'admin' || cleanStoreCode === 'superadmin' || cleanStoreCode === configuredSuperUser) && 
+      (cleanUsername === 'superadmin' || cleanUsername === configuredSuperUser);
 
     if (isSuperAdmin) {
-      const expectedSuperPass = process.env.SUPERADMIN_PASSWORD;
-      if (!expectedSuperPass || expectedSuperPass.trim().length === 0) {
+      const rawSuperPass = process.env.SUPERADMIN_PASSWORD;
+      if (!rawSuperPass || rawSuperPass.trim().length === 0) {
         console.error("[Auth Security] Đăng nhập SuperAdmin bị từ chối: Biến môi trường SUPERADMIN_PASSWORD chưa được cấu hình trên máy chủ.");
         return res.status(401).json({
           error: 'Biến môi trường SUPERADMIN_PASSWORD chưa được cấu hình trên máy chủ Vercel.'
         });
       }
 
-      if (cleanPassword === expectedSuperPass.trim()) {
+      const cleanSuperPass = rawSuperPass.trim().replace(/^["']|["']$/g, '');
+      const isPasswordMatch = cleanPassword === cleanSuperPass || cleanPassword === rawSuperPass.trim();
+
+      if (isPasswordMatch) {
         loginFailAttempts.delete(rateLimitKey);
 
         const sessionToken = generateAuthToken({
           uid: 'superadmin',
-          username: 'superadmin',
+          username: cleanUsername,
           role: 'superadmin',
           storeId: 'superadmin',
           isSuperAdmin: true,
@@ -103,7 +110,7 @@ export default async function handler(req: any, res: any) {
           customToken,
           user: {
             id: 'superadmin',
-            username: 'superadmin',
+            username: cleanUsername,
             name: 'Super Admin',
             role: 'superadmin',
             storeId: 'superadmin',
@@ -282,6 +289,8 @@ export default async function handler(req: any, res: any) {
 
     const sanitizedUserData = { ...userData };
     delete sanitizedUserData.password;
+    delete sanitizedUserData.pinCode;
+    delete sanitizedUserData.legacyKey;
 
     return res.status(200).json({
       success: true,
