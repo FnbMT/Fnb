@@ -636,6 +636,10 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
   const handleSavePackage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingPackage) return;
+    if (!editingPackage.name || editingPackage.name.trim().length === 0) {
+      alert('Vui lòng nhập tên cho gói dịch vụ!');
+      return;
+    }
     try {
       const isTabEnabled = (tabId: string) => {
         if (tabId === 'reports') {
@@ -659,6 +663,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
 
       const packageToSave: StorePackage = {
         ...editingPackage,
+        name: editingPackage.name.trim(),
         features: {
           ...editingPackage.features,
           kitchen: isTabEnabled('kitchen'),
@@ -684,6 +689,37 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
     } catch (error) {
       console.error(error);
       alert('Lỗi lưu gói');
+    }
+  };
+
+  const handleDeletePackage = async (pkg: StorePackage) => {
+    if (!pkg?.id) return;
+    
+    const isTrial = pkg.id === 'trial';
+    const pkgDisplayName = pkg.name?.trim() || 'Gói chưa đặt tên';
+    
+    if (isTrial) {
+      const confirmTrial = window.confirm(
+        `CẢNH BÁO: "${pkgDisplayName}" là gói mặc định hệ thống tự động cấp cho các cửa hàng mới đăng ký dùng thử.\n\nBạn có chắc chắn muốn xóa gói này khỏi hệ thống không?`
+      );
+      if (!confirmTrial) return;
+    } else {
+      const confirmDelete = window.confirm(
+        `Bạn có chắc chắn muốn xóa "${pkgDisplayName}" không?\n\nThao tác này sẽ xóa vĩnh viễn gói dịch vụ này khỏi hệ thống.`
+      );
+      if (!confirmDelete) return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'packages', pkg.id));
+      setPackages(prev => prev.filter(p => p.id !== pkg.id));
+      if (editingPackage?.id === pkg.id) {
+        setEditingPackage(null);
+      }
+      alert(`Đã xóa "${pkgDisplayName}" thành công!`);
+    } catch (err: any) {
+      console.error('Lỗi khi xóa gói dịch vụ:', err);
+      alert('Không thể xóa gói: ' + (err?.message || 'Có lỗi xảy ra'));
     }
   };
 
@@ -1079,15 +1115,26 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
               {packages.map(pkg => (
                 <div key={pkg.id} className="bg-white dark:bg-[#151619] border border-black/10 dark:border-white/10 rounded-2xl p-6 relative flex flex-col justify-between shadow-sm hover:border-black/20 dark:hover:border-white/20 transition-all">
                   <div>
-                    <button 
-                      onClick={() => setEditingPackage(pkg)} 
-                      className="absolute top-4 right-4 text-blue-600 dark:text-blue-500 hover:bg-blue-500/10 p-2 rounded-lg cursor-pointer transition-colors"
-                      title="Chỉnh sửa phân quyền Tab & cấu hình gói"
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    <div className="flex items-center gap-2 flex-wrap pr-10">
-                      <h3 className="text-xl font-bold text-emerald-600 dark:text-emerald-500">{pkg.name}</h3>
+                    <div className="absolute top-4 right-4 flex items-center gap-1">
+                      <button 
+                        onClick={() => setEditingPackage(pkg)} 
+                        className="text-blue-600 dark:text-blue-500 hover:bg-blue-500/10 p-2 rounded-lg cursor-pointer transition-colors"
+                        title="Chỉnh sửa phân quyền Tab & cấu hình gói"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={() => handleDeletePackage(pkg)} 
+                        className="text-rose-500 hover:bg-rose-500/10 p-2 rounded-lg cursor-pointer transition-colors"
+                        title="Xóa gói dịch vụ này"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap pr-20">
+                      <h3 className="text-xl font-bold text-emerald-600 dark:text-emerald-500">
+                        {pkg.name?.trim() || <span className="text-gray-400 italic font-normal text-base">(Gói chưa đặt tên)</span>}
+                      </h3>
                       {pkg.id === 'trial' && (
                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 font-bold border border-blue-500/20">
                           Mặc định khi đăng ký
@@ -1383,9 +1430,31 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                 </div>
               </div>
               
-              <div className="flex gap-4 pt-6">
-                <button type="button" onClick={() => setEditingPackage(null)} className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-900 dark:text-white font-bold">Hủy</button>
-                <button type="submit" className="flex-1 py-3 rounded-xl bg-emerald-500 text-white font-bold">Lưu lại</button>
+              <div className="flex items-center gap-3 pt-6">
+                {!editingPackage.id.startsWith('new-') && (
+                  <button 
+                    type="button" 
+                    onClick={() => handleDeletePackage(editingPackage)} 
+                    className="py-3 px-4 rounded-xl border border-rose-500/30 text-rose-500 hover:bg-rose-500/10 font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors text-sm"
+                    title="Xóa gói dịch vụ này khỏi hệ thống"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>Xóa gói</span>
+                  </button>
+                )}
+                <button 
+                  type="button" 
+                  onClick={() => setEditingPackage(null)} 
+                  className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-900 dark:text-white font-bold hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors text-sm"
+                >
+                  Hủy
+                </button>
+                <button 
+                  type="submit" 
+                  className="flex-1 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white font-bold shadow-md shadow-emerald-500/20 cursor-pointer transition-colors text-sm"
+                >
+                  Lưu lại
+                </button>
               </div>
             </form>
           </div>
