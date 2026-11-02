@@ -1,8 +1,6 @@
-import type { Request, Response } from 'express';
-import { adminDb, adminAuth } from './_firebaseAdmin.js';
+import { adminDb, adminAuth, safeDeleteSentinel } from './_firebaseAdmin.js';
 import { hashPassword, encryptAes } from './_crypto.js';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
-import { FieldValue } from 'firebase-admin/firestore';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
@@ -81,7 +79,7 @@ export default async function handler(req: any, res: any) {
     if (targetRole === 'admin') {
       secretPayload.encryptedPassword = encryptAes(cleanPassword);
     } else {
-      secretPayload.encryptedPassword = FieldValue.delete();
+      secretPayload.encryptedPassword = safeDeleteSentinel();
     }
 
     try {
@@ -96,8 +94,8 @@ export default async function handler(req: any, res: any) {
     try {
       await userDocRef.update({
         tokenVersion: nextTokenVersion,
-        password: FieldValue.delete(),
-        isLegacy: FieldValue.delete(),
+        password: safeDeleteSentinel(),
+        isLegacy: safeDeleteSentinel(),
         passwordUpdatedAt: new Date().toISOString()
       });
     } catch (_) {}

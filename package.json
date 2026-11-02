@@ -17,6 +17,12 @@
     "migrate:legacy": "tsx scripts/migrate_legacy_data.ts",
     "postinstall": "patch-package"
   },
+  "overrides": {
+    "jose": "^4.15.9"
+  },
+  "resolutions": {
+    "jose": "^4.15.9"
+  },
   "dependencies": {
     "@capacitor/android": "^8.3.0",
     "@capacitor/camera": "^8.2.4",

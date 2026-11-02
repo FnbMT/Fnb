@@ -1,9 +1,8 @@
 import type { Request, Response } from 'express';
 import crypto from 'node:crypto';
-import { adminDb, adminAuth } from './_firebaseAdmin.js';
+import { adminDb, adminAuth, safeDeleteSentinel } from './_firebaseAdmin.js';
 import { hashPassword, encryptAes } from './_crypto.js';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
-import { FieldValue } from 'firebase-admin/firestore';
 import { STORE_STAFF_ROLES, ALL_USER_ROLES, isValidUserRole, isStoreStaffRole, UserRole } from './_roles.js';
 
 export default async function handler(req: any, res: any) {
@@ -266,7 +265,7 @@ export default async function handler(req: any, res: any) {
         if (role === 'admin') {
           secretPayload.encryptedPassword = encryptAes(cleanPassword);
         } else {
-          secretPayload.encryptedPassword = FieldValue.delete();
+          secretPayload.encryptedPassword = safeDeleteSentinel();
         }
       }
 

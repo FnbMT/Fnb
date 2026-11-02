@@ -55,13 +55,16 @@ export const hasAdminCredential = Boolean(
 export const getAdminStatus = () => ({
   hasCredential: hasAdminCredential,
   isInitialized: Boolean(rawAdminApp && rawAdminDb),
-  projectId
+  projectId,
+  initError: adminInitError
 });
 
-// 1. Khởi tạo Firebase Admin SDK (Chỉ khi có Service Account thật)
+// 1. Khởi tạo Firebase Admin SDK (Chỉ khi có Service Account thật và bọc an toàn tránh sập module)
 let rawAdminApp: any = null;
 let rawAdminDb: any = null;
 let rawAdminAuth: any = null;
+let rawFieldValue: any = null;
+let adminInitError: string | null = null;
 
 if (hasAdminCredential) {
   try {
@@ -98,7 +101,8 @@ if (hasAdminCredential) {
       rawAdminDb = getAdminFirestore(rawAdminApp);
       rawAdminAuth = getAdminAuth(rawAdminApp);
     }
-  } catch (err) {
+  } catch (err: any) {
+    adminInitError = err?.message || String(err);
     console.warn("[FirebaseAdmin] Failed to initialize Firebase Admin with service account:", err);
   }
 }
@@ -670,4 +674,4 @@ export const adminAuth = {
   }
 };
 
-export const safeDeleteSentinel = FieldValue.delete;
+export const safeDeleteSentinel = () => (FieldValue?.delete ? FieldValue.delete() : clientDeleteField());

@@ -3,7 +3,6 @@ import crypto from 'node:crypto';
 import { adminDb, adminAuth } from './_firebaseAdmin.js';
 import { hashPassword, verifyPassword, encryptAes, decryptAes } from './_crypto.js';
 import { generateAuthToken } from './_token.js';
-import { FieldValue } from 'firebase-admin/firestore';
 
 // Bộ nhớ đệm tạm thời cho Rate Limit đăng nhập sai (chống brute-force)
 interface FailedAttempt {
