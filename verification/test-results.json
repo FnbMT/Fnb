@@ -1,0 +1,212 @@
+{
+  "passed": 51,
+  "total": 51,
+  "failed": 0,
+  "method": "Actual source functions transpiled by the locked project TypeScript compiler. In-memory Firestore mock enforces all reads before writes, atomic commit, and optimistic contention retries. No production Firebase access.",
+  "results": [
+    {
+      "name": "Concurrent order increments preserve all portions",
+      "status": "PASS"
+    },
+    {
+      "name": "Order retry with same operation ID does not add twice",
+      "status": "PASS"
+    },
+    {
+      "name": "Reusing order operation ID for different content is rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "Kitchen does not erase a newly added order",
+      "status": "PASS"
+    },
+    {
+      "name": "Stale quantity edit conflicts rather than overwrites",
+      "status": "PASS"
+    },
+    {
+      "name": "Failed merge preserves source and destination atomically",
+      "status": "PASS"
+    },
+    {
+      "name": "Merge moves each order once and replay is harmless",
+      "status": "PASS"
+    },
+    {
+      "name": "Transfer rejects a destination occupied on the server",
+      "status": "PASS"
+    },
+    {
+      "name": "Concurrent imports preserve stock, receipts, and cards",
+      "status": "PASS"
+    },
+    {
+      "name": "An import cash-write failure leaves no partial inventory change",
+      "status": "PASS"
+    },
+    {
+      "name": "Import retry is idempotent",
+      "status": "PASS"
+    },
+    {
+      "name": "Inventory precision retains 0.95 + 0.1 = 1.05",
+      "status": "PASS"
+    },
+    {
+      "name": "Audit refuses stale stock and leaves no audit/card",
+      "status": "PASS"
+    },
+    {
+      "name": "Manual cash replay increments totals only once",
+      "status": "PASS"
+    },
+    {
+      "name": "Manual cash and imports reject a closed shift",
+      "status": "PASS"
+    },
+    {
+      "name": "Cancellation reverses the original shift and exact stock movements",
+      "status": "PASS"
+    },
+    {
+      "name": "Cancelling an aggregate without invoice coverage creates no negative total",
+      "status": "PASS"
+    },
+    {
+      "name": "Cancellation of an untracked new invoice does not invent stock",
+      "status": "PASS"
+    },
+    {
+      "name": "Checkout uses the server shift state and preserves the order on rejection",
+      "status": "PASS"
+    },
+    {
+      "name": "Checkout keeps committed success when a post-commit availability update fails",
+      "status": "PASS"
+    },
+    {
+      "name": "Checkout persists exact stock deltas and a server cost snapshot",
+      "status": "PASS"
+    },
+    {
+      "name": "Checkout rejects unsaved draft sessions",
+      "status": "PASS"
+    },
+    {
+      "name": "Price, discount, and VAT are computed once from item subtotals",
+      "status": "PASS"
+    },
+    {
+      "name": "Estimated invoice costs remain estimated in source aggregates",
+      "status": "PASS"
+    },
+    {
+      "name": "Daily expense amounts are not divided by 30 in the financial view",
+      "status": "PASS"
+    },
+    {
+      "name": "Multiple attendance sessions count one workday and only actual hours",
+      "status": "PASS"
+    },
+    {
+      "name": "Complete source calculations retain more than 100/300 documents",
+      "status": "PASS"
+    },
+    {
+      "name": "Source recomputation removes a cancelled cached invoice and its cost",
+      "status": "PASS"
+    },
+    {
+      "name": "Cached/offline source data is not marked reconciled",
+      "status": "PASS"
+    },
+    {
+      "name": "Cash form keeps entered data after a rejected server write",
+      "status": "PASS"
+    },
+    {
+      "name": "Vietnam date boundaries retain invoices around UTC midnight",
+      "status": "PASS"
+    },
+    {
+      "name": "Recipe versions are not merged by a shared dish ID",
+      "status": "PASS"
+    },
+    {
+      "name": "Backfill skips a day changed by a concurrent historical cancellation",
+      "status": "PASS"
+    },
+    {
+      "name": "Backfill resets an empty historical day rather than preserving stale revenue",
+      "status": "PASS"
+    },
+    {
+      "name": "Backfill dry-run does not write any aggregates",
+      "status": "PASS"
+    },
+    {
+      "name": "Migration job lock has one owner and cannot be released by another job",
+      "status": "PASS"
+    },
+    {
+      "name": "Date-range subscription includes old/new schemas, without display limits",
+      "status": "PASS"
+    },
+    {
+      "name": "Missing-index fallback has no truncation and unsubscribe ignores late responses",
+      "status": "PASS"
+    },
+    {
+      "name": "Receipt reconciliation detects duplicate and missing sale receipts",
+      "status": "PASS"
+    },
+    {
+      "name": "Cross-store operations are rejected before changing inventory",
+      "status": "PASS"
+    },
+    {
+      "name": "Two kitchen devices completing different lines preserve both changes",
+      "status": "PASS"
+    },
+    {
+      "name": "Adding portions to a completed line creates a new pending line",
+      "status": "PASS"
+    },
+    {
+      "name": "Cancellation replay never restores stock twice",
+      "status": "PASS"
+    },
+    {
+      "name": "Concurrent attendance scans open only one session",
+      "status": "PASS"
+    },
+    {
+      "name": "Explicit check-out closes an overnight open session without creating another day",
+      "status": "PASS"
+    },
+    {
+      "name": "Explicit check-out without a check-in cannot invent a work session",
+      "status": "PASS"
+    },
+    {
+      "name": "Per-item revenue includes add-ons and allocates whole-dong discounts exactly",
+      "status": "PASS"
+    },
+    {
+      "name": "Free inventory imports still update weighted average cost",
+      "status": "PASS"
+    },
+    {
+      "name": "Unavailable source costs remain estimated even if an old order has a price",
+      "status": "PASS"
+    },
+    {
+      "name": "Two devices opening a shift share one guarded open shift",
+      "status": "PASS"
+    },
+    {
+      "name": "Order cloning supports the existing iOS 15 target without structuredClone",
+      "status": "PASS"
+    }
+  ]
+}
