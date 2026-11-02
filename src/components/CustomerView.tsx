@@ -33,23 +33,28 @@ export const CustomerView = ({
     name: '', discountPercent: 0
   });
 
-  const filtered = customers.filter(c => 
-    c.name.toLowerCase().includes(search.toLowerCase()) || 
-    c.phone.includes(search)
-  );
+  const filtered = useMemo(() => {
+    const s = search.toLowerCase().trim();
+    if (!s) return customers;
+    return customers.filter(c => 
+      c.name.toLowerCase().includes(s) || 
+      (c.phone && c.phone.includes(s))
+    );
+  }, [customers, search]);
 
   // Tìm kiếm từ máy chủ khi từ khóa là số điện thoại và chưa có trong danh sách nạp sẵn
   useEffect(() => {
     const cleanSearch = search.trim();
     const isPhoneNumber = /^[0-9+]{8,15}$/.test(cleanSearch.replace(/\s+/g, ''));
-    const alreadyFoundLocally = filtered.some(c => c.phone && c.phone.replace(/\s+/g, '') === cleanSearch.replace(/\s+/g, ''));
+    const alreadyFoundLocally = isPhoneNumber && customers.some(c => 
+      c.phone && c.phone.replace(/\s+/g, '') === cleanSearch.replace(/\s+/g, '')
+    );
 
     if (!currentUser?.storeId || !isPhoneNumber || alreadyFoundLocally) {
-      setRemoteResults([]);
+      setRemoteResults(prev => prev.length === 0 ? prev : []);
       return;
     }
     let active = true;
-    setRemoteResults([]);
     const timer = setTimeout(async () => {
       try {
         setIsSearchingRemote(true);
@@ -69,7 +74,7 @@ export const CustomerView = ({
     }, 350);
 
     return () => { active = false; clearTimeout(timer); };
-  }, [search, currentUser?.storeId, filtered]);
+  }, [search, currentUser?.storeId, customers]);
 
   const allDisplayCustomers = useMemo(() => {
     const map = new Map<string, Customer>();

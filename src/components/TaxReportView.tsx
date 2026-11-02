@@ -5,7 +5,7 @@ import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { format, parseISO, isSameDay, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameYear } from 'date-fns';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, limit, startAfter, orderBy, onSnapshot, QueryDocumentSnapshot, DocumentData, doc, setDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, limit, startAfter, orderBy, onSnapshot, QueryDocumentSnapshot, DocumentData, doc, setDoc, getDocFromServer, getDocsFromServer, runTransaction } from 'firebase/firestore';
 import { getVietnamBusinessDate, getVietnamDayBoundariesIso } from '../utils/firestoreDateHelper';
 import { dailyStatsFromSources } from '../utils/dataIntegrity';
 import { subscribeDateRange } from '../utils/completeDataSource';
@@ -121,13 +121,29 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
   const reconcileDays = useCallback(async (daysToReconcile: string[]) => {
     if (!currentUser?.storeId || !daysToReconcile.length || isReconciling) return;
     setIsReconciling(true);
-    setLoadingStatusText(`Đang đối soát dữ liệu ${daysToReconcile.length} ngày...`);
+    setLoadingStatusText(`Đang đối soát dữ liệu ${daysToReconcile.length} ngày từ máy chủ...`);
     try {
       const storeId = currentUser.storeId;
       for (const day of daysToReconcile) {
+        const statsRef = doc(db, 'daily_stats', `${storeId}_${day}`);
+
+        // 1. Lấy baseline phiên bản từ máy chủ trước khi quét nguồn (chống race condition ghi đè giao dịch mới)
+        let baselineExists = false;
+        let baselineRevision: number | string = 0;
+        try {
+          const baselineSnap = await getDocFromServer(statsRef);
+          baselineExists = baselineSnap.exists();
+          if (baselineExists) {
+            const data = baselineSnap.data();
+            baselineRevision = data?.sourceRevision ?? data?.updatedAt ?? 0;
+          }
+        } catch {
+          // Document chưa tồn tại trên server, baselineExists = false
+        }
+
         const { startIso, endExclusiveIso } = getVietnamDayBoundariesIso(day);
 
-        // Lấy hóa đơn trong ngày
+        // 2. Đọc hóa đơn từ máy chủ (getDocsFromServer, không dùng cache)
         const invQ = query(
           collection(db, 'invoices'),
           where('storeId', '==', storeId),
@@ -135,12 +151,12 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
           where('date', '<', endExclusiveIso),
           orderBy('date', 'asc')
         );
-        const invSnap = await getDocs(invQ);
+        const invSnap = await getDocsFromServer(invQ);
         const dayInvoices = invSnap.docs
           .map(d => ({ ...d.data(), id: d.id } as Invoice))
           .filter(i => i.status !== 'cancelled');
 
-        // Lấy sổ quỹ trong ngày
+        // 3. Đọc sổ quỹ từ máy chủ (getDocsFromServer, không dùng cache)
         const cashQ = query(
           collection(db, 'cash_transactions'),
           where('storeId', '==', storeId),
@@ -148,14 +164,37 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
           where('date', '<', endExclusiveIso),
           orderBy('date', 'asc')
         );
-        const cashSnap = await getDocs(cashQ);
+        const cashSnap = await getDocsFromServer(cashQ);
         const dayCash = cashSnap.docs.map(d => ({ ...d.data(), id: d.id } as CashTransaction));
 
-        // Tính DailyStats chuẩn và đánh dấu coverageStatus: reconciled (hoặc zero_activity)
+        // 4. Tính toán DailyStats chuẩn từ nguồn đã xác nhận đầy đủ
         const computed = dailyStatsFromSources(storeId, [day], dayInvoices, dayCash, true);
         if (computed.length > 0) {
           const stat = computed[0];
-          await setDoc(doc(db, 'daily_stats', `${storeId}_${day}`), stat, { merge: true });
+          const isZero = stat.invoiceCount === 0 && (stat.cashCount || 0) === 0;
+
+          // 5. Transaction kiểm tra phiên bản trước khi ghi (Bảo đảm không ghi đè nếu có giao dịch đồng thời phát sinh)
+          await runTransaction(db, async (txn) => {
+            const currentSnap = await txn.get(statsRef);
+            const currentExists = currentSnap.exists();
+            const currentData = currentExists ? currentSnap.data() : null;
+            const currentRevision = currentData?.sourceRevision ?? currentData?.updatedAt ?? 0;
+
+            if (currentExists !== baselineExists || currentRevision !== baselineRevision) {
+              throw new Error(`Dữ liệu ngày ${day} vừa có giao dịch mới phát sinh đồng thời. Thao tác đối soát tự hủy để bảo toàn số liệu mới.`);
+            }
+
+            const now = new Date().toISOString();
+            const nextRevision = typeof currentRevision === 'number' ? currentRevision + 1 : 1;
+
+            txn.set(statsRef, {
+              ...stat,
+              reconciledAt: now,
+              updatedAt: now,
+              sourceRevision: nextRevision,
+              coverageStatus: isZero ? 'zero_activity' : 'reconciled'
+            }, { merge: true });
+          });
         }
       }
       setRefreshKey(v => v + 1);
@@ -208,7 +247,7 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
             .map(s => s.date)
         );
         setCoveredDays(reconciledSet);
-        setConfirmedZeroDays(new Set(statsList.filter(s => s.coverageStatus === 'zero_activity' || (s.invoiceCount || 0) === 0).map(s => s.date)));
+        setConfirmedZeroDays(new Set(statsList.filter(s => s.coverageStatus === 'zero_activity').map(s => s.date)));
       } else if (isFromServer) {
         // Fallback an toàn: Chỉ khi server xác nhận daily_stats rỗng
         if (!fallbackUnsub) {
@@ -222,7 +261,7 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
               setTaxDataReady(confirmed);
               if (confirmed) setTaxError('');
               setCoveredDays(new Set(confirmed ? dates : []));
-              setConfirmedZeroDays(new Set(confirmed ? stats.filter(s => s.invoiceCount === 0).map(s => s.date) : []));
+              setConfirmedZeroDays(new Set(confirmed ? stats.filter(s => s.coverageStatus === 'zero_activity').map(s => s.date) : []));
               setIsLoadingYear(!confirmed);
               setLoadingStatusText(confirmed ? '' : 'Đang chờ xác nhận dữ liệu...');
             } catch (error) {

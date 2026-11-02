@@ -791,6 +791,47 @@ export const SummaryView = ({
       subscribeDateRange<Invoice>('invoices',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalInvoices(rows);invoicesReady=confirmed;updateReady(); },error),
       subscribeDateRange<CashTransaction>('cash_transactions',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalCash(rows);cashReady=confirmed;updateReady(); },error)
     ];
+
+    // Ưu tiên lắng nghe daily_stats của kỳ để nạp số liệu tổng hợp đã đối soát tin cậy
+    try {
+      let statsQuery: Query;
+      if (filterType === 'year') {
+        const targetYear = Number(dateFilter.slice(0, 4));
+        statsQuery = query(
+          collection(db, 'daily_stats'),
+          where('storeId', '==', storeId),
+          where('year', '==', targetYear),
+          orderBy('date', 'asc')
+        );
+      } else if (filterType === 'month') {
+        const targetMonth = dateFilter.slice(0, 7);
+        statsQuery = query(
+          collection(db, 'daily_stats'),
+          where('storeId', '==', storeId),
+          where('month', '==', targetMonth),
+          orderBy('date', 'asc')
+        );
+      } else {
+        const targetDay = dateFilter.slice(0, 10);
+        statsQuery = query(
+          collection(db, 'daily_stats'),
+          where('storeId', '==', storeId),
+          where('date', '==', targetDay)
+        );
+      }
+
+      const unsubStats = onSnapshot(statsQuery, { includeMetadataChanges: true }, (snapshot) => {
+        if (disposed) return;
+        const list = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as DailyStats));
+        setDailyStats(list);
+      }, (err) => {
+        console.warn('Lỗi tải daily_stats trong SummaryView:', err);
+      });
+      unsubs.push(unsubStats);
+    } catch (statsErr) {
+      console.warn('Không thể khởi tạo query daily_stats trong SummaryView:', statsErr);
+    }
+
     return () => {disposed=true;unsubs.forEach(fn=>fn());};
   }, [currentUser?.storeId,dateFilter,filterType,todayVietnam]);
 
@@ -1213,37 +1254,88 @@ export const SummaryView = ({
   // Tổng hợp dữ liệu đa tầng theo từng ngày (Per-day Single Source of Truth, 100% toàn vẹn)
   const sourceMismatch=useMemo(()=>receiptMismatch(periodInvoices,periodCash),[periodInvoices,periodCash]);
   const statsAggregates = useMemo(() => {
-    const dates=getExpectedPeriodDates(dateFilter,filterType,todayVietnam).filter(d=>d<=todayVietnam);
-    let stats: DailyStats[];
-    try { stats=dailyStatsFromSources(currentUser?.storeId||'',dates,periodInvoices,periodCash,reportDataReady); }
-    catch { return null; }
-    const totals:any={totalRevenue:0,totalCash:0,totalTransfer:0,invoiceCount:0,totalDiscount:0,totalCost:0,totalIncome:0,totalExpense:0,cashExpense:0,transferExpense:0,cashIncome:0,transferIncome:0,expenseInventory:0,expenseSalary:0,expenseRent:0,expenseOther:0};
-    for(const stat of stats)for(const key of Object.keys(totals))totals[key]+=Number((stat as any)[key])||0;
-    const sales=periodInvoices.filter(i=>i.status!=='cancelled');
-    const isCostFullyResolved = periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
+    const dates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
+    const statsByDate = new Map<string, DailyStats>(dailyStats.map(s => [s.date, s]));
+
+    // Thống kê thô tính từ chứng từ chi tiết đã tải (nếu có)
+    let rawStats: DailyStats[] = [];
+    try {
+      rawStats = dailyStatsFromSources(currentUser?.storeId || '', dates, periodInvoices, periodCash, reportDataReady);
+    } catch {
+      // nếu chứng từ chi tiết bị lỗi tính, rawStats = []
+    }
+    const rawByDate = new Map<string, DailyStats>(rawStats.map(s => [s.date, s]));
+
+    // Hợp nhất dữ liệu: Các ngày quá khứ đã đối soát tin cậy dùng daily_stats từ server; hôm nay hoặc ngày chưa chốt dùng chứng từ chi tiết
+    const stats: DailyStats[] = dates.map(d => {
+      const serverStat = statsByDate.get(d);
+      if (serverStat && (serverStat.coverageStatus === 'reconciled' || serverStat.coverageStatus === 'zero_activity') && d < todayVietnam) {
+        return serverStat;
+      }
+      return rawByDate.get(d) || serverStat || {
+        id: `${currentUser?.storeId}_${d}`,
+        storeId: currentUser?.storeId || '',
+        date: d,
+        month: d.slice(0, 7),
+        year: Number(d.slice(0, 4)),
+        totalRevenue: 0,
+        totalCash: 0,
+        totalTransfer: 0,
+        invoiceCount: 0,
+        totalDiscount: 0,
+        totalCost: 0,
+        coverageStatus: 'zero_activity',
+        hasData: false
+      };
+    });
+
+    const totals: any = {
+      totalRevenue: 0, totalCash: 0, totalTransfer: 0, invoiceCount: 0,
+      totalDiscount: 0, totalCost: 0, totalIncome: 0, totalExpense: 0,
+      cashExpense: 0, transferExpense: 0, cashIncome: 0, transferIncome: 0,
+      expenseInventory: 0, expenseSalary: 0, expenseRent: 0, expenseOther: 0
+    };
+    for (const stat of stats) {
+      for (const key of Object.keys(totals)) {
+        totals[key] += Number((stat as any)[key]) || 0;
+      }
+    }
+    const sales = periodInvoices.filter(i => i.status !== 'cancelled');
+    const isCostFullyResolved = (periodInvoices.length > 0 || stats.some(s => s.costStatus === 'complete')) && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
+    const isComplete = reportDataReady || (dates.length > 0 && dates.every(d => {
+      const s = statsByDate.get(d);
+      return s && (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
+    }));
+
     return {
       ...totals,
-      totalCost: isCostFullyResolved ? totalRecomputedCost : totals.totalCost,
-      hasExpenseBreakdown:true,
-      costStatus: !reportDataReady ? 'partial' : isCostFullyResolved ? 'complete' : sales.every(invoiceCostIsComplete) ? 'complete' : 'estimated',
-      coverageStatus:reportDataReady&&!sourceMismatch?'reconciled':'partial',
-      missingDaysCount:reportDataReady?0:dates.length,
-      reconciledDaysCount:reportDataReady?dates.length:0,
-      daysWithSales:stats.filter(s=>s.invoiceCount>0).length,
-      daysWithCompleteCost:stats.filter(s=>s.invoiceCount>0&&s.costStatus==='complete').length,
-      daysWithEstimatedCost:stats.filter(s=>s.costStatus==='estimated').length,
-      daysWithMissingCost:0,
-      zeroActivityDaysCount:stats.filter(s=>!s.hasData).length,
-      daysUsingFallbackInvoices:0,
-      daysUsingFallbackCash:0,
-      isInvoicePartial:!reportDataReady,
-      isCashPartial:!reportDataReady,
-      hasSalesInStats:sales.length>0,
-      hasCostInStats:reportDataReady,
-      hasExpenseInStats:totals.totalExpense>0,
-      hasIncomeInStats:totals.totalIncome>0
+      totalCost: isCostFullyResolved && totalRecomputedCost > 0 ? totalRecomputedCost : totals.totalCost,
+      hasExpenseBreakdown: true,
+      costStatus: !isComplete ? 'partial' : isCostFullyResolved ? 'complete' : sales.every(invoiceCostIsComplete) ? 'complete' : 'estimated',
+      coverageStatus: isComplete && !sourceMismatch ? 'reconciled' : 'partial',
+      missingDaysCount: dates.filter(d => {
+        const s = statsByDate.get(d) || rawByDate.get(d);
+        return !s || (s.coverageStatus !== 'reconciled' && s.coverageStatus !== 'zero_activity');
+      }).length,
+      reconciledDaysCount: dates.filter(d => {
+        const s = statsByDate.get(d) || rawByDate.get(d);
+        return s && (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
+      }).length,
+      daysWithSales: stats.filter(s => (s.invoiceCount || 0) > 0).length,
+      daysWithCompleteCost: stats.filter(s => (s.invoiceCount || 0) > 0 && s.costStatus === 'complete').length,
+      daysWithEstimatedCost: stats.filter(s => s.costStatus === 'estimated').length,
+      daysWithMissingCost: 0,
+      zeroActivityDaysCount: stats.filter(s => !s.hasData && s.coverageStatus === 'zero_activity').length,
+      daysUsingFallbackInvoices: 0,
+      daysUsingFallbackCash: 0,
+      isInvoicePartial: !isComplete,
+      isCashPartial: !isComplete,
+      hasSalesInStats: sales.length > 0 || totals.totalRevenue > 0,
+      hasCostInStats: isComplete,
+      hasExpenseInStats: totals.totalExpense > 0,
+      hasIncomeInStats: totals.totalIncome > 0
     };
-  },[periodInvoices,periodCash,reportDataReady,dateFilter,filterType,todayVietnam,currentUser?.storeId,sourceMismatch,hasAnyIncompleteInvoice,missingCostItems.length,totalRecomputedCost]);
+  }, [dailyStats, periodInvoices, periodCash, reportDataReady, dateFilter, filterType, todayVietnam, currentUser?.storeId, sourceMismatch, hasAnyIncompleteInvoice, missingCostItems.length, totalRecomputedCost]);
 
   // Cash Book Stats - Tính toán chuẩn xác: Tổng thu = salesReceipts + nonSaleIncome
   const cashStats = useMemo(() => {

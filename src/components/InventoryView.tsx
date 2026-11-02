@@ -53,11 +53,13 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
   const [stockStartDate, setStockStartDate] = useState<string>('');
   const [stockEndDate, setStockEndDate] = useState<string>('');
 
-  // On-demand Stock Card querying with cursor pagination
+  // On-demand Stock Card querying with cursor pagination and stale-response protection
   const [stockCardRows, setStockCardRows] = useState<StockCardEntry[]>([]);
   const [lastStockCardDoc, setLastStockCardDoc] = useState<QueryDocumentSnapshot | null>(null);
   const [hasMoreStockCard, setHasMoreStockCard] = useState(false);
   const [isLoadingStockCard, setIsLoadingStockCard] = useState(false);
+  const stockCardReqIdRef = useRef(0);
+  const currentStockCardFilterKeyRef = useRef('');
 
   // On-demand Audit History querying with cursor pagination
   const [auditRows, setAuditRows] = useState<InventoryAudit[]>([]);
@@ -67,6 +69,8 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
 
   const fetchStockCard = useCallback(async (isNext = false, currentLastDoc: QueryDocumentSnapshot | null = null) => {
     if (!currentUser?.storeId) return;
+    const filterKey = `${currentUser.storeId}_${selectedStockCardItem || ''}_${stockStartDate}_${stockEndDate}`;
+    const reqId = ++stockCardReqIdRef.current;
     setIsLoadingStockCard(true);
     try {
       const constraints: any[] = [
@@ -91,17 +95,11 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
         constraints.push(startAfter(docCursor));
       }
 
-      let snap;
-      try {
-        snap = await getDocs(query(collection(db, 'stock_card'), ...constraints));
-      } catch (err: any) {
-        console.warn('Fallback truy vấn thẻ kho:', err);
-        const fallbackConstraints: any[] = [where('storeId', '==', currentUser.storeId)];
-        if (selectedStockCardItem) {
-          fallbackConstraints.push(where('itemId', '==', selectedStockCardItem));
-        }
-        fallbackConstraints.push(limit(100));
-        snap = await getDocs(query(collection(db, 'stock_card'), ...fallbackConstraints));
+      const snap = await getDocs(query(collection(db, 'stock_card'), ...constraints));
+
+      // Bỏ qua kết quả nếu người dùng đã đổi bộ lọc khác trong lúc đang tải
+      if (reqId !== stockCardReqIdRef.current || filterKey !== currentStockCardFilterKeyRef.current) {
+        return;
       }
 
       const rows = snap.docs.map(d => ({ ...d.data(), id: d.id } as StockCardEntry));
@@ -112,19 +110,33 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
       setHasMoreStockCard(snap.docs.length >= 50);
 
       if (isNext) {
-        setStockCardRows(prev => [...prev, ...rows]);
+        setStockCardRows(prev => {
+          const seen = new Set(prev.map(r => r.id));
+          const newUnique = rows.filter(r => !seen.has(r.id));
+          return [...prev, ...newUnique];
+        });
       } else {
         setStockCardRows(rows);
       }
     } catch (error) {
-      console.error('Lỗi tải thẻ kho:', error);
+      if (reqId === stockCardReqIdRef.current) {
+        console.error('Lỗi tải thẻ kho:', error);
+        setHasMoreStockCard(false);
+      }
     } finally {
-      setIsLoadingStockCard(false);
+      if (reqId === stockCardReqIdRef.current) {
+        setIsLoadingStockCard(false);
+      }
     }
   }, [currentUser?.storeId, selectedStockCardItem, stockStartDate, stockEndDate]);
 
   useEffect(() => {
     if (activeTab === 'stock_card') {
+      const filterKey = `${currentUser?.storeId || ''}_${selectedStockCardItem || ''}_${stockStartDate}_${stockEndDate}`;
+      currentStockCardFilterKeyRef.current = filterKey;
+      setStockCardRows([]);
+      setLastStockCardDoc(null);
+      setHasMoreStockCard(false);
       fetchStockCard(false, null);
     }
   }, [activeTab, selectedStockCardItem, stockStartDate, stockEndDate, currentUser?.storeId]);
@@ -511,17 +523,22 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
   );
 
   const renderStockCard = () => {
-    let filteredEntries = stockCardRows.length > 0 || selectedStockCardItem || stockStartDate || stockEndDate
+    let rawEntries = stockCardRows.length > 0 || selectedStockCardItem || stockStartDate || stockEndDate
       ? stockCardRows
       : stockCard;
 
-    if (stockStartDate && !stockCardRows.length) {
+    // Bộ lọc an toàn tại UI: bảo đảm 100% không bao giờ hiển thị nhầm mặt hàng hoặc ngày khác
+    let filteredEntries = rawEntries;
+    if (selectedStockCardItem) {
+      filteredEntries = filteredEntries.filter(e => e.itemId === selectedStockCardItem);
+    }
+    if (stockStartDate) {
       filteredEntries = filteredEntries.filter(e => {
         const vnDate = (e as any).businessDate || getVietnamBusinessDate(e.date);
         return vnDate >= stockStartDate;
       });
     }
-    if (stockEndDate && !stockCardRows.length) {
+    if (stockEndDate) {
       filteredEntries = filteredEntries.filter(e => {
         const vnDate = (e as any).businessDate || getVietnamBusinessDate(e.date);
         return vnDate <= stockEndDate;
