@@ -378,12 +378,14 @@ export const SummaryView = ({
   });
   const activeRawSubRef = useRef<{
     periodKey: string;
+    subKey?: string;
     startDay: string;
     endDay: string;
     unsubInv: (() => void) | null;
     unsubCash: (() => void) | null;
   }>({
     periodKey: '',
+    subKey: '',
     startDay: '',
     endDay: '',
     unsubInv: null,
@@ -877,7 +879,14 @@ export const SummaryView = ({
     }
     const first = expected[0], last = expected[expected.length - 1];
     const includesToday = expected.includes(todayVietnam);
-    const needsFullRaw = activeTab === 'sales' || activeTab === 'cash' || activeTab === 'items';
+    // Tối ưu hóa Reads: Tách biệt nhu cầu chứng từ theo từng tab.
+    // - Tab 'sales' và 'items': CHỈ tải invoices, TUYỆT ĐỐI KHÔNG tải cash_transactions (tiết kiệm 50% reads).
+    // - Tab 'cash': CHỈ tải cash_transactions, TUYỆT ĐỐI KHÔNG tải invoices.
+    // - Tab 'finance': Tải theo nhu cầu đối soát; nếu kỳ quá khứ đã có daily_stats thì ưu tiên dùng thống kê.
+    const needsInv = activeTab === 'sales' || activeTab === 'items' || activeTab === 'finance';
+    const needsCash = activeTab === 'cash' || (activeTab === 'finance' && includesToday);
+    const needsFullRaw = needsInv || needsCash;
+    const subKey = `${periodKey}_inv:${needsInv}_cash:${needsCash}`;
 
     // Xác định phạm vi ngày cần nghe cho raw documents:
     let targetStart = '';
@@ -899,16 +908,16 @@ export const SummaryView = ({
       targetEnd = todayVietnam;
     }
 
-    // Nếu subscription hiện tại đã đúng periodKey và phạm vi [targetStart, targetEnd], tiếp tục giữ nguyên
+    // Nếu subscription hiện tại đã đúng subKey và phạm vi [targetStart, targetEnd], tiếp tục giữ nguyên
     if (
-      activeRawSubRef.current.periodKey === periodKey &&
+      activeRawSubRef.current.subKey === subKey &&
       activeRawSubRef.current.startDay === targetStart &&
       activeRawSubRef.current.endDay === targetEnd
     ) {
       return;
     }
 
-    // Nếu periodKey đổi hoặc phạm vi thay đổi: Hủy subscription cũ
+    // Nếu subKey đổi hoặc phạm vi thay đổi: Hủy subscription cũ
     if (activeRawSubRef.current.unsubInv) {
       activeRawSubRef.current.unsubInv();
     }
@@ -917,6 +926,7 @@ export const SummaryView = ({
     }
     activeRawSubRef.current = {
       periodKey: '',
+      subKey: '',
       startDay: '',
       endDay: '',
       unsubInv: null,
@@ -939,13 +949,13 @@ export const SummaryView = ({
       periodKey,
       startDay: targetStart,
       endDay: targetEnd,
-      invoicesConfirmed: false,
-      cashConfirmed: false,
+      invoicesConfirmed: !needsInv,
+      cashConfirmed: !needsCash,
       isFullPeriod: isTargetFull
     });
 
-    if (!targetStart || !targetEnd) {
-      // Không cần query raw (kỳ quá khứ ở tab tài chính/tổng quan)
+    if (!targetStart || !targetEnd || (!needsInv && !needsCash)) {
+      // Không cần query raw (kỳ quá khứ ở tab tài chính/tổng quan hoặc tab không yêu cầu)
       setIsLoadingHistorical(false);
       setReportError('');
       return;
@@ -954,8 +964,8 @@ export const SummaryView = ({
     setIsLoadingHistorical(true);
     setReportError('');
     let disposed = false;
-    let invConfirmed = false;
-    let cashConfirmed = false;
+    let invConfirmed = !needsInv;
+    let cashConfirmed = !needsCash;
 
     const updateReadiness = () => {
       if (disposed) return;
@@ -984,26 +994,34 @@ export const SummaryView = ({
       }));
     };
 
-    const unsubInv = subscribeDateRange<Invoice>('invoices', storeId, targetStart, targetEnd, (rows, confirmed) => {
-      if (disposed) return;
-      setHistoricalInvoices(rows);
-      invConfirmed = confirmed;
-      updateReadiness();
-    }, onError);
+    let unsubInv: (() => void) | null = null;
+    let unsubCash: (() => void) | null = null;
 
-    const unsubCash = subscribeDateRange<CashTransaction>('cash_transactions', storeId, targetStart, targetEnd, (rows, confirmed) => {
-      if (disposed) return;
-      setHistoricalCash(rows);
-      cashConfirmed = confirmed;
-      updateReadiness();
-    }, onError);
+    if (needsInv) {
+      unsubInv = subscribeDateRange<Invoice>('invoices', storeId, targetStart, targetEnd, (rows, confirmed) => {
+        if (disposed) return;
+        setHistoricalInvoices(rows);
+        invConfirmed = confirmed;
+        updateReadiness();
+      }, onError);
+    }
+
+    if (needsCash) {
+      unsubCash = subscribeDateRange<CashTransaction>('cash_transactions', storeId, targetStart, targetEnd, (rows, confirmed) => {
+        if (disposed) return;
+        setHistoricalCash(rows);
+        cashConfirmed = confirmed;
+        updateReadiness();
+      }, onError);
+    }
 
     activeRawSubRef.current = {
       periodKey,
+      subKey,
       startDay: targetStart,
       endDay: targetEnd,
-      unsubInv: () => { disposed = true; unsubInv(); },
-      unsubCash: () => { disposed = true; unsubCash(); }
+      unsubInv: unsubInv ? () => { disposed = true; unsubInv!(); } : null,
+      unsubCash: unsubCash ? () => { disposed = true; unsubCash!(); } : null
     };
   }, [currentUser?.storeId, dateFilter, filterType, todayVietnam, activeTab]);
 
@@ -1012,7 +1030,7 @@ export const SummaryView = ({
     return () => {
       if (activeRawSubRef.current.unsubInv) activeRawSubRef.current.unsubInv();
       if (activeRawSubRef.current.unsubCash) activeRawSubRef.current.unsubCash();
-      activeRawSubRef.current = { periodKey: '', startDay: '', endDay: '', unsubInv: null, unsubCash: null };
+      activeRawSubRef.current = { periodKey: '', subKey: '', startDay: '', endDay: '', unsubInv: null, unsubCash: null };
     };
   }, []);
 

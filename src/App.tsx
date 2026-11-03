@@ -2735,7 +2735,7 @@ export default function App() {
     });
     unsubs.push(unsubStore);
 
-    // 1b. Sync Trạng thái tài khoản người dùng hiện tại (Phát hiện khóa / vô hiệu hóa tài khoản tức thì)
+    // 1b. Sync Trạng thái tài khoản người dùng hiện tại (Phát hiện khóa / vô hiệu hóa / xóa tài khoản tức thì)
     if (currentUser.id && currentUser.id !== 'superadmin') {
       const userDocRef = doc(db, 'users', currentUser.id);
       const unsubUserStatus = onSnapshot(userDocRef, (userSnap) => {
@@ -2746,9 +2746,17 @@ export default function App() {
             alert('Tài khoản của bạn đã bị vô hiệu hóa hoặc không còn hoạt động. Hệ thống sẽ đăng xuất.');
             handleLogout();
           }
+        } else {
+          // Trường hợp document users bị xóa hẳn khỏi cơ sở dữ liệu (Hard-delete)
+          alert('Tài khoản của bạn không còn tồn tại trên hệ thống. Hệ thống sẽ đăng xuất.');
+          handleLogout();
         }
       }, (err) => {
         console.warn('Lỗi lắng nghe trạng thái tài khoản:', err);
+        // Khi Rules từ chối quyền truy cập (phiên bị thu hồi), đăng xuất ngay lập tức
+        if (err?.code === 'permission-denied') {
+          handleLogout();
+        }
       });
       unsubs.push(unsubUserStatus);
     }

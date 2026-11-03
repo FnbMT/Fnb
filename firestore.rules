@@ -127,9 +127,15 @@ service cloud.firestore {
     // 5. TÀI KHOẢN NGƯỜI DÙNG (users)
     // ==========================================
     match /users/{userId} {
-      // Chỉ xem được danh sách nhân sự thuộc cùng cửa hàng của mình
+      // Chỉ xem được danh sách nhân sự thuộc cùng cửa hàng của mình.
+      // Nếu là chính user đang lắng nghe phiên của mình, bắt buộc tài khoản còn hiệu lực (chống dùng phiên cũ)
       allow read: if isSuperAdmin() || (
-        isSignedIn() && (resource == null || resource.data.storeId == request.auth.token.storeId)
+        isSignedIn() && (
+          resource == null || (
+            resource.data.storeId == request.auth.token.storeId &&
+            (request.auth.uid != userId || (resource.data.isDeleted != true && resource.data.status != 'deleted' && resource.data.isActive != false))
+          )
+        )
       );
 
       // Tạo và xóa người dùng: BẮT BUỘC qua API /api/save-user và /api/delete-user (Server Admin SDK)
@@ -159,12 +165,20 @@ service cloud.firestore {
     // ==========================================
 
     // Báo cáo thống kê siêu tốc (daily_stats): Ghi nhận tự động khi Thu ngân / Quản lý thanh toán
+    // Thu ngân chỉ được cập nhật tăng doanh thu theo giao dịch, không được tự ý sửa giảm doanh thu
     match /daily_stats/{statId} {
       allow read: if isSuperAdmin() || (
         isSignedIn() && (resource == null || resource.data.storeId == request.auth.token.storeId)
       );
       allow create: if isWritingDocumentOfStore() && isCashierOrManager();
-      allow update: if isSafeStoreUpdate() && isCashierOrManager();
+      allow update: if isSafeStoreUpdate() && (
+        isStoreManager() || (
+          isCashierOrManager() &&
+          request.resource.data.storeId == resource.data.storeId &&
+          request.resource.data.date == resource.data.date &&
+          request.resource.data.totalRevenue >= resource.data.totalRevenue
+        )
+      );
       allow delete: if isSuperAdmin() || (isDocumentOfStore() && isStoreManager());
     }
 
@@ -282,20 +296,29 @@ service cloud.firestore {
       allow delete: if isDocumentOfStore() && isStoreManager();
     }
 
-    // Chấm công và bảng lương: Nhân viên chỉ được tự chấm công cho chính mình (userId == auth.uid); Quản lý toàn quyền
+    // Chấm công và bảng lương: Nhân viên chỉ được tự chấm công cho chính mình (userId == auth.uid); Quản lý toàn quyền.
+    // Chống gian lận giờ làm: Nhân viên KHÔNG ĐƯỢC sửa date, checkInTime, hoặc sửa sau khi đã check-out
     match /attendance_records/{attId} {
       allow read: if isSuperAdmin() || (
         isSignedIn() && (resource == null || resource.data.storeId == request.auth.token.storeId)
       );
+      // Khi Check-in: Nhân viên chỉ tạo bản ghi cho chính mình, KHÔNG được điền trước checkOutTime
       allow create: if isWritingDocumentOfStore() && (
-        isStoreManager() ||
-        request.resource.data.userId == request.auth.uid
+        isStoreManager() || (
+          request.resource.data.userId == request.auth.uid &&
+          (!('checkOutTime' in request.resource.data) || request.resource.data.checkOutTime == null)
+        )
       );
+      // Khi Check-out: Nhân viên chỉ được cập nhật DUY NHẤT checkOutTime và locationValid trên bản ghi của mình,
+      // KHÔNG ĐƯỢC sửa date, checkInTime, userId, và chỉ được check-out 1 lần duy nhất (resource.data.checkOutTime == null)
       allow update: if isSafeStoreUpdate() && (
-        isStoreManager() ||
-        (
+        isStoreManager() || (
           resource.data.userId == request.auth.uid &&
-          request.resource.data.userId == resource.data.userId
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.date == resource.data.date &&
+          request.resource.data.checkInTime == resource.data.checkInTime &&
+          resource.data.checkOutTime == null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['checkOutTime', 'locationValid'])
         )
       );
       allow delete: if isSuperAdmin() || (isDocumentOfStore() && isStoreManager());
@@ -310,13 +333,27 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() || (isDocumentOfStore() && isStoreManager());
     }
 
-    // Ca làm việc: Thu ngân và Quản lý mở/đóng ca
+    // Ca làm việc: Quản lý toàn quyền; Thu ngân và Order mở/đóng ca của CHÍNH MÌNH (chống thu ngân sửa ca người khác)
     match /shifts/{shiftId} {
       allow read: if isSuperAdmin() || (
         isSignedIn() && (resource == null || resource.data.storeId == request.auth.token.storeId)
       );
-      allow create: if isWritingDocumentOfStore() && isCashierOrManager();
-      allow update: if isSafeStoreUpdate() && isCashierOrManager();
+      // Tạo ca: Quản lý quán, hoặc Thu ngân / Order mở ca cho chính mình
+      allow create: if isWritingDocumentOfStore() && (
+        isStoreManager() ||
+        request.resource.data.staffId == request.auth.uid
+      );
+      // Cập nhật ca: Quản lý toàn quyền; Thu ngân và Order chỉ được sửa ca của CHÍNH MÌNH (chống thu ngân sửa ca người khác)
+      allow update: if isSafeStoreUpdate() && (
+        isStoreManager() || (
+          resource.data.staffId == request.auth.uid &&
+          request.resource.data.staffId == resource.data.staffId &&
+          (
+            request.auth.token.role in ['cashier', 'order_cashier'] ||
+            (request.auth.token.role == 'order' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['totalRevenue', 'totalCash']))
+          )
+        )
+      );
       allow delete: if isSuperAdmin() || (isDocumentOfStore() && isStoreManager());
     }
 

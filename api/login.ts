@@ -142,12 +142,20 @@ export default async function handler(req: any, res: any) {
       return res.status(403).json({ error: 'Cửa hàng đã bị khóa. Vui lòng liên hệ Admin để được hỗ trợ.' });
     }
 
-    // 3. Tìm kiếm người dùng trong cửa hàng
-    const userQuery = await adminDb.collection('users')
+    // 3. Tìm kiếm người dùng trong cửa hàng (thử lowercase trước, nếu không thấy thử nguyên bản case)
+    let userQuery = await adminDb.collection('users')
       .where('storeId', '==', storeId)
       .where('username', '==', cleanUsername)
       .limit(1)
       .get();
+
+    if (userQuery.empty && String(username || '').trim() !== cleanUsername) {
+      userQuery = await adminDb.collection('users')
+        .where('storeId', '==', storeId)
+        .where('username', '==', String(username || '').trim())
+        .limit(1)
+        .get();
+    }
 
     if (userQuery.empty) {
       recordFailedAttempt(rateLimitKey);
@@ -190,7 +198,7 @@ export default async function handler(req: any, res: any) {
 
     const hasStoredSecret = Boolean(secretDoc && secretDoc.exists);
     const secretData = hasStoredSecret ? (secretDoc.data() || {}) : null;
-    const hasStoredHash = Boolean(secretData && (secretData.passwordHash || secretData.encryptedPassword));
+    const hasStoredHash = Boolean(secretData && (secretData.passwordHash || secretData.clientHash || secretData.encryptedPassword));
 
     let isPasswordValid = fallbackToLegacy;
     let tokenVersion = secretData?.tokenVersion ? Number(secretData.tokenVersion) : 1;
@@ -198,20 +206,45 @@ export default async function handler(req: any, res: any) {
     if (!fallbackToLegacy && hasStoredHash) {
       // TRƯỜNG HỢP A: ĐÃ CÓ BẢN BĂM TRONG USER_SECRETS
       if (secretData.passwordHash) {
-        isPasswordValid = verifyPassword(cleanPassword, secretData.passwordHash);
-      } else if (secretData.encryptedPassword) {
+        if (typeof secretData.passwordHash === 'string' && secretData.passwordHash.includes(':')) {
+          isPasswordValid = verifyPassword(cleanPassword, secretData.passwordHash);
+        } else {
+          // Hash SHA-256 legacy (64 hex characters) hoặc hash cũ
+          const sha256 = crypto.createHash('sha256').update(cleanPassword).digest('hex');
+          isPasswordValid = (sha256 === secretData.passwordHash || cleanPassword === secretData.passwordHash);
+        }
+      }
+
+      if (!isPasswordValid && secretData.clientHash) {
+        const clientSha256 = crypto.createHash('sha256').update(cleanPassword).digest('hex');
+        if (clientSha256 === secretData.clientHash) {
+          isPasswordValid = true;
+        }
+      }
+
+      if (!isPasswordValid && secretData.encryptedPassword) {
         const decrypted = decryptAes(secretData.encryptedPassword);
         isPasswordValid = decrypted === cleanPassword;
       }
 
-      // ĐÃ CÓ BẢN BĂM: Nếu sai mật khẩu, dừng lại ngay lập tức (KHÔNG FALLBACK)
+      // Hỗ trợ đối soát với userData.password nếu tài khoản cũ chưa đồng bộ secret
+      if (!isPasswordValid && userData.password && String(userData.password).trim() === cleanPassword) {
+        isPasswordValid = true;
+      }
+
       if (!isPasswordValid) {
         recordFailedAttempt(rateLimitKey);
         return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
       }
 
-      // Đồng bộ clientHash (SHA-256) vào user_secrets phục vụ xác thực ngoại tuyến mượt mà trên App Native
-      if (!secretData?.clientHash) {
+      // Tự động nâng cấp bản băm scrypt nếu chưa có
+      if (!secretData.passwordHash || !String(secretData.passwordHash).includes(':')) {
+        try {
+          const passwordHash = hashPassword(cleanPassword);
+          const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
+          await adminDb.collection('user_secrets').doc(userId).update({ passwordHash, clientHash });
+        } catch (_) {}
+      } else if (!secretData?.clientHash) {
         try {
           const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
           await adminDb.collection('user_secrets').doc(userId).update({ clientHash });
