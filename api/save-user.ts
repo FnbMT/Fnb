@@ -46,6 +46,11 @@ export default async function handler(req: any, res: any) {
     return res.status(400).json({ error: 'Vui lòng cung cấp đầy đủ Tên đăng nhập và Họ tên' });
   }
 
+  // Cấm mọi cửa hàng sử dụng định danh dành riêng "superadmin"
+  if (cleanUsername === 'superadmin' || String(user.id || '').trim() === 'superadmin') {
+    return res.status(400).json({ error: 'Định danh "superadmin" là tài khoản quản trị tối cao dành riêng của hệ thống nền tảng.' });
+  }
+
   // 2. KIỂM SOÁT PHÂN QUYỀN VAI TRÒ NGƯỜI GỌI (Zero-Trust Authorization)
   const isSuperAdmin = Boolean(caller.isSuperAdmin || caller.role === 'superadmin');
   const isStoreAdmin = caller.role === 'admin';

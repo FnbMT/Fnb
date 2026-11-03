@@ -23,6 +23,7 @@ export const CustomerView = ({
   const [showAddModal, setShowAddModal] = useState(false);
   const [showTypeModal, setShowTypeModal] = useState(false);
   const [remoteResults, setRemoteResults] = useState<Customer[]>([]);
+  const [remoteSearchKey, setRemoteSearchKey] = useState('');
   const [isSearchingRemote, setIsSearchingRemote] = useState(false);
   
   const [newCustomer, setNewCustomer] = useState<{name: string, phone: string, typeId: string}>({
@@ -52,8 +53,14 @@ export const CustomerView = ({
 
     if (!currentUser?.storeId || !isPhoneNumber || alreadyFoundLocally) {
       setRemoteResults(prev => prev.length === 0 ? prev : []);
+      setRemoteSearchKey('');
       return;
     }
+
+    // Reset kết quả tìm kiếm ngay khi đổi từ khóa số điện thoại để không hiển thị kết quả cũ của số khác
+    setRemoteResults([]);
+    setRemoteSearchKey(cleanSearch);
+
     let active = true;
     const timer = setTimeout(async () => {
       try {
@@ -65,23 +72,35 @@ export const CustomerView = ({
         );
         const snap = await getDocs(q);
         const found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
-        if (active) setRemoteResults(found);
+        if (active) {
+          setRemoteResults(found);
+          setRemoteSearchKey(cleanSearch);
+        }
       } catch (err) {
         console.warn('Lỗi tìm kiếm khách hàng từ xa:', err);
+        if (active) {
+          setRemoteResults([]);
+          setRemoteSearchKey('');
+        }
       } finally {
         if (active) setIsSearchingRemote(false);
       }
     }, 350);
 
-    return () => { active = false; clearTimeout(timer); };
+    return () => { 
+      active = false; 
+      clearTimeout(timer); 
+    };
   }, [search, currentUser?.storeId, customers]);
 
   const allDisplayCustomers = useMemo(() => {
     const map = new Map<string, Customer>();
     filtered.forEach(c => map.set(c.id, c));
-    remoteResults.forEach(c => map.set(c.id, c));
+    if (remoteSearchKey && remoteSearchKey === search.trim()) {
+      remoteResults.forEach(c => map.set(c.id, c));
+    }
     return Array.from(map.values());
-  }, [filtered, remoteResults]);
+  }, [filtered, remoteResults, remoteSearchKey, search]);
 
   const handleAddCustomerSubmit = () => {
     if (!newCustomer.name || !newCustomer.phone) {

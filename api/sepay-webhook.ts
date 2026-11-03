@@ -93,8 +93,9 @@ export default async function handler(req: any, res: any) {
     // 5. Tính toán gói cước và thời hạn dựa trên số tiền thực nhận (Chống gian lận nội dung)
     const pkgsSnapshot = await adminDb.collection('packages').get();
     let matchedPackageId = 'pro';
-    let durationMonths = 1;
+    let durationMonths = 0;
     let foundPricingMatch = false;
+    let minPackagePrice = Infinity;
 
     // Quét toàn bộ bảng giá các gói để tìm mức giá khớp hoặc gần nhất với số tiền chuyển
     pkgsSnapshot.forEach(docSnap => {
@@ -103,6 +104,9 @@ export default async function handler(req: any, res: any) {
 
       if (pkg.pricing && Array.isArray(pkg.pricing)) {
         pkg.pricing.forEach((opt: any) => {
+          if (typeof opt.price === 'number' && opt.price > 0 && opt.price < minPackagePrice) {
+            minPackagePrice = opt.price;
+          }
           if (amount >= opt.price && opt.durationMonths) {
             if (!foundPricingMatch || opt.durationMonths > durationMonths) {
               matchedPackageId = pkgId;
@@ -111,42 +115,88 @@ export default async function handler(req: any, res: any) {
             }
           }
         });
-      } else if (pkg.price && amount >= pkg.price) {
-        matchedPackageId = pkgId;
-        durationMonths = pkg.durationMonths || 1;
-        foundPricingMatch = true;
+      } else if (pkg.price) {
+        if (typeof pkg.price === 'number' && pkg.price > 0 && pkg.price < minPackagePrice) {
+          minPackagePrice = pkg.price;
+        }
+        if (amount >= pkg.price) {
+          matchedPackageId = pkgId;
+          durationMonths = pkg.durationMonths || 1;
+          foundPricingMatch = true;
+        }
       }
     });
 
-    // Nếu không khớp với bất kỳ gói nào, tính dựa trên mức cơ bản (tối đa 24 tháng để an toàn)
-    if (!foundPricingMatch) {
-      durationMonths = Math.min(Math.max(1, Math.floor(amount / 99000)), 24);
+    if (minPackagePrice === Infinity) {
+      minPackagePrice = 99000;
     }
 
-    // 6. Tính ngày hết hạn mới
-    let baseDate = new Date();
-    const currentValidUntil = storeData.subscription?.validUntil;
-    if (currentValidUntil) {
-      const currentEnd = new Date(currentValidUntil);
-      if (!isNaN(currentEnd.getTime()) && currentEnd > baseDate) {
-        baseDate = currentEnd;
+    // Nếu không khớp với bất kỳ bảng giá nào, chỉ tính duration khi amount >= minPackagePrice
+    if (!foundPricingMatch) {
+      const calculatedMonths = Math.floor(amount / minPackagePrice);
+      if (calculatedMonths >= 1) {
+        durationMonths = Math.min(calculatedMonths, 24);
+        foundPricingMatch = true;
+      } else {
+        durationMonths = 0;
       }
     }
 
-    const newEndDate = new Date(baseDate);
-    newEndDate.setMonth(newEndDate.getMonth() + durationMonths);
+    // NẾU SỐ TIỀN KHÔNG ĐỦ GIA HẠN GÓI TỐI THIỂU (Ví dụ chuyển 1.000đ):
+    // Ghi nhận giao dịch underpaid để đối soát thủ công, TUYỆT ĐỐI KHÔNG gia hạn thuê bao!
+    if (durationMonths <= 0 || !foundPricingMatch) {
+      console.warn(`[SePay Webhook] Giao dịch ${txId} của quán ${storeCode}: Số tiền ${amount}đ không đủ gia hạn gói tối thiểu (${minPackagePrice}đ).`);
+      await adminDb.collection('processed_transactions').doc(txId).set({
+        txId,
+        storeId,
+        storeCode,
+        amount,
+        durationMonths: 0,
+        status: 'underpaid',
+        minRequired: minPackagePrice,
+        processedAt: new Date().toISOString(),
+        gateway: 'sepay'
+      });
+      return res.status(200).json({
+        success: true,
+        message: `Giao dịch đã được ghi nhận. Số tiền ${amount}đ chưa đủ mức gia hạn tối thiểu (${minPackagePrice}đ).`
+      });
+    }
 
-    // 7. Cập nhật Subscription và lưu vết giao dịch
+    // 6. Cập nhật Subscription và lưu vết giao dịch trong Transaction nguyên tử
+    // Đọc storeDoc NGAY TRONG TRANSACTION để chống race condition khi có 2 giao dịch đồng thời
+    const storeRef = adminDb.collection('stores').doc(storeId);
+    let finalEndDateIso = '';
+
     await adminDb.runTransaction(async (transaction) => {
       const checkTx = await transaction.get(txRef);
       if (checkTx.exists) {
         throw new Error("TRANSACTION_ALREADY_PROCESSED");
       }
 
-      transaction.update(adminDb.collection('stores').doc(storeId), {
+      const freshStoreSnap = await transaction.get(storeRef);
+      if (!freshStoreSnap.exists) {
+        throw new Error("STORE_NOT_FOUND");
+      }
+
+      const freshStoreData = freshStoreSnap.data() || {};
+      let baseDate = new Date();
+      const currentValidUntil = freshStoreData.subscription?.validUntil;
+      if (currentValidUntil) {
+        const currentEnd = new Date(currentValidUntil);
+        if (!isNaN(currentEnd.getTime()) && currentEnd > baseDate) {
+          baseDate = currentEnd;
+        }
+      }
+
+      const newEndDate = new Date(baseDate);
+      newEndDate.setMonth(newEndDate.getMonth() + durationMonths);
+      finalEndDateIso = newEndDate.toISOString();
+
+      transaction.update(storeRef, {
         'subscription.status': 'active',
         'subscription.packageId': matchedPackageId,
-        'subscription.validUntil': newEndDate.toISOString(),
+        'subscription.validUntil': finalEndDateIso,
         'subscription.lastRenewedAt': new Date().toISOString()
       });
 
@@ -157,12 +207,13 @@ export default async function handler(req: any, res: any) {
         amount,
         durationMonths,
         packageId: matchedPackageId,
+        status: 'completed',
         processedAt: new Date().toISOString(),
         gateway: 'sepay'
       });
     });
 
-    console.log(`[SePay Webhook] Successfully extended ${durationMonths} month(s) for store: ${storeCode}`);
+    console.log(`[SePay Webhook] Successfully extended ${durationMonths} month(s) for store: ${storeCode} until ${finalEndDateIso}`);
     return res.status(200).json({ 
       success: true, 
       message: `Extended ${durationMonths} month(s) for store ${storeCode}` 

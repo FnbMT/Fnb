@@ -67,14 +67,19 @@ export async function getUserAccountStatus(userId: string, forceFresh = false): 
       adminDb.collection('users').doc(userId).get().catch(() => null)
     ]);
 
-    const userExists = Boolean((userDoc && userDoc.exists) || (secretDoc && secretDoc.exists));
-    if (!userExists) {
+    // Tài khoản chỉ được công nhận hợp lệ nếu tồn tại và KHÔNG ở trạng thái bị xóa / vô hiệu hóa
+    if (!userDoc || !userDoc.exists) {
+      userStatusCache.set(userId, { exists: false, tokenVersion: 0, role: '', storeId: '', cachedAt: Date.now() });
+      return null;
+    }
+
+    const userData = userDoc.data() || {};
+    if (userData.isDeleted || userData.status === 'deleted' || userData.isActive === false) {
       userStatusCache.set(userId, { exists: false, tokenVersion: 0, role: '', storeId: '', cachedAt: Date.now() });
       return null;
     }
 
     const secretData = (secretDoc && secretDoc.exists) ? (secretDoc.data() || {}) : {};
-    const userData = (userDoc && userDoc.exists) ? (userDoc.data() || {}) : {};
 
     const tokenVersion = Number(secretData.tokenVersion || userData.tokenVersion || 1);
     const role = String(secretData.role || userData.role || 'order');
@@ -238,7 +243,7 @@ export async function verifyAuthToken(token: string, options?: { forceFresh?: bo
   if (!unverifiedCaller) return null;
 
   // 3. XÁC MINH TRẠNG THÁI HIỆN TẠI VÀ THU HỒI TOKENVERSION THỜI GIAN THỰC (Zero-Trust Revocation Check)
-  if (unverifiedCaller.uid === 'superadmin') {
+  if (unverifiedCaller.uid === 'superadmin' && unverifiedCaller.isSuperAdmin === true && unverifiedCaller.role === 'superadmin' && unverifiedCaller.storeId === 'superadmin') {
     const expectedSuperPass = process.env.SUPERADMIN_PASSWORD;
     if (!expectedSuperPass || expectedSuperPass.trim().length === 0) {
       console.warn("[Auth Revocation] SuperAdmin endpoint bị vô hiệu hóa vì thiếu SUPERADMIN_PASSWORD.");

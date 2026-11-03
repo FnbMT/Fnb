@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Package, Plus, Search, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, X, Edit2, Trash2, ClipboardCheck, History, List, ChevronRight, Info, Banknote, CreditCard } from 'lucide-react';
+import { Package, Plus, Search, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, X, Edit2, Trash2, ClipboardCheck, History, List, ChevronRight, Info, Banknote, CreditCard, RotateCw, AlertCircle } from 'lucide-react';
 import { MenuItem, InventoryAudit, AuditItem, StockCardEntry, User } from '../types';
 import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
@@ -58,6 +58,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
   const [lastStockCardDoc, setLastStockCardDoc] = useState<QueryDocumentSnapshot | null>(null);
   const [hasMoreStockCard, setHasMoreStockCard] = useState(false);
   const [isLoadingStockCard, setIsLoadingStockCard] = useState(false);
+  const [stockCardError, setStockCardError] = useState<string | null>(null);
   const stockCardReqIdRef = useRef(0);
   const currentStockCardFilterKeyRef = useRef('');
 
@@ -72,6 +73,9 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
     const filterKey = `${currentUser.storeId}_${selectedStockCardItem || ''}_${stockStartDate}_${stockEndDate}`;
     const reqId = ++stockCardReqIdRef.current;
     setIsLoadingStockCard(true);
+    if (!isNext) {
+      setStockCardError(null);
+    }
     try {
       const constraints: any[] = [
         where('storeId', '==', currentUser.storeId)
@@ -108,6 +112,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
       const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
       setLastStockCardDoc(lastDoc);
       setHasMoreStockCard(snap.docs.length >= 50);
+      setStockCardError(null);
 
       if (isNext) {
         setStockCardRows(prev => {
@@ -118,10 +123,12 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
       } else {
         setStockCardRows(rows);
       }
-    } catch (error) {
+    } catch (error: any) {
       if (reqId === stockCardReqIdRef.current) {
         console.error('Lỗi tải thẻ kho:', error);
         setHasMoreStockCard(false);
+        const errMsg = error?.message || 'Không thể tải dữ liệu thẻ kho do lỗi kết nối hoặc truy vấn.';
+        setStockCardError(errMsg);
       }
     } finally {
       if (reqId === stockCardReqIdRef.current) {
@@ -135,6 +142,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
       const filterKey = `${currentUser?.storeId || ''}_${selectedStockCardItem || ''}_${stockStartDate}_${stockEndDate}`;
       currentStockCardFilterKeyRef.current = filterKey;
       setStockCardRows([]);
+      setStockCardError(null);
       setLastStockCardDoc(null);
       setHasMoreStockCard(false);
       fetchStockCard(false, null);
@@ -581,6 +589,21 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
           </div>
         </div>
 
+        {stockCardError && (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-600 dark:text-rose-400 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <AlertCircle className="w-5 h-5 shrink-0" />
+              <span>Lỗi tải thẻ kho: {stockCardError}</span>
+            </div>
+            <button
+              onClick={() => fetchStockCard(false, null)}
+              className="px-3.5 py-1.5 bg-rose-600 text-white text-xs font-bold rounded-lg hover:bg-rose-500 transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer"
+            >
+              <RotateCw className="w-3.5 h-3.5" /> Thử lại
+            </button>
+          </div>
+        )}
+
         <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl overflow-hidden overflow-x-auto">
           <table className="w-full text-left border-collapse min-w-[800px] text-sm">
             <thead>
@@ -594,7 +617,26 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               </tr>
             </thead>
             <tbody className="divide-y divide-black/5 dark:divide-white/5">
-              {filteredEntries.length === 0 ? (
+              {isLoadingStockCard && filteredEntries.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                    <RotateCw className="w-5 h-5 animate-spin mx-auto mb-2 text-emerald-500" />
+                    Đang tải dữ liệu thẻ kho...
+                  </td>
+                </tr>
+              ) : stockCardError && filteredEntries.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center text-rose-500">
+                    <p className="font-medium mb-3">Không thể tải dữ liệu thẻ kho do lỗi kết nối hoặc truy vấn</p>
+                    <button
+                      onClick={() => fetchStockCard(false, null)}
+                      className="px-4 py-2 bg-rose-600 text-white text-xs font-bold rounded-xl hover:bg-rose-500 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCw className="w-3.5 h-3.5" /> Thử lại
+                    </button>
+                  </td>
+                </tr>
+              ) : filteredEntries.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-6 py-12 text-center text-gray-500 italic">Không có dữ liệu thẻ kho</td>
                 </tr>

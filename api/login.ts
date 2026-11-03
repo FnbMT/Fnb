@@ -158,9 +158,14 @@ export default async function handler(req: any, res: any) {
     const userData = userDoc.data();
     const userId = userDoc.id;
 
-    if (userData.isDeleted || userData.status === 'deleted') {
+    if (userId === 'superadmin' || cleanUsername === 'superadmin') {
       recordFailedAttempt(rateLimitKey);
-      return res.status(401).json({ error: 'Tài khoản người dùng này đã bị xóa hoặc không còn hoạt động' });
+      return res.status(403).json({ error: 'Định danh không hợp lệ đối với tài khoản cửa hàng' });
+    }
+
+    if (userData.isDeleted || userData.status === 'deleted' || userData.isActive === false) {
+      recordFailedAttempt(rateLimitKey);
+      return res.status(401).json({ error: 'Tài khoản người dùng này đã bị vô hiệu hóa hoặc không còn hoạt động' });
     }
 
     // 4. Xác thực mật khẩu:

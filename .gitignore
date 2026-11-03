@@ -8,3 +8,6 @@ coverage/
 !.env.example
 .gradle/
 **/.gradle/
+*.apk
+local.properties
+**/local.properties

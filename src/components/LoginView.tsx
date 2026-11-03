@@ -160,12 +160,15 @@ export const LoginView = ({
         if (resp.ok) {
           const result = await resp.json();
           if (result.success && result.user) {
-            // Xác thực với Firebase Auth qua Custom Token nếu server cấp
+            // Xác thực với Firebase Auth qua Custom Token do server Vercel cấp
             if (result.customToken && !result.customToken.startsWith('dev_token_')) {
               try {
                 await signInWithCustomToken(auth, result.customToken);
               } catch (authErr: any) {
-                console.warn("signInWithCustomToken notice:", authErr?.message || authErr);
+                console.error("signInWithCustomToken error:", authErr?.message || authErr);
+                setError('Không thể hoàn tất xác thực quyền truy cập dữ liệu với máy chủ. Vui lòng thử lại.');
+                setLoading(false);
+                return;
               }
             }
 

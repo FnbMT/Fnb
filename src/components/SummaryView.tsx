@@ -357,13 +357,44 @@ export const SummaryView = ({
     }
   };
 
+  interface RawDataScope {
+    periodKey: string;
+    startDay: string;
+    endDay: string;
+    invoicesConfirmed: boolean;
+    cashConfirmed: boolean;
+    isFullPeriod: boolean;
+  }
+
   const [dailyStats, setDailyStats] = useState<DailyStats[]>([]);
+  const [dailyStatsReady, setDailyStatsReady] = useState(false);
+  const [rawScope, setRawScope] = useState<RawDataScope>({
+    periodKey: '',
+    startDay: '',
+    endDay: '',
+    invoicesConfirmed: false,
+    cashConfirmed: false,
+    isFullPeriod: false
+  });
+  const activeRawSubRef = useRef<{
+    periodKey: string;
+    startDay: string;
+    endDay: string;
+    unsubInv: (() => void) | null;
+    unsubCash: (() => void) | null;
+  }>({
+    periodKey: '',
+    startDay: '',
+    endDay: '',
+    unsubInv: null,
+    unsubCash: null
+  });
   const [historicalInvoices, setHistoricalInvoices] = useState<Invoice[]>([]);
   const [historicalCash, setHistoricalCash] = useState<CashTransaction[]>([]);
   const [historicalLogs, setHistoricalLogs] = useState<InventoryTransaction[]>([]);
   const [periodPayrolls, setPeriodPayrolls] = useState<PayrollRecord[]>([]);
   const [isLoadingHistorical, setIsLoadingHistorical] = useState(false);
-  const [reportDataReady, setReportDataReady] = useState(false);
+  const reportDataReady = Boolean(rawScope.isFullPeriod && rawScope.invoicesConfirmed && rawScope.cashConfirmed);
   const [reportError, setReportError] = useState('');
   const [payrollDataReady, setPayrollDataReady] = useState(false);
   const [isSavingCash, setIsSavingCash] = useState(false);
@@ -772,27 +803,15 @@ export const SummaryView = ({
     }
   };
 
-  // 1. Lắng nghe hóa đơn và sổ quỹ theo kỳ đã chọn (Độc lập khỏi activeTab để không tải lại khi chuyển tab)
+  // 1. Lắng nghe daily_stats theo kỳ đã chọn (Độc lập khỏi activeTab để không bao giờ bị hủy/tải lại khi chuyển tab)
   useEffect(() => {
     if (!currentUser?.storeId) return;
     const storeId = currentUser.storeId;
-    ++activeRequestId.current;
-    setIsLoadingHistorical(true); setReportDataReady(false); setReportError('');
-    setHistoricalInvoices([]); setHistoricalCash([]); setDailyStats([]);
-    setHasMoreInvoices(false); setHasMoreCash(false);
-    setLastInvoiceDoc(null); setLastCashDoc(null);
-    const expected = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
-    if (!expected.length) { setIsLoadingHistorical(false); setReportError('Vui lòng chọn kỳ không vượt quá ngày hiện tại.'); return; }
-    const first = expected[0], last = expected[expected.length-1];
-    let invoicesReady = false, cashReady = false, disposed = false;
-    const updateReady = () => { if(!disposed) {setReportDataReady(invoicesReady && cashReady); if(invoicesReady&&cashReady)setReportError(''); setIsLoadingHistorical(!(invoicesReady && cashReady));} };
-    const error = (err: Error) => { invoicesReady=false;cashReady=false;if(!disposed) { setReportError(err.message || 'Không thể xác nhận đủ chứng từ.'); setReportDataReady(false); setIsLoadingHistorical(false); } };
-    const unsubs = [
-      subscribeDateRange<Invoice>('invoices',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalInvoices(rows);invoicesReady=confirmed;updateReady(); },error),
-      subscribeDateRange<CashTransaction>('cash_transactions',storeId,first,last,(rows,confirmed)=>{ if(disposed)return;setHistoricalCash(rows);cashReady=confirmed;updateReady(); },error)
-    ];
+    let disposed = false;
 
-    // Ưu tiên lắng nghe daily_stats của kỳ để nạp số liệu tổng hợp đã đối soát tin cậy
+    setDailyStats([]);
+    setDailyStatsReady(false);
+
     try {
       let statsQuery: Query;
       if (filterType === 'year') {
@@ -820,20 +839,182 @@ export const SummaryView = ({
         );
       }
 
-      const unsubStats = onSnapshot(statsQuery, { includeMetadataChanges: true }, (snapshot) => {
+      const unsub = onSnapshot(statsQuery, { includeMetadataChanges: true }, (snapshot) => {
         if (disposed) return;
-        const list = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as DailyStats));
+        const isStatsConfirmed = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
+        const list = snapshot.docs.map(d => ({
+          ...d.data(),
+          id: d.id,
+          _fromCache: snapshot.metadata.fromCache
+        } as DailyStats & { _fromCache?: boolean }));
         setDailyStats(list);
+        setDailyStatsReady(isStatsConfirmed);
       }, (err) => {
         console.warn('Lỗi tải daily_stats trong SummaryView:', err);
+        if (!disposed) setDailyStatsReady(false);
       });
-      unsubs.push(unsubStats);
+
+      return () => {
+        disposed = true;
+        unsub();
+      };
     } catch (statsErr) {
       console.warn('Không thể khởi tạo query daily_stats trong SummaryView:', statsErr);
     }
+  }, [currentUser?.storeId, dateFilter, filterType]);
 
-    return () => {disposed=true;unsubs.forEach(fn=>fn());};
-  }, [currentUser?.storeId,dateFilter,filterType,todayVietnam]);
+  // 2. Lắng nghe chứng từ chi tiết (invoices, cash_transactions) theo nhu cầu và phạm vi kỳ
+  useEffect(() => {
+    if (!currentUser?.storeId) return;
+    const storeId = currentUser.storeId;
+    const periodKey = `${storeId}_${dateFilter}_${filterType}`;
+
+    const expected = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
+    if (!expected.length) {
+      setIsLoadingHistorical(false);
+      setReportError('Vui lòng chọn kỳ không vượt quá ngày hiện tại.');
+      return;
+    }
+    const first = expected[0], last = expected[expected.length - 1];
+    const includesToday = expected.includes(todayVietnam);
+    const needsFullRaw = activeTab === 'sales' || activeTab === 'cash' || activeTab === 'items';
+
+    // Xác định phạm vi ngày cần nghe cho raw documents:
+    let targetStart = '';
+    let targetEnd = '';
+
+    if (needsFullRaw) {
+      targetStart = first;
+      targetEnd = last;
+    } else if (
+      activeRawSubRef.current.periodKey === periodKey &&
+      activeRawSubRef.current.startDay === first &&
+      activeRawSubRef.current.endDay === last
+    ) {
+      // Đã có subscription toàn kỳ đang hoạt động: GIỮ NGUYÊN để không hủy listener live của hôm nay
+      targetStart = first;
+      targetEnd = last;
+    } else if (includesToday) {
+      targetStart = todayVietnam;
+      targetEnd = todayVietnam;
+    }
+
+    // Nếu subscription hiện tại đã đúng periodKey và phạm vi [targetStart, targetEnd], tiếp tục giữ nguyên
+    if (
+      activeRawSubRef.current.periodKey === periodKey &&
+      activeRawSubRef.current.startDay === targetStart &&
+      activeRawSubRef.current.endDay === targetEnd
+    ) {
+      return;
+    }
+
+    // Nếu periodKey đổi hoặc phạm vi thay đổi: Hủy subscription cũ
+    if (activeRawSubRef.current.unsubInv) {
+      activeRawSubRef.current.unsubInv();
+    }
+    if (activeRawSubRef.current.unsubCash) {
+      activeRawSubRef.current.unsubCash();
+    }
+    activeRawSubRef.current = {
+      periodKey: '',
+      startDay: '',
+      endDay: '',
+      unsubInv: null,
+      unsubCash: null
+    };
+
+    // Nếu periodKey đổi, xóa mảng chứng từ cũ
+    if (rawScope.periodKey !== periodKey) {
+      setHistoricalInvoices([]);
+      setHistoricalCash([]);
+      setHasMoreInvoices(false);
+      setHasMoreCash(false);
+      setLastInvoiceDoc(null);
+      setLastCashDoc(null);
+    }
+
+    // Cập nhật rawScope: hạ readiness ngay khi phạm vi thay đổi
+    const isTargetFull = Boolean(targetStart && targetEnd && targetStart === first && targetEnd === last);
+    setRawScope({
+      periodKey,
+      startDay: targetStart,
+      endDay: targetEnd,
+      invoicesConfirmed: false,
+      cashConfirmed: false,
+      isFullPeriod: isTargetFull
+    });
+
+    if (!targetStart || !targetEnd) {
+      // Không cần query raw (kỳ quá khứ ở tab tài chính/tổng quan)
+      setIsLoadingHistorical(false);
+      setReportError('');
+      return;
+    }
+
+    setIsLoadingHistorical(true);
+    setReportError('');
+    let disposed = false;
+    let invConfirmed = false;
+    let cashConfirmed = false;
+
+    const updateReadiness = () => {
+      if (disposed) return;
+      const bothDone = invConfirmed && cashConfirmed;
+      setRawScope(prev => ({
+        ...prev,
+        invoicesConfirmed: invConfirmed,
+        cashConfirmed: cashConfirmed
+      }));
+      if (bothDone) {
+        setIsLoadingHistorical(false);
+        setReportError('');
+      }
+    };
+
+    const onError = (err: Error) => {
+      if (disposed) return;
+      invConfirmed = false;
+      cashConfirmed = false;
+      setReportError(err.message || 'Không thể xác nhận đủ chứng từ.');
+      setIsLoadingHistorical(false);
+      setRawScope(prev => ({
+        ...prev,
+        invoicesConfirmed: false,
+        cashConfirmed: false
+      }));
+    };
+
+    const unsubInv = subscribeDateRange<Invoice>('invoices', storeId, targetStart, targetEnd, (rows, confirmed) => {
+      if (disposed) return;
+      setHistoricalInvoices(rows);
+      invConfirmed = confirmed;
+      updateReadiness();
+    }, onError);
+
+    const unsubCash = subscribeDateRange<CashTransaction>('cash_transactions', storeId, targetStart, targetEnd, (rows, confirmed) => {
+      if (disposed) return;
+      setHistoricalCash(rows);
+      cashConfirmed = confirmed;
+      updateReadiness();
+    }, onError);
+
+    activeRawSubRef.current = {
+      periodKey,
+      startDay: targetStart,
+      endDay: targetEnd,
+      unsubInv: () => { disposed = true; unsubInv(); },
+      unsubCash: () => { disposed = true; unsubCash(); }
+    };
+  }, [currentUser?.storeId, dateFilter, filterType, todayVietnam, activeTab]);
+
+  // Dọn dẹp subscription raw khi component unmount
+  useEffect(() => {
+    return () => {
+      if (activeRawSubRef.current.unsubInv) activeRawSubRef.current.unsubInv();
+      if (activeRawSubRef.current.unsubCash) activeRawSubRef.current.unsubCash();
+      activeRawSubRef.current = { periodKey: '', startDay: '', endDay: '', unsubInv: null, unsubCash: null };
+    };
+  }, []);
 
   // 2. Chỉ tải inventory_logs khi người dùng chủ động mở tab Kho
   useEffect(() => {
@@ -1257,22 +1438,171 @@ export const SummaryView = ({
     const dates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
     const statsByDate = new Map<string, DailyStats>(dailyStats.map(s => [s.date, s]));
 
-    // Thống kê thô tính từ chứng từ chi tiết đã tải (nếu có)
+    // 1. Chỉ tính rawStats cho các ngày thực sự nằm trong phạm vi ngày đã được truy vấn raw từ server
     let rawStats: DailyStats[] = [];
-    try {
-      rawStats = dailyStatsFromSources(currentUser?.storeId || '', dates, periodInvoices, periodCash, reportDataReady);
-    } catch {
-      // nếu chứng từ chi tiết bị lỗi tính, rawStats = []
+    const isRawActive = Boolean(rawScope.invoicesConfirmed && rawScope.cashConfirmed && rawScope.startDay && rawScope.endDay);
+    const coveredRawDates = isRawActive
+      ? dates.filter(d => d >= rawScope.startDay && d <= rawScope.endDay)
+      : [];
+
+    if (coveredRawDates.length > 0) {
+      try {
+        rawStats = dailyStatsFromSources(currentUser?.storeId || '', coveredRawDates, periodInvoices, periodCash, true);
+      } catch {
+        rawStats = [];
+      }
     }
     const rawByDate = new Map<string, DailyStats>(rawStats.map(s => [s.date, s]));
 
-    // Hợp nhất dữ liệu: Các ngày quá khứ đã đối soát tin cậy dùng daily_stats từ server; hôm nay hoặc ngày chưa chốt dùng chứng từ chi tiết
-    const stats: DailyStats[] = dates.map(d => {
+    // Hợp nhất dữ liệu: Đảm bảo nguyên tắc 1 nguồn duy nhất trọn vẹn cho từng ngày (Single Source of Truth)
+    // Tuyệt đối không kết hợp doanh thu của nguồn này với giá vốn của nguồn khác
+    const stats: (DailyStats & { _source: 'serverStat' | 'rawStat' | 'empty' })[] = dates.map(d => {
       const serverStat = statsByDate.get(d);
-      if (serverStat && (serverStat.coverageStatus === 'reconciled' || serverStat.coverageStatus === 'zero_activity') && d < todayVietnam) {
-        return serverStat;
+      const isServerStatConfirmed = Boolean(serverStat && !(serverStat as any)._fromCache && dailyStatsReady);
+      const isServerStatReconciled = Boolean(serverStat && (serverStat.coverageStatus === 'reconciled' || serverStat.coverageStatus === 'zero_activity'));
+
+      // Ngày d chỉ được coi là có chứng từ raw đã xác nhận khi ngày d nằm trong phạm vi đã truy vấn và được server xác nhận
+      const isDayWithinRawScope = Boolean(isRawActive && d >= rawScope.startDay && d <= rawScope.endDay);
+      const rawStat = isDayWithinRawScope ? rawByDate.get(d) : undefined;
+      const isRawConfirmed = Boolean(isDayWithinRawScope && rawStat);
+
+      // 1. Ngày hôm nay (Live data)
+      if (d === todayVietnam) {
+        if (isRawConfirmed && rawStat) {
+          return {
+            ...rawStat,
+            coverageStatus: rawStat.coverageStatus || 'reconciled',
+            _source: 'rawStat'
+          };
+        }
+        if (rawByDate.has(d)) {
+          const partialRaw = rawByDate.get(d)!;
+          return {
+            ...partialRaw,
+            coverageStatus: 'live_tracking',
+            _source: 'rawStat'
+          };
+        }
+        if (serverStat) {
+          return {
+            ...serverStat,
+            coverageStatus: 'live_tracking',
+            _source: 'serverStat'
+          };
+        }
+        return {
+          id: `${currentUser?.storeId}_${d}`,
+          storeId: currentUser?.storeId || '',
+          date: d,
+          month: d.slice(0, 7),
+          year: Number(d.slice(0, 4)),
+          totalRevenue: 0,
+          totalCash: 0,
+          totalTransfer: 0,
+          invoiceCount: 0,
+          totalDiscount: 0,
+          totalCost: 0,
+          coverageStatus: 'missing',
+          costStatus: 'missing',
+          hasData: false,
+          _source: 'empty'
+        };
       }
-      return rawByDate.get(d) || serverStat || {
+
+      // 2. Ngày quá khứ (d < todayVietnam)
+      // Tình huống 2a: Cả hai nguồn đều được xác nhận từ máy chủ cho ngày này
+      if (isRawConfirmed && isServerStatConfirmed) {
+        const revDiff = Math.abs((serverStat?.totalRevenue || 0) - (rawStat?.totalRevenue || 0));
+        const invDiff = Math.abs((serverStat?.invoiceCount || 0) - (rawStat?.invoiceCount || 0));
+        const costDiff = (rawStat?.costStatus === 'complete' && typeof serverStat?.totalCost === 'number')
+          ? Math.abs((serverStat.totalCost || 0) - (rawStat.totalCost || 0))
+          : 0;
+        const cashDiff = Math.abs((serverStat?.totalCash || 0) - (rawStat?.totalCash || 0));
+        const transferDiff = Math.abs((serverStat?.totalTransfer || 0) - (rawStat?.totalTransfer || 0));
+        const discountDiff = Math.abs((serverStat?.totalDiscount || 0) - (rawStat?.totalDiscount || 0));
+
+        // Mở rộng đối chiếu tới toàn bộ thu / chi ngoài bán hàng và các nhóm chi phí
+        const expenseDiff = Math.abs((serverStat?.totalExpense || 0) - (rawStat?.totalExpense || 0));
+        const incomeDiff = Math.abs((serverStat?.totalIncome || 0) - (rawStat?.totalIncome || 0));
+        const cashExpenseDiff = Math.abs((serverStat?.cashExpense || 0) - (rawStat?.cashExpense || 0));
+        const transferExpenseDiff = Math.abs((serverStat?.transferExpense || 0) - (rawStat?.transferExpense || 0));
+        const cashIncomeDiff = Math.abs((serverStat?.cashIncome || 0) - (rawStat?.cashIncome || 0));
+        const transferIncomeDiff = Math.abs((serverStat?.transferIncome || 0) - (rawStat?.transferIncome || 0));
+        const expenseOtherDiff = Math.abs((serverStat?.expenseOther || 0) - (rawStat?.expenseOther || 0));
+        const expenseSalaryDiff = Math.abs((serverStat?.expenseSalary || 0) - (rawStat?.expenseSalary || 0));
+        const expenseRentDiff = Math.abs((serverStat?.expenseRent || 0) - (rawStat?.expenseRent || 0));
+        const expenseInventoryDiff = Math.abs((serverStat?.expenseInventory || 0) - (rawStat?.expenseInventory || 0));
+
+        const isFinancialMatch =
+          revDiff < 1 &&
+          invDiff === 0 &&
+          costDiff < 1 &&
+          cashDiff < 1 &&
+          transferDiff < 1 &&
+          discountDiff < 1 &&
+          expenseDiff < 1 &&
+          incomeDiff < 1 &&
+          cashExpenseDiff < 1 &&
+          transferExpenseDiff < 1 &&
+          cashIncomeDiff < 1 &&
+          transferIncomeDiff < 1 &&
+          expenseOtherDiff < 1 &&
+          expenseSalaryDiff < 1 &&
+          expenseRentDiff < 1 &&
+          expenseInventoryDiff < 1;
+
+        if (isFinancialMatch) {
+          return {
+            ...serverStat!,
+            coverageStatus: serverStat!.coverageStatus || 'reconciled',
+            _source: 'serverStat'
+          };
+        }
+        // Hai nguồn lệch nhau về tài chính (doanh thu, số HĐ, giá vốn hoặc thu/chi):
+        // Dùng TRỌN VẸN số liệu chứng từ gốc raw đã xác nhận, và đánh dấu partial để đối soát lại
+        return {
+          ...rawStat!,
+          coverageStatus: 'partial',
+          _source: 'rawStat'
+        };
+      }
+
+      // Tình huống 2b: Raw chi tiết đã xác nhận từ server, còn serverStat chỉ là cache hoặc chưa có
+      // TUYỆT ĐỐI không để cached stats ghi đè raw đã xác nhận
+      if (isRawConfirmed && rawStat) {
+        return {
+          ...rawStat,
+          coverageStatus: rawStat.coverageStatus || 'reconciled',
+          _source: 'rawStat'
+        };
+      }
+
+      // Tình huống 2c: Server stats đã xác nhận từ server và đã đối soát
+      if (isServerStatConfirmed && isServerStatReconciled) {
+        return {
+          ...serverStat!,
+          coverageStatus: serverStat!.coverageStatus || 'reconciled',
+          _source: 'serverStat'
+        };
+      }
+
+      // Tình huống 2d: Tạm hiển thị trong lúc đang đồng bộ
+      if (rawStat) {
+        return {
+          ...rawStat,
+          coverageStatus: 'partial',
+          _source: 'rawStat'
+        };
+      }
+      if (serverStat) {
+        return {
+          ...serverStat,
+          coverageStatus: 'partial',
+          _source: 'serverStat'
+        };
+      }
+
+      return {
         id: `${currentUser?.storeId}_${d}`,
         storeId: currentUser?.storeId || '',
         date: d,
@@ -1284,8 +1614,10 @@ export const SummaryView = ({
         invoiceCount: 0,
         totalDiscount: 0,
         totalCost: 0,
-        coverageStatus: 'zero_activity',
-        hasData: false
+        coverageStatus: 'missing',
+        costStatus: 'missing',
+        hasData: false,
+        _source: 'empty'
       };
     });
 
@@ -1301,30 +1633,77 @@ export const SummaryView = ({
       }
     }
     const sales = periodInvoices.filter(i => i.status !== 'cancelled');
-    const isCostFullyResolved = (periodInvoices.length > 0 || stats.some(s => s.costStatus === 'complete')) && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
-    const isComplete = reportDataReady || (dates.length > 0 && dates.every(d => {
+
+    // Chỉ cho phép dùng totalRecomputedCost khi toàn bộ các ngày trong kỳ đều dùng nguồn raw
+    // VÀ toàn bộ hóa đơn của kỳ đã được xác nhận đầy đủ từ máy chủ không bị phân trang dở
+    const isEntirePeriodRawAndReady = reportDataReady && !hasMoreInvoices && periodInvoices.length > 0 && stats.every(s => s._source === 'rawStat');
+    const isCostFullyResolved = isEntirePeriodRawAndReady && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
+
+    const isAllStatsReconciled = dailyStatsReady && dates.length > 0 && dates.every(d => {
       const s = statsByDate.get(d);
-      return s && (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
-    }));
+      return s && !(s as any)._fromCache && (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
+    });
+
+    // Hàm đánh giá xem từng ngày có nguồn dữ liệu được xác nhận từ server hay chưa
+    const isDayConfirmed = (s: DailyStats & { _source: 'serverStat' | 'rawStat' | 'empty' }) => {
+      if (s._source === 'empty') return false;
+      if (s._source === 'rawStat') {
+        // Nguồn raw phải nằm trong phạm vi ngày đã được xác nhận cả hóa đơn và sổ quỹ từ snapshot
+        return Boolean(isRawActive && s.date >= rawScope.startDay && s.date <= rawScope.endDay);
+      }
+      if (s._source === 'serverStat') {
+        const srv = statsByDate.get(s.date);
+        if (!srv || (srv as any)._fromCache || !dailyStatsReady) return false;
+        if (s.date < todayVietnam) {
+          return s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity';
+        }
+        return true;
+      }
+      return false;
+    };
+
+    // Toàn bộ các ngày trong kỳ đã có nguồn dữ liệu xác nhận (kể cả kỳ kết hợp stats ngày cũ + raw hôm nay)
+    const isAllDaysConfirmed = dates.length > 0 && stats.every(isDayConfirmed);
+    const isComplete = (reportDataReady && !hasMoreInvoices) || isAllStatsReconciled || isAllDaysConfirmed;
+
+    // Số ngày thiếu: Là những ngày không có nguồn dữ liệu nào được xác nhận (missing / empty)
+    const missingDaysCount = stats.filter(s => !isDayConfirmed(s)).length;
+    const reconciledDaysCount = stats.filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity').length;
+    const daysUsingServerStats = stats.filter(s => s._source === 'serverStat').length;
+    const daysUsingRawStats = stats.filter(s => s._source === 'rawStat').length;
+
+    // Trạng thái giá vốn toàn kỳ:
+    const isAllCostsComplete = stats.every(s => (s.costStatus === 'complete' && typeof s.totalCost === 'number') || s.coverageStatus === 'zero_activity');
+    const hasAnyCostEstimated = stats.some(s => s.costStatus === 'estimated');
+    const calculatedCostStatus: 'complete' | 'estimated' | 'partial' = !isComplete
+      ? 'partial'
+      : isCostFullyResolved || isAllCostsComplete
+      ? 'complete'
+      : hasAnyCostEstimated
+      ? 'estimated'
+      : 'partial';
+
+    // Trạng thái đối soát toàn kỳ (coverageStatus):
+    const isAllReconciledOrZero = stats.every(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
+    const calculatedCoverageStatus: 'reconciled' | 'partial' = isComplete && !sourceMismatch && missingDaysCount === 0 && isAllReconciledOrZero
+      ? 'reconciled'
+      : 'partial';
 
     return {
       ...totals,
       totalCost: isCostFullyResolved && totalRecomputedCost > 0 ? totalRecomputedCost : totals.totalCost,
       hasExpenseBreakdown: true,
-      costStatus: !isComplete ? 'partial' : isCostFullyResolved ? 'complete' : sales.every(invoiceCostIsComplete) ? 'complete' : 'estimated',
-      coverageStatus: isComplete && !sourceMismatch ? 'reconciled' : 'partial',
-      missingDaysCount: dates.filter(d => {
-        const s = statsByDate.get(d) || rawByDate.get(d);
-        return !s || (s.coverageStatus !== 'reconciled' && s.coverageStatus !== 'zero_activity');
-      }).length,
-      reconciledDaysCount: dates.filter(d => {
-        const s = statsByDate.get(d) || rawByDate.get(d);
-        return s && (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
-      }).length,
+      costStatus: calculatedCostStatus,
+      coverageStatus: calculatedCoverageStatus,
+      isComplete,
+      missingDaysCount,
+      reconciledDaysCount,
+      daysUsingServerStats,
+      daysUsingRawStats,
       daysWithSales: stats.filter(s => (s.invoiceCount || 0) > 0).length,
       daysWithCompleteCost: stats.filter(s => (s.invoiceCount || 0) > 0 && s.costStatus === 'complete').length,
       daysWithEstimatedCost: stats.filter(s => s.costStatus === 'estimated').length,
-      daysWithMissingCost: 0,
+      daysWithMissingCost: stats.filter(s => s.costStatus === 'missing').length,
       zeroActivityDaysCount: stats.filter(s => !s.hasData && s.coverageStatus === 'zero_activity').length,
       daysUsingFallbackInvoices: 0,
       daysUsingFallbackCash: 0,
@@ -1335,7 +1714,7 @@ export const SummaryView = ({
       hasExpenseInStats: totals.totalExpense > 0,
       hasIncomeInStats: totals.totalIncome > 0
     };
-  }, [dailyStats, periodInvoices, periodCash, reportDataReady, dateFilter, filterType, todayVietnam, currentUser?.storeId, sourceMismatch, hasAnyIncompleteInvoice, missingCostItems.length, totalRecomputedCost]);
+  }, [dailyStats, dailyStatsReady, periodInvoices, periodCash, rawScope, reportDataReady, hasMoreInvoices, dateFilter, filterType, todayVietnam, currentUser?.storeId, sourceMismatch, hasAnyIncompleteInvoice, missingCostItems.length, totalRecomputedCost]);
 
   // Cash Book Stats - Tính toán chuẩn xác: Tổng thu = salesReceipts + nonSaleIncome
   const cashStats = useMemo(() => {
@@ -1529,9 +1908,9 @@ export const SummaryView = ({
   let isCostUnavailable = false;
   let costEstimateReason = '';
 
-  // 0. Ưu tiên cao nhất: Nếu các món bán trong kỳ đã được cài đặt đầy đủ 100% giá vốn
-  // (toàn bộ các món bán đều có giá vốn/định lượng kho và toàn bộ hóa đơn đã tính đủ giá vốn)
-  if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
+  // 0. Chỉ dùng totalRecomputedCost khi toàn bộ kỳ được nạp đầy đủ 100% từ chứng từ gốc đã xác nhận từ server
+  const isPeriodFullyLoadedFromRaw = reportDataReady && !hasMoreInvoices && periodInvoices.length > 0 && (statsAggregates?.daysUsingServerStats === 0);
+  if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
     finalCost = totalRecomputedCost;
     isCostEstimated = false;
     costEstimateReason = '';
@@ -1544,12 +1923,12 @@ export const SummaryView = ({
   }
   // 2. Nếu daily_stats có giá vốn nhưng là ước tính (costStatus === 'estimated')
   else if (statsAggregates && statsAggregates.costStatus === 'estimated' && typeof statsAggregates.totalCost === 'number') {
-    if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
+    if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
       finalCost = totalRecomputedCost;
       isCostEstimated = false;
       costEstimateReason = '';
     } else {
-      finalCost = totalRecomputedCost > 0 ? totalRecomputedCost : statsAggregates.totalCost;
+      finalCost = statsAggregates.totalCost;
       isCostEstimated = true;
       costEstimateReason = missingCostItems.length > 0
         ? `Có ${missingCostItems.length} món chưa có giá vốn: ${missingCostItems.slice(0, 3).map(m => m.name).join(', ')}${missingCostItems.length > 3 ? '...' : ''}`
@@ -1558,7 +1937,7 @@ export const SummaryView = ({
   }
   // 3. Nếu daily_stats có giá vốn một phần (costStatus === 'partial')
   else if (statsAggregates && statsAggregates.costStatus === 'partial' && typeof statsAggregates.totalCost === 'number') {
-    if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0 && !hasMoreInvoices) {
+    if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
       finalCost = totalRecomputedCost;
       isCostEstimated = false;
       costEstimateReason = '';
@@ -1573,7 +1952,7 @@ export const SummaryView = ({
   // 4. Nếu daily_stats có ghi nhận totalCost > 0 nhưng rơi vào status khác (dữ liệu migrate hoặc legacy)
   // TUYỆT ĐỐI KHÔNG VỨT BỎ GIÁ VỐN ĐÃ BIẾT ĐỂ RƠI VỀ 35%!
   else if (statsAggregates && typeof statsAggregates.totalCost === 'number' && statsAggregates.totalCost > 0) {
-    if (periodInvoices.length > 0 && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
+    if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
       finalCost = totalRecomputedCost;
       isCostEstimated = false;
       costEstimateReason = '';
@@ -1708,11 +2087,13 @@ export const SummaryView = ({
     finally {setIsSavingCash(false);}
   };
 
+  const isSummaryDataReady = Boolean(statsAggregates?.isComplete || (reportDataReady && !hasMoreInvoices) || (statsAggregates?.coverageStatus === 'reconciled'));
+
   return (
     <div className="p-8 space-y-6 h-full overflow-y-auto">
       {isAdmin && activeTab==='items'&&periodInvoices.some(i=>i.total>0&&!i.items?.length)&&<div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Có hóa đơn thiếu chi tiết món. Thống kê theo món chưa đầy đủ; cần đối soát hóa đơn gốc.</div>}
       {isAdmin && sourceMismatch && <div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{sourceMismatch}</div>}
-      {isAdmin && (!reportDataReady || reportError) && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{reportError || 'Đang đồng bộ toàn bộ chứng từ. Số liệu dưới đây chưa được xác nhận đầy đủ; chưa thể xuất báo cáo.'}</div>}
+      {isAdmin && (!isSummaryDataReady || reportError) && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{reportError || 'Đang đồng bộ dữ liệu từ máy chủ. Số liệu dưới đây chưa được xác nhận đầy đủ; chưa thể xuất báo cáo.'}</div>}
       {isAdmin && activeTab === 'financial' && <div className="text-sm text-gray-500">Lợi nhuận dùng doanh thu gồm VAT theo hóa đơn; doanh thu món là trước VAT, sau giảm giá. Lương: {financialCostBasis==='payroll' ? 'tạm tính theo các bảng lương đã chốt; chưa bao gồm nhân viên chưa chốt, phân bổ theo ngày khi xem ngày' : 'theo phiếu chi lương thực tế trong kỳ'}. {financialCostBasis==='payroll'&&!payrollDataReady ? 'Bảng lương đang đồng bộ.' : ''}<select className="ml-2 rounded border bg-transparent p-1" value={financialCostBasis} onChange={event=>setFinancialCostBasis(event.target.value as 'cash'|'payroll')}><option value="cash">Chi lương thực tế</option><option value="payroll">Bảng lương đã chốt (tạm tính)</option></select></div>}
       <div className="flex justify-between items-center">
         <div className="flex items-center gap-4">

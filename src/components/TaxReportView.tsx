@@ -137,8 +137,15 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
             const data = baselineSnap.data();
             baselineRevision = data?.sourceRevision ?? data?.updatedAt ?? 0;
           }
-        } catch {
-          // Document chưa tồn tại trên server, baselineExists = false
+        } catch (err: any) {
+          // Chỉ coi là chưa tồn tại khi lỗi trả về là not-found. Lỗi mạng/quyền truy cập phải dừng để tránh ghi đè
+          if (err?.code === 'not-found') {
+            baselineExists = false;
+            baselineRevision = 0;
+          } else {
+            console.error(`Lỗi đọc baseline stats ngày ${day} từ server:`, err);
+            throw new Error(`Không thể xác nhận baseline ngày ${day} từ máy chủ (${err?.message || 'Lỗi mạng hoặc phân quyền'}). Đã dừng đối soát để bảo vệ an toàn dữ liệu.`);
+          }
         }
 
         const { startIso, endExclusiveIso } = getVietnamDayBoundariesIso(day);

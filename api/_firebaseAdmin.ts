@@ -337,51 +337,12 @@ class ClientDocRefAdapter {
     if (id) {
       this.id = id;
     } else {
-      this.id = clientDoc(clientCollection(cDb, colName === 'user_secrets' ? 'system' : colName)).id;
+      this.id = clientDoc(clientCollection(cDb, colName)).id;
     }
     this.path = `${colName}/${this.id}`;
   }
 
   async get() {
-    // Với user_secrets trong chế độ client-bridge:
-    // 1. Đọc từ vùng lưu an toàn system/user_secret_${id} trước (luôn được cấp quyền)
-    if (this.colName === 'user_secrets') {
-      try {
-        const sysRef = clientDoc(cDb, 'system', `user_secret_${this.id}`);
-        const sysSnap = await clientGetDoc(sysRef);
-        if (sysSnap.exists()) {
-          return {
-            exists: true,
-            id: this.id,
-            data: () => sysSnap.data() || {}
-          };
-        }
-      } catch (_) {}
-
-      // 2. Thử đọc từ user_secrets gốc nếu đã có quyền (và bắt lỗi êm nếu chưa có quyền)
-      try {
-        const dRef = clientDoc(cDb, this.colName, this.id);
-        const snap = await clientGetDoc(dRef);
-        return {
-          exists: snap.exists(),
-          id: snap.id,
-          data: () => snap.data() || {}
-        };
-      } catch (err: any) {
-        const isPerm = err?.code === 7 || err?.code === 'permission-denied' || String(err?.message || '').includes('permissions');
-        if (isPerm) {
-          // Bắt êm lỗi permission-denied để flow đăng nhập chuyển sang nhánh kiểm tra mật khẩu hợp lệ
-          return {
-            exists: false,
-            id: this.id,
-            data: () => ({})
-          };
-        }
-        console.error(`[FirebaseBridge] Error reading document ${this.path}:`, err?.message || err);
-        throw err;
-      }
-    }
-
     try {
       const dRef = clientDoc(cDb, this.colName, this.id);
       const snap = await clientGetDoc(dRef);
@@ -391,6 +352,14 @@ class ClientDocRefAdapter {
         data: () => snap.data() || {}
       };
     } catch (err: any) {
+      const isPerm = err?.code === 7 || err?.code === 'permission-denied' || String(err?.message || '').includes('permissions');
+      if (isPerm && this.colName === 'user_secrets') {
+        return {
+          exists: false,
+          id: this.id,
+          data: () => ({})
+        };
+      }
       console.error(`[FirebaseBridge] Error reading document ${this.path}:`, err?.message || err);
       throw err;
     }
@@ -398,15 +367,7 @@ class ClientDocRefAdapter {
 
   async set(data: any, options?: { merge?: boolean }) {
     if (this.colName === 'user_secrets') {
-      try {
-        // Lưu an toàn vào system/user_secret_${id} (100% được cấp quyền trên Firestore)
-        const sysRef = clientDoc(cDb, 'system', `user_secret_${this.id}`);
-        await clientSetDoc(sysRef, sanitizeDataForClient(data), options || {});
-        return;
-      } catch (sysErr: any) {
-        console.error(`[FirebaseBridge] Error writing secret to system fallback:`, sysErr?.message || sysErr);
-        throw sysErr;
-      }
+      throw new Error(`[Security] Ghi dữ liệu bảo mật user_secrets yêu cầu Firebase Admin SDK chính thức. Không cho phép ghi qua client bridge.`);
     }
 
     try {
@@ -420,14 +381,7 @@ class ClientDocRefAdapter {
 
   async update(data: any) {
     if (this.colName === 'user_secrets') {
-      try {
-        const sysRef = clientDoc(cDb, 'system', `user_secret_${this.id}`);
-        await clientSetDoc(sysRef, sanitizeDataForClient(data), { merge: true });
-        return;
-      } catch (sysErr: any) {
-        console.error(`[FirebaseBridge] Error updating secret in system fallback:`, sysErr?.message || sysErr);
-        throw sysErr;
-      }
+      throw new Error(`[Security] Cập nhật dữ liệu bảo mật user_secrets yêu cầu Firebase Admin SDK chính thức. Không cho phép cập nhật qua client bridge.`);
     }
 
     try {
@@ -440,14 +394,6 @@ class ClientDocRefAdapter {
   }
 
   async delete() {
-    if (this.colName === 'user_secrets') {
-      try {
-        const sysRef = clientDoc(cDb, 'system', `user_secret_${this.id}`);
-        await clientDeleteDoc(sysRef);
-      } catch (_) {}
-      return;
-    }
-
     try {
       const dRef = clientDoc(cDb, this.colName, this.id);
       await clientDeleteDoc(dRef);
@@ -464,8 +410,7 @@ class ClientBatchAdapter {
   private resolveDocRef(docRef: any) {
     const rawPath = docRef?.path || '';
     if (rawPath.startsWith('user_secrets/')) {
-      const id = rawPath.split('/')[1];
-      return clientDoc(cDb, 'system', `user_secret_${id}`);
+      throw new Error("[Security] Ghi batch vào user_secrets bắt buộc phải sử dụng Firebase Admin SDK chính thức.");
     }
     return clientDoc(cDb, rawPath);
   }
@@ -615,22 +560,8 @@ export const adminDb = {
       });
     }
 
-    // Fallback transaction adapter
-    const txAdapter = {
-      async get(docRef: any) {
-        return await docRef.get();
-      },
-      update(docRef: any, data: any) {
-        return docRef.update(data);
-      },
-      set(docRef: any, data: any, options?: any) {
-        return docRef.set(data, options);
-      },
-      delete(docRef: any) {
-        return docRef.delete();
-      }
-    };
-    return await updateFunction(txAdapter);
+    // Giao dịch nguyên tử (Atomic transaction) bắt buộc phải có Firebase Admin SDK hợp lệ
+    throw new Error("[Transaction Error] Các thao tác yêu cầu tính nguyên tử (Atomic Transaction) bắt buộc phải có Firebase Admin SDK được cấu hình Service Account hợp lệ để đảm bảo tính toàn vẹn dữ liệu.");
   }
 };
 

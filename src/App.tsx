@@ -2157,7 +2157,18 @@ export default function App() {
   const [showScanner, setShowScanner] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const savedUser = safeStorage.getItem('fnb_master_user');
-    return savedUser ? JSON.parse(savedUser) : null;
+    if (!savedUser) return null;
+    try {
+      const user = JSON.parse(savedUser);
+      if (user.isActive === false || user.isDeleted || user.status === 'deleted') {
+        safeStorage.removeItem('fnb_master_user');
+        safeStorage.removeItem('fnb_master_token');
+        return null;
+      }
+      return user;
+    } catch {
+      return null;
+    }
   });
   const [isRegistering, setIsRegistering] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -2218,6 +2229,21 @@ export default function App() {
     };
     fetchPackages();
   }, []);
+
+  // Kiểm tra tính hợp lệ và đồng bộ danh tính của phiên đăng nhập Firebase Auth khi khởi động ứng dụng
+  useEffect(() => {
+    if (!currentUser) return;
+    auth.authStateReady().then(() => {
+      const fbUser = auth.currentUser;
+      if (!fbUser || (currentUser.id && fbUser.uid !== currentUser.id)) {
+        console.warn("[Auth Security] Phiên đăng nhập Firebase Auth không khớp hoặc đã hết hạn. Chuyển về màn hình đăng nhập.");
+        setCurrentUser(null);
+        safeStorage.removeItem('fnb_master_user');
+      }
+    }).catch(err => {
+      console.warn("[Auth Security] Lỗi kiểm tra authStateReady:", err);
+    });
+  }, [currentUser]);
   const [menu, setMenu] = useState<MenuItem[]>(INITIAL_MENU);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -2708,6 +2734,24 @@ export default function App() {
       }
     });
     unsubs.push(unsubStore);
+
+    // 1b. Sync Trạng thái tài khoản người dùng hiện tại (Phát hiện khóa / vô hiệu hóa tài khoản tức thì)
+    if (currentUser.id && currentUser.id !== 'superadmin') {
+      const userDocRef = doc(db, 'users', currentUser.id);
+      const unsubUserStatus = onSnapshot(userDocRef, (userSnap) => {
+        if (!isMounted) return;
+        if (userSnap.exists()) {
+          const uData = userSnap.data();
+          if (uData.isActive === false || uData.isDeleted || uData.status === 'deleted') {
+            alert('Tài khoản của bạn đã bị vô hiệu hóa hoặc không còn hoạt động. Hệ thống sẽ đăng xuất.');
+            handleLogout();
+          }
+        }
+      }, (err) => {
+        console.warn('Lỗi lắng nghe trạng thái tài khoản:', err);
+      });
+      unsubs.push(unsubUserStatus);
+    }
 
     // 2. Sync Menu:
     // - Bếp (kitchen): KHÔNG nghe menu (chỉ hiển thị vé món theo bàn, tiết kiệm 100% reads)

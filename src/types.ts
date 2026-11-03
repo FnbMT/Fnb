@@ -21,6 +21,9 @@ export interface User {
   shiftEnd?: string;
   shifts?: { start: string, end: string }[];
   requiresAttendance?: boolean;
+  isActive?: boolean;
+  status?: string;
+  isDeleted?: boolean;
 }
 
 export interface PayrollRecord {

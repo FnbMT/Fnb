@@ -63,6 +63,7 @@ export default async function handler(req: any, res: any) {
         role: targetRole,
         storeId: targetStoreId,
         username: userData.username || '',
+        tokenVersion: 999999,
         isDeleted: true,
         status: 'deleted',
         deletedAt: new Date().toISOString()
