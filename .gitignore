@@ -11,3 +11,7 @@ coverage/
 *.apk
 local.properties
 **/local.properties
+android/build_apk/
+dist_old/
+android/app/src/main/assets/public_old/
+

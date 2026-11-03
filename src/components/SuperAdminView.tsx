@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Store, Settings, LogOut, Package as PackageIcon, Edit2, CheckCircle2, XCircle, Search, Trash2, QrCode, Download, Brush as Broom, Smartphone, UploadCloud, ChefHat, Users, BarChart3, FileText, PieChart, Check, Lock, Key, Eye, Copy, X, RotateCcw } from 'lucide-react';
+import { Store, Settings, LogOut, Package as PackageIcon, Edit2, CheckCircle2, XCircle, Search, Trash2, QrCode, Download, Brush as Broom, Smartphone, UploadCloud, ChefHat, Users, BarChart3, FileText, PieChart, Check, Lock, Key, Eye, Copy, X, RotateCcw, Apple } from 'lucide-react';
 import { db, storage } from '../lib/firebase';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { CurrencyInput } from './CurrencyInput';
@@ -75,6 +75,9 @@ interface StoreTenant {
 
 export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
   const [activeTab, setActiveTab] = useState<'stores' | 'packages' | 'settings' | 'app_updates'>('stores');
+  const [appUpdateTab, setAppUpdateTab] = useState<'android' | 'ios'>('android');
+  
+  // Android APK update state
   const [apkVersion, setApkVersion] = useState('');
   const [apkReleaseNotes, setApkReleaseNotes] = useState('');
   const [apkIsMandatory, setApkIsMandatory] = useState(false);
@@ -82,6 +85,14 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
   const [apkUploadProgress, setApkUploadProgress] = useState(0);
   const [currentApkInfo, setCurrentApkInfo] = useState<any>(null);
   const [apkManualUrl, setApkManualUrl] = useState('');
+
+  // iOS App Store update state
+  const [iosVersion, setIosVersion] = useState('');
+  const [iosReleaseNotes, setIosReleaseNotes] = useState('');
+  const [iosIsMandatory, setIosIsMandatory] = useState(false);
+  const [iosAppStoreUrl, setIosAppStoreUrl] = useState('');
+  const [currentIosInfo, setCurrentIosInfo] = useState<any>(null);
+  const [isSavingIos, setIsSavingIos] = useState(false);
 
   const [stores, setStores] = useState<StoreTenant[]>([]);
   const [packages, setPackages] = useState<StorePackage[]>([]);
@@ -200,7 +211,24 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
         console.error("Error fetching APK info", err);
       }
     };
+    const fetchCurrentIos = async () => {
+      try {
+        const docRef = doc(db, 'app_settings', 'ios_version');
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setCurrentIosInfo(data);
+          setIosVersion(data.version || '');
+          setIosReleaseNotes(data.releaseNotes || '');
+          setIosIsMandatory(data.isMandatory || false);
+          setIosAppStoreUrl(data.appStoreUrl || '');
+        }
+      } catch (err) {
+        console.error("Error fetching iOS info", err);
+      }
+    };
     fetchCurrentApk();
+    fetchCurrentIos();
   }, []);
 
   const fetchData = async () => {
@@ -478,6 +506,38 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
     } catch (err: any) {
       console.error(err);
       alert("Lỗi: " + err.message);
+    }
+  };
+
+  const handleIosSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!iosVersion.trim()) {
+      alert("Vui lòng nhập phiên bản iOS trên App Store (ví dụ: 1.0.4)");
+      return;
+    }
+    if (!iosAppStoreUrl.trim()) {
+      alert("Vui lòng nhập đường dẫn trang ứng dụng trên Apple App Store!");
+      return;
+    }
+
+    setIsSavingIos(true);
+    try {
+      const payload = {
+        version: iosVersion.trim(),
+        releaseNotes: iosReleaseNotes.trim(),
+        isMandatory: iosIsMandatory,
+        appStoreUrl: iosAppStoreUrl.trim(),
+        updatedAt: new Date().toISOString()
+      };
+
+      await setDoc(doc(db, 'app_settings', 'ios_version'), payload);
+      setCurrentIosInfo(payload);
+      alert("Lưu thông tin phiên bản iOS (App Store) thành công!");
+    } catch (err: any) {
+      console.error("Lỗi khi lưu thông tin iOS:", err);
+      alert("Lỗi: " + err.message);
+    } finally {
+      setIsSavingIos(false);
     }
   };
 
@@ -785,7 +845,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
             onClick={() => setActiveTab('app_updates')}
             className={`flex-shrink-0 md:w-full flex items-center gap-2 md:gap-3 px-3.5 md:px-4 py-2.5 md:py-3 rounded-xl transition-all text-xs md:text-base whitespace-nowrap cursor-pointer ${activeTab === 'app_updates' ? 'bg-emerald-500 text-white font-bold shadow-sm' : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5'}`}
           >
-            <Smartphone className="w-4 h-4 md:w-5 md:h-5" /> Ứng dụng Android
+            <Smartphone className="w-4 h-4 md:w-5 md:h-5" /> Cập nhật ứng dụng
           </button>
           <button 
             onClick={() => setActiveTab('settings')}
@@ -1464,169 +1524,344 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
 
         {activeTab === 'app_updates' && (
           <div className="space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
-                <h2 className="text-2xl font-bold">Cập nhật Ứng dụng Android (.APK)</h2>
-                <p className="text-xs text-gray-500 mt-1">Quản lý tệp APK cho người dùng Android tải trực tiếp từ web và tự động thông báo cập nhật</p>
+                <h2 className="text-2xl font-bold">Quản lý Cập nhật Ứng dụng</h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  Cấu hình thông báo cập nhật tự động cho ứng dụng Fnb Master trên Android (.APK) và iOS (Apple App Store)
+                </p>
+              </div>
+
+              {/* Sub-tab chuyển đổi Android / iOS */}
+              <div className="flex gap-2 p-1.5 bg-black/5 dark:bg-white/5 rounded-2xl w-fit border border-black/10 dark:border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setAppUpdateTab('android')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs md:text-sm transition-all cursor-pointer ${
+                    appUpdateTab === 'android'
+                      ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                  }`}
+                >
+                  <Smartphone className="w-4 h-4" />
+                  <span>Android (.APK)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAppUpdateTab('ios')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs md:text-sm transition-all cursor-pointer ${
+                    appUpdateTab === 'ios'
+                      ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                  }`}
+                >
+                  <Apple className="w-4 h-4" />
+                  <span>iOS (App Store)</span>
+                </button>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Form Upload & Cấu hình */}
-              <div className="lg:col-span-2 bg-white dark:bg-[#1a1b1e] rounded-2xl p-6 border border-black/10 dark:border-white/10">
-                <form onSubmit={handleApkUpload} className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-semibold mb-1">Phiên bản APK (Ví dụ: 1.0.1) *</label>
-                    <input 
-                      type="text" 
-                      value={apkVersion} 
-                      onChange={(e) => setApkVersion(e.target.value)} 
-                      required 
-                      placeholder="1.0.1" 
-                      className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2.5 font-mono text-sm" 
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-semibold mb-1">Ghi chú bản cập nhật (Release Notes)</label>
-                    <textarea 
-                      value={apkReleaseNotes} 
-                      onChange={(e) => setApkReleaseNotes(e.target.value)} 
-                      rows={3} 
-                      className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2 text-sm" 
-                      placeholder="- Cải thiện hiệu năng bán hàng&#10;- Sửa lỗi đồng bộ và in hóa đơn&#10;- Thêm tính năng mới..." 
-                    />
-                  </div>
-
-                  <div className="flex items-center gap-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl">
-                    <input 
-                      type="checkbox" 
-                      id="apkMandatory" 
-                      checked={apkIsMandatory} 
-                      onChange={(e) => setApkIsMandatory(e.target.checked)} 
-                      className="w-4 h-4 rounded text-emerald-500 focus:ring-emerald-500" 
-                    />
-                    <label htmlFor="apkMandatory" className="text-sm font-medium cursor-pointer">
-                      Bắt buộc cập nhật (Người dùng app cũ không thể bấm "Bỏ qua")
-                    </label>
-                  </div>
-                  
-                  {/* Cách 1: Tải tệp trực tiếp */}
-                  <div className="p-4 border border-black/10 dark:border-white/10 rounded-xl space-y-2 bg-black/[0.02] dark:bg-white/[0.02]">
-                    <div className="flex items-center justify-between">
-                      <label className="block text-sm font-semibold">Cách 1: Chọn tệp APK tải lên Firebase Storage</label>
-                      <span className="text-[11px] text-gray-500">Định dạng .apk</span>
+            {/* TAB ANDROID (.APK) */}
+            {appUpdateTab === 'android' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-150">
+                {/* Form Upload & Cấu hình APK */}
+                <div className="lg:col-span-2 bg-white dark:bg-[#1a1b1e] rounded-2xl p-6 border border-black/10 dark:border-white/10">
+                  <form onSubmit={handleApkUpload} className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-semibold mb-1">Phiên bản APK (Ví dụ: 1.0.4) *</label>
+                      <input 
+                        type="text" 
+                        value={apkVersion} 
+                        onChange={(e) => setApkVersion(e.target.value)} 
+                        required 
+                        placeholder="1.0.4" 
+                        className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2.5 font-mono text-sm" 
+                      />
                     </div>
-                    <input 
-                      type="file" 
-                      accept=".apk" 
-                      onChange={(e) => setApkFile(e.target.files?.[0] || null)} 
-                      className="w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-emerald-500 file:text-white hover:file:bg-emerald-600 file:cursor-pointer" 
-                    />
-                    {apkFile && (
-                      <p className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
-                        ✓ Đã chọn file: {apkFile.name} ({(apkFile.size / (1024 * 1024)).toFixed(1)} MB)
-                      </p>
-                    )}
-                    {apkUploadProgress > 0 && apkUploadProgress < 100 && (
-                      <div className="space-y-1 pt-1">
-                        <div className="flex justify-between text-xs text-gray-500">
-                          <span>Đang tải lên Firebase Storage...</span>
-                          <span className="font-bold text-emerald-600">{apkUploadProgress}%</span>
-                        </div>
-                        <div className="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700 overflow-hidden">
-                          <div className="bg-emerald-500 h-2.5 rounded-full transition-all duration-300" style={{ width: `${apkUploadProgress}%` }}></div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
 
-                  {/* Cách 2: Nhập link trực tiếp */}
-                  <div className="p-4 border border-black/10 dark:border-white/10 rounded-xl space-y-2 bg-black/[0.02] dark:bg-white/[0.02]">
-                    <label className="block text-sm font-semibold">Cách 2: Hoặc dán đường link tải APK trực tiếp (Direct URL)</label>
-                    <input 
-                      type="url" 
-                      value={apkManualUrl} 
-                      onChange={(e) => setApkManualUrl(e.target.value)} 
-                      placeholder="https://firebasestorage.googleapis.com/... hoặc link download" 
-                      className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2 font-mono text-xs" 
-                    />
-                    <p className="text-[11px] text-gray-500">
-                      Rất hữu ích nếu file dung lượng lớn hoặc bạn đã upload trực tiếp trên Firebase Console Storage / Google Drive.
-                    </p>
-                  </div>
-                  
-                  <button 
-                    type="submit" 
-                    disabled={apkUploadProgress > 0 && apkUploadProgress < 100} 
-                    className="w-full bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white font-bold py-3.5 rounded-xl transition-all shadow-md shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                  >
-                    <UploadCloud className="w-5 h-5" /> 
-                    {apkUploadProgress > 0 && apkUploadProgress < 100 ? `Đang tải lên (${apkUploadProgress}%)...` : 'Lưu bản cập nhật & Phát hành APK'}
-                  </button>
-                </form>
-              </div>
+                    <div>
+                      <label className="block text-sm font-semibold mb-1">Ghi chú bản cập nhật (Release Notes)</label>
+                      <textarea 
+                        value={apkReleaseNotes} 
+                        onChange={(e) => setApkReleaseNotes(e.target.value)} 
+                        rows={3} 
+                        className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2 text-sm" 
+                        placeholder="- Cải thiện hiệu năng bán hàng&#10;- Sửa lỗi đồng bộ và in hóa đơn&#10;- Thêm tính năng mới..." 
+                      />
+                    </div>
 
-              {/* Thông tin APK hiện hành & Hướng dẫn Firebase Rules */}
-              <div className="space-y-6">
-                {/* Trạng thái APK hiện hành */}
-                <div className="bg-white dark:bg-[#1a1b1e] rounded-2xl p-6 border border-black/10 dark:border-white/10 space-y-4">
-                  <h3 className="font-bold text-base flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
-                    <Smartphone className="w-5 h-5" /> Bản APK hiện tại trên hệ thống
-                  </h3>
-
-                  {currentApkInfo?.apkUrl ? (
-                    <div className="space-y-3 text-sm">
-                      <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5">
-                        <span className="text-gray-500">Phiên bản:</span>
-                        <span className="font-bold font-mono text-emerald-600">{currentApkInfo.version}</span>
+                    <div className="flex items-center gap-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl">
+                      <input 
+                        type="checkbox" 
+                        id="apkMandatory" 
+                        checked={apkIsMandatory} 
+                        onChange={(e) => setApkIsMandatory(e.target.checked)} 
+                        className="w-4 h-4 rounded text-emerald-500 focus:ring-emerald-500" 
+                      />
+                      <label htmlFor="apkMandatory" className="text-sm font-medium cursor-pointer">
+                        Bắt buộc cập nhật (Người dùng app Android cũ không thể bấm "Bỏ qua")
+                      </label>
+                    </div>
+                    
+                    {/* Cách 1: Tải tệp trực tiếp */}
+                    <div className="p-4 border border-black/10 dark:border-white/10 rounded-xl space-y-2 bg-black/[0.02] dark:bg-white/[0.02]">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-sm font-semibold">Cách 1: Chọn tệp APK tải lên Firebase Storage</label>
+                        <span className="text-[11px] text-gray-500">Định dạng .apk</span>
                       </div>
-                      <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5">
-                        <span className="text-gray-500">Bắt buộc:</span>
-                        <span className="font-semibold">{currentApkInfo.isMandatory ? 'Có' : 'Không'}</span>
-                      </div>
-                      {currentApkInfo.updatedAt && (
-                        <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5 text-xs text-gray-500">
-                          <span>Cập nhật:</span>
-                          <span>{new Date(currentApkInfo.updatedAt).toLocaleString('vi-VN')}</span>
+                      <input 
+                        type="file" 
+                        accept=".apk" 
+                        onChange={(e) => setApkFile(e.target.files?.[0] || null)} 
+                        className="w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-emerald-500 file:text-white hover:file:bg-emerald-600 file:cursor-pointer" 
+                      />
+                      {apkFile && (
+                        <p className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+                          ✓ Đã chọn file: {apkFile.name} ({(apkFile.size / (1024 * 1024)).toFixed(1)} MB)
+                        </p>
+                      )}
+                      {apkUploadProgress > 0 && apkUploadProgress < 100 && (
+                        <div className="space-y-1 pt-1">
+                          <div className="flex justify-between text-xs text-gray-500">
+                            <span>Đang tải lên Firebase Storage...</span>
+                            <span className="font-bold text-emerald-600">{apkUploadProgress}%</span>
+                          </div>
+                          <div className="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700 overflow-hidden">
+                            <div className="bg-emerald-500 h-2.5 rounded-full transition-all duration-300" style={{ width: `${apkUploadProgress}%` }}></div>
+                          </div>
                         </div>
                       )}
-                      
-                      <div className="pt-2">
-                        <a 
-                          href={currentApkInfo.apkUrl} 
-                          target="_blank" 
-                          rel="noopener noreferrer" 
-                          className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 rounded-xl font-bold text-xs transition-colors"
-                        >
-                          <Download className="w-4 h-4" /> Bấm để tải thử file APK
-                        </a>
-                      </div>
                     </div>
-                  ) : (
-                    <div className="text-center py-6 text-gray-400 text-sm">
-                      <p>Chưa có file APK nào được phát hành.</p>
-                      <p className="text-xs text-gray-500 mt-1">Hãy tải tệp APK lên để người dùng Android có thể tải về từ web.</p>
+
+                    {/* Cách 2: Nhập link trực tiếp */}
+                    <div className="p-4 border border-black/10 dark:border-white/10 rounded-xl space-y-2 bg-black/[0.02] dark:bg-white/[0.02]">
+                      <label className="block text-sm font-semibold">Cách 2: Hoặc dán đường link tải APK trực tiếp (Direct URL)</label>
+                      <input 
+                        type="url" 
+                        value={apkManualUrl} 
+                        onChange={(e) => setApkManualUrl(e.target.value)} 
+                        placeholder="https://firebasestorage.googleapis.com/... hoặc link Google Drive" 
+                        className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2 font-mono text-xs" 
+                      />
+                      <p className="text-[11px] text-gray-500">
+                        Rất hữu ích nếu file dung lượng lớn hoặc bạn đã upload trực tiếp trên Firebase Console Storage / Google Drive.
+                      </p>
                     </div>
-                  )}
+                    
+                    <button 
+                      type="submit" 
+                      disabled={apkUploadProgress > 0 && apkUploadProgress < 100} 
+                      className="w-full bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white font-bold py-3.5 rounded-xl transition-all shadow-md shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <UploadCloud className="w-5 h-5" /> 
+                      {apkUploadProgress > 0 && apkUploadProgress < 100 ? `Đang tải lên (${apkUploadProgress}%)...` : 'Lưu bản cập nhật & Phát hành APK'}
+                    </button>
+                  </form>
                 </div>
 
-                {/* Hướng dẫn cấu hình Firebase Storage Rules */}
-                <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-5 space-y-3 text-amber-900 dark:text-amber-300">
-                  <div className="flex items-center gap-2 font-bold text-sm">
-                    <Lock className="w-4 h-4 text-amber-600" /> Lưu ý Firebase Storage Rules
+                {/* Thông tin APK hiện hành & Hướng dẫn Firebase Rules */}
+                <div className="space-y-6">
+                  {/* Trạng thái APK hiện hành */}
+                  <div className="bg-white dark:bg-[#1a1b1e] rounded-2xl p-6 border border-black/10 dark:border-white/10 space-y-4">
+                    <h3 className="font-bold text-base flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+                      <Smartphone className="w-5 h-5" /> Bản APK hiện tại trên hệ thống
+                    </h3>
+
+                    {currentApkInfo?.apkUrl ? (
+                      <div className="space-y-3 text-sm">
+                        <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5">
+                          <span className="text-gray-500">Phiên bản:</span>
+                          <span className="font-bold font-mono text-emerald-600">{currentApkInfo.version}</span>
+                        </div>
+                        <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5">
+                          <span className="text-gray-500">Bắt buộc:</span>
+                          <span className="font-semibold">{currentApkInfo.isMandatory ? 'Có' : 'Không'}</span>
+                        </div>
+                        {currentApkInfo.updatedAt && (
+                          <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5 text-xs text-gray-500">
+                            <span>Cập nhật:</span>
+                            <span>{new Date(currentApkInfo.updatedAt).toLocaleString('vi-VN')}</span>
+                          </div>
+                        )}
+                        
+                        <div className="pt-2">
+                          <a 
+                            href={currentApkInfo.apkUrl} 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 rounded-xl font-bold text-xs transition-colors"
+                          >
+                            <Download className="w-4 h-4" /> Bấm để tải thử file APK
+                          </a>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-center py-6 text-gray-400 text-sm">
+                        <p>Chưa có file APK nào được phát hành.</p>
+                        <p className="text-xs text-gray-500 mt-1">Hãy tải tệp APK lên để người dùng Android có thể tải về từ web.</p>
+                      </div>
+                    )}
                   </div>
-                  <p className="text-xs leading-relaxed text-amber-800 dark:text-amber-200">
-                    Khi vừa kích hoạt Storage trên Firebase, bạn cần mở quyền đọc/ghi trên <strong>Firebase Console</strong> để cho phép upload và tải file:
-                  </p>
-                  <ol className="text-xs list-decimal pl-4 space-y-1 text-amber-800 dark:text-amber-200">
-                    <li>Vào Firebase Console &rarr; <strong>Storage</strong> &rarr; tab <strong>Rules</strong></li>
-                    <li>Sửa dòng rule thành: <code className="bg-black/10 dark:bg-black/30 px-1 py-0.5 rounded font-mono">allow read, write: if true;</code></li>
-                    <li>Bấm nút <strong>Publish</strong> để lưu lại.</li>
-                  </ol>
+
+                  {/* Hướng dẫn cấu hình Firebase Storage Rules */}
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-5 space-y-3 text-amber-900 dark:text-amber-300">
+                    <div className="flex items-center gap-2 font-bold text-sm">
+                      <Lock className="w-4 h-4 text-amber-600" /> Lưu ý Firebase Storage Rules
+                    </div>
+                    <p className="text-xs leading-relaxed text-amber-800 dark:text-amber-200">
+                      Khi vừa kích hoạt Storage trên Firebase, bạn cần mở quyền đọc/ghi trên <strong>Firebase Console</strong> để cho phép upload và tải file:
+                    </p>
+                    <ol className="text-xs list-decimal pl-4 space-y-1 text-amber-800 dark:text-amber-200">
+                      <li>Vào Firebase Console &rarr; <strong>Storage</strong> &rarr; tab <strong>Rules</strong></li>
+                      <li>Sửa dòng rule thành: <code className="bg-black/10 dark:bg-black/30 px-1 py-0.5 rounded font-mono">allow read, write: if true;</code></li>
+                      <li>Bấm nút <strong>Publish</strong> để lưu lại.</li>
+                    </ol>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
+
+            {/* TAB IOS (APPLE APP STORE) */}
+            {appUpdateTab === 'ios' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-150">
+                {/* Form Cấu hình iOS */}
+                <div className="lg:col-span-2 bg-white dark:bg-[#1a1b1e] rounded-2xl p-6 border border-black/10 dark:border-white/10">
+                  <form onSubmit={handleIosSave} className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-semibold mb-1">
+                        Phiên bản iOS đã duyệt trên App Store (Ví dụ: 1.0.4) *
+                      </label>
+                      <input 
+                        type="text" 
+                        value={iosVersion} 
+                        onChange={(e) => setIosVersion(e.target.value)} 
+                        required 
+                        placeholder="1.0.4" 
+                        className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2.5 font-mono text-sm" 
+                      />
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        Chỉ tăng số phiên bản sau khi Apple đã xét duyệt "Ready for Distribution" trên App Store Connect.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-semibold mb-1">
+                        Đường link ứng dụng trên Apple App Store *
+                      </label>
+                      <input 
+                        type="url" 
+                        value={iosAppStoreUrl} 
+                        onChange={(e) => setIosAppStoreUrl(e.target.value)} 
+                        required
+                        placeholder="https://apps.apple.com/app/id6470000000 hoặc itms-apps://itunes.apple.com/app/id..." 
+                        className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2 font-mono text-xs" 
+                      />
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        Đường dẫn trang App Store để khi người dùng iPhone bấm "Cập nhật", hệ thống sẽ mở trực tiếp ứng dụng App Store.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-semibold mb-1">Ghi chú bản cập nhật (Release Notes)</label>
+                      <textarea 
+                        value={iosReleaseNotes} 
+                        onChange={(e) => setIosReleaseNotes(e.target.value)} 
+                        rows={3} 
+                        className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-4 py-2 text-sm" 
+                        placeholder="- Cập nhật giao diện bán hàng tối ưu cho iOS&#10;- Tăng tốc độ in bill và đồng bộ đơn&#10;- Sửa lỗi tương thích iOS 18..." 
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl">
+                      <input 
+                        type="checkbox" 
+                        id="iosMandatory" 
+                        checked={iosIsMandatory} 
+                        onChange={(e) => setIosIsMandatory(e.target.checked)} 
+                        className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500" 
+                      />
+                      <label htmlFor="iosMandatory" className="text-sm font-medium cursor-pointer">
+                        Bắt buộc cập nhật (Người dùng app iOS cũ không thể bấm "Bỏ qua")
+                      </label>
+                    </div>
+                    
+                    <button 
+                      type="submit" 
+                      disabled={isSavingIos}
+                      className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold py-3.5 rounded-xl transition-all shadow-md shadow-blue-600/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <Apple className="w-5 h-5" /> 
+                      {isSavingIos ? 'Đang lưu cấu hình...' : 'Lưu cấu hình phiên bản iOS'}
+                    </button>
+                  </form>
+                </div>
+
+                {/* Trạng thái iOS hiện hành & Lưu ý Apple Review */}
+                <div className="space-y-6">
+                  {/* Trạng thái iOS hiện hành */}
+                  <div className="bg-white dark:bg-[#1a1b1e] rounded-2xl p-6 border border-black/10 dark:border-white/10 space-y-4">
+                    <h3 className="font-bold text-base flex items-center gap-2 text-blue-600 dark:text-blue-400">
+                      <Apple className="w-5 h-5" /> Phiên bản iOS hiện tại trên hệ thống
+                    </h3>
+
+                    {currentIosInfo?.version ? (
+                      <div className="space-y-3 text-sm">
+                        <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5">
+                          <span className="text-gray-500">Phiên bản:</span>
+                          <span className="font-bold font-mono text-blue-600">{currentIosInfo.version}</span>
+                        </div>
+                        <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5">
+                          <span className="text-gray-500">Bắt buộc:</span>
+                          <span className="font-semibold">{currentIosInfo.isMandatory ? 'Có' : 'Không'}</span>
+                        </div>
+                        {currentIosInfo.updatedAt && (
+                          <div className="flex justify-between py-1.5 border-b border-black/5 dark:border-white/5 text-xs text-gray-500">
+                            <span>Cập nhật:</span>
+                            <span>{new Date(currentIosInfo.updatedAt).toLocaleString('vi-VN')}</span>
+                          </div>
+                        )}
+                        
+                        {currentIosInfo.appStoreUrl && (
+                          <div className="pt-2">
+                            <a 
+                              href={currentIosInfo.appStoreUrl} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-blue-500/10 text-blue-600 hover:bg-blue-500/20 rounded-xl font-bold text-xs transition-colors"
+                            >
+                              <Apple className="w-4 h-4" /> Bấm để mở thử trang App Store
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-center py-6 text-gray-400 text-sm">
+                        <p>Chưa cấu hình phiên bản iOS.</p>
+                        <p className="text-xs text-gray-500 mt-1">Nhập thông tin phiên bản khi bạn đã phát hành bản mới trên Apple App Store Connect.</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tuân thủ chính sách Apple App Store */}
+                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-2xl p-5 space-y-3 text-blue-900 dark:text-blue-300">
+                    <div className="flex items-center gap-2 font-bold text-sm">
+                      <Lock className="w-4 h-4 text-blue-600" /> Tuân thủ chính sách Apple App Store
+                    </div>
+                    <ul className="text-xs list-disc pl-4 space-y-2 text-blue-800 dark:text-blue-200 leading-relaxed">
+                      <li>
+                        <strong>Apple Guideline 2.5.2</strong>: Nghiêm cấm tải file `.ipa` trực tiếp ngoài store. Nút cập nhật trên iOS được cấu hình tự động mở đúng liên kết App Store chính thức.
+                      </li>
+                      <li>
+                        <strong>Apple Guideline 2.3.10</strong>: Thông báo hiển thị trên iOS hoàn toàn sạch, không chứa từ khóa cạnh tranh như "Android", "APK", đảm bảo duyệt 100%.
+                      </li>
+                      <li>
+                        <strong>Độc lập chu kỳ duyệt</strong>: Chỉ cập nhật số version iOS khi bản dựng mới đã được Apple duyệt và xuất hiện trên store.
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

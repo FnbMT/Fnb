@@ -396,7 +396,13 @@ export const SummaryView = ({
   const [historicalLogs, setHistoricalLogs] = useState<InventoryTransaction[]>([]);
   const [periodPayrolls, setPeriodPayrolls] = useState<PayrollRecord[]>([]);
   const [isLoadingHistorical, setIsLoadingHistorical] = useState(false);
-  const reportDataReady = Boolean(rawScope.isFullPeriod && rawScope.invoicesConfirmed && rawScope.cashConfirmed);
+  const needsInv = activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial';
+  const needsCash = activeTab === 'cash' || activeTab === 'financial';
+  const reportDataReady = Boolean(
+    rawScope.isFullPeriod &&
+    (!needsInv || rawScope.invoicesConfirmed) &&
+    (!needsCash || rawScope.cashConfirmed)
+  );
   const [reportError, setReportError] = useState('');
   const [payrollDataReady, setPayrollDataReady] = useState(false);
   const [isSavingCash, setIsSavingCash] = useState(false);
@@ -417,8 +423,29 @@ export const SummaryView = ({
   const activeRequestId = useRef(0);
 
   // Gộp dữ liệu: Dữ liệu thời gian thực hôm nay (Live) PHẢI GHI ĐÈ LÊN Lịch sử để bản mới nhất luôn thắng, lọc đúng quán hiện tại
-  const allInvoices = useMemo(() => historicalInvoices.filter(i => i.storeId === currentUser?.storeId && i.status !== 'cancelled'), [historicalInvoices, currentUser?.storeId]);
-  const allCashTransactions = useMemo(() => historicalCash.filter(i => i.storeId === currentUser?.storeId), [historicalCash, currentUser?.storeId]);
+  const allInvoices = useMemo(() => {
+    const storeId = currentUser?.storeId;
+    const map = new Map<string, Invoice>();
+    historicalInvoices.forEach(i => {
+      if ((!storeId || i.storeId === storeId) && i.status !== 'cancelled') map.set(i.id, i);
+    });
+    (invoices || []).forEach(i => {
+      if ((!storeId || i.storeId === storeId) && i.status !== 'cancelled') map.set(i.id, i);
+    });
+    return Array.from(map.values());
+  }, [historicalInvoices, invoices, currentUser?.storeId]);
+
+  const allCashTransactions = useMemo(() => {
+    const storeId = currentUser?.storeId;
+    const map = new Map<string, CashTransaction>();
+    historicalCash.forEach(c => {
+      if (!storeId || c.storeId === storeId) map.set(c.id, c);
+    });
+    (cashTransactions || []).forEach(c => {
+      if (!storeId || c.storeId === storeId) map.set(c.id, c);
+    });
+    return Array.from(map.values());
+  }, [historicalCash, cashTransactions, currentUser?.storeId]);
 
   const allInventoryLogs = useMemo(() => {
     const storeId = currentUser?.storeId;
@@ -521,7 +548,16 @@ export const SummaryView = ({
         30
       );
 
-      const snap = await getDocs(nextQuery);
+      let snap;
+      try {
+        snap = await getDocs(nextQuery);
+      } catch (qErr: any) {
+        if (qErr?.code === 'failed-precondition') {
+          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+        } else {
+          throw qErr;
+        }
+      }
 
       // Request Guard: Tránh response về muộn ghi đè cursor hoặc dữ liệu kỳ khác khi đã chuyển ngày/kỳ
       const nowPeriodKey = `${currentUser.storeId}_${dateFilter}_${filterType}`;
@@ -594,7 +630,16 @@ export const SummaryView = ({
           cursor,
           100
         );
-        const snap = await getDocs(nextQuery);
+        let snap;
+      try {
+        snap = await getDocs(nextQuery);
+      } catch (qErr: any) {
+        if (qErr?.code === 'failed-precondition') {
+          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+        } else {
+          throw qErr;
+        }
+      }
         if (snap.empty) {
           hasMore = false;
           break;
@@ -654,7 +699,16 @@ export const SummaryView = ({
         30
       );
 
-      const snap = await getDocs(nextQuery);
+      let snap;
+      try {
+        snap = await getDocs(nextQuery);
+      } catch (qErr: any) {
+        if (qErr?.code === 'failed-precondition') {
+          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+        } else {
+          throw qErr;
+        }
+      }
 
       // Request Guard: Tránh response về muộn ghi đè cursor hoặc dữ liệu kỳ khác khi đã chuyển ngày/kỳ
       const nowPeriodKey = `${currentUser.storeId}_${dateFilter}_${filterType}`;
@@ -709,7 +763,16 @@ export const SummaryView = ({
     try {
       const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
       const nextQuery = buildLogQuery(storeId, startIso, endExclusiveIso, lastLogDoc, 50);
-      const snap = await getDocs(nextQuery);
+      let snap;
+      try {
+        snap = await getDocs(nextQuery);
+      } catch (qErr: any) {
+        if (qErr?.code === 'failed-precondition') {
+          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+        } else {
+          throw qErr;
+        }
+      }
 
       // Request Guard
       const nowPeriodKey = `${currentUser.storeId}_${dateFilter}_${filterType}`;
@@ -769,7 +832,16 @@ export const SummaryView = ({
       while (hasMore && cursor) {
         if (reqId !== activeRequestId.current) break;
         const nextQuery = buildLogQuery(storeId, startIso, endExclusiveIso, cursor, 100);
-        const snap = await getDocs(nextQuery);
+        let snap;
+      try {
+        snap = await getDocs(nextQuery);
+      } catch (qErr: any) {
+        if (qErr?.code === 'failed-precondition') {
+          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+        } else {
+          throw qErr;
+        }
+      }
         if (snap.empty) {
           hasMore = false;
           break;
@@ -821,16 +893,14 @@ export const SummaryView = ({
         statsQuery = query(
           collection(db, 'daily_stats'),
           where('storeId', '==', storeId),
-          where('year', '==', targetYear),
-          orderBy('date', 'asc')
+          where('year', '==', targetYear)
         );
       } else if (filterType === 'month') {
         const targetMonth = dateFilter.slice(0, 7);
         statsQuery = query(
           collection(db, 'daily_stats'),
           where('storeId', '==', storeId),
-          where('month', '==', targetMonth),
-          orderBy('date', 'asc')
+          where('month', '==', targetMonth)
         );
       } else {
         const targetDay = dateFilter.slice(0, 10);
@@ -849,6 +919,7 @@ export const SummaryView = ({
           id: d.id,
           _fromCache: snapshot.metadata.fromCache
         } as DailyStats & { _fromCache?: boolean }));
+        list.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
         setDailyStats(list);
         setDailyStatsReady(isStatsConfirmed);
       }, (err) => {
@@ -882,9 +953,9 @@ export const SummaryView = ({
     // Tối ưu hóa Reads: Tách biệt nhu cầu chứng từ theo từng tab.
     // - Tab 'sales' và 'items': CHỈ tải invoices, TUYỆT ĐỐI KHÔNG tải cash_transactions (tiết kiệm 50% reads).
     // - Tab 'cash': CHỈ tải cash_transactions, TUYỆT ĐỐI KHÔNG tải invoices.
-    // - Tab 'finance': Tải theo nhu cầu đối soát; nếu kỳ quá khứ đã có daily_stats thì ưu tiên dùng thống kê.
-    const needsInv = activeTab === 'sales' || activeTab === 'items' || activeTab === 'finance';
-    const needsCash = activeTab === 'cash' || (activeTab === 'finance' && includesToday);
+    // - Tab 'financial': Tải cả invoices và cash_transactions để đối soát P&L trọn vẹn.
+    const needsInv = activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial';
+    const needsCash = activeTab === 'cash' || activeTab === 'financial';
     const needsFullRaw = needsInv || needsCash;
     const subKey = `${periodKey}_inv:${needsInv}_cash:${needsCash}`;
 
@@ -943,14 +1014,14 @@ export const SummaryView = ({
       setLastCashDoc(null);
     }
 
-    // Cập nhật rawScope: hạ readiness ngay khi phạm vi thay đổi
+    // Cập nhật rawScope: CHỈ đánh dấu confirmed khi thực sự được query và máy chủ xác nhận
     const isTargetFull = Boolean(targetStart && targetEnd && targetStart === first && targetEnd === last);
     setRawScope({
       periodKey,
       startDay: targetStart,
       endDay: targetEnd,
-      invoicesConfirmed: !needsInv,
-      cashConfirmed: !needsCash,
+      invoicesConfirmed: false,
+      cashConfirmed: false,
       isFullPeriod: isTargetFull
     });
 
@@ -964,18 +1035,18 @@ export const SummaryView = ({
     setIsLoadingHistorical(true);
     setReportError('');
     let disposed = false;
-    let invConfirmed = !needsInv;
-    let cashConfirmed = !needsCash;
+    let invConfirmed = false;
+    let cashConfirmed = false;
 
     const updateReadiness = () => {
       if (disposed) return;
-      const bothDone = invConfirmed && cashConfirmed;
+      const tabDataReady = (!needsInv || invConfirmed) && (!needsCash || cashConfirmed);
       setRawScope(prev => ({
         ...prev,
         invoicesConfirmed: invConfirmed,
         cashConfirmed: cashConfirmed
       }));
-      if (bothDone) {
+      if (tabDataReady) {
         setIsLoadingHistorical(false);
         setReportError('');
       }
@@ -1458,9 +1529,13 @@ export const SummaryView = ({
 
     // 1. Chỉ tính rawStats cho các ngày thực sự nằm trong phạm vi ngày đã được truy vấn raw từ server
     let rawStats: DailyStats[] = [];
-    const isRawActive = Boolean(rawScope.invoicesConfirmed && rawScope.cashConfirmed && rawScope.startDay && rawScope.endDay);
-    const coveredRawDates = isRawActive
-      ? dates.filter(d => d >= rawScope.startDay && d <= rawScope.endDay)
+    const hasRawInvoices = Boolean((rawScope.invoicesConfirmed && rawScope.startDay && rawScope.endDay) || (isInvoicesReady && isViewingCurrentPeriod && periodInvoices.length > 0));
+    const hasRawCash = Boolean((rawScope.cashConfirmed && rawScope.startDay && rawScope.endDay) || (isInvoicesReady && isViewingCurrentPeriod));
+    const isBothRawActive = hasRawInvoices && hasRawCash;
+    const isAnyRawActive = hasRawInvoices || hasRawCash;
+
+    const coveredRawDates = isAnyRawActive
+      ? dates.filter(d => (rawScope.startDay && rawScope.endDay ? (d >= rawScope.startDay && d <= rawScope.endDay) : false) || (isViewingCurrentPeriod && d === todayVietnam))
       : [];
 
     if (coveredRawDates.length > 0) {
@@ -1472,31 +1547,45 @@ export const SummaryView = ({
     }
     const rawByDate = new Map<string, DailyStats>(rawStats.map(s => [s.date, s]));
 
+    // Helper: Hợp nhất an toàn giữa rawStat và serverStat khi một trong 2 nguồn chưa được nạp
+    // Tuyệt đối không để mảng rỗng của nguồn chưa nạp ghi đè 0 vào nguồn kia
+    const buildMergedRawStat = (raw: DailyStats, srv: DailyStats | undefined): DailyStats => {
+      return {
+        ...raw,
+        totalRevenue: hasRawInvoices ? raw.totalRevenue : (srv?.totalRevenue || 0),
+        invoiceCount: hasRawInvoices ? raw.invoiceCount : (srv?.invoiceCount || 0),
+        totalCost: hasRawInvoices ? raw.totalCost : (srv?.totalCost || 0),
+        totalDiscount: hasRawInvoices ? raw.totalDiscount : (srv?.totalDiscount || 0),
+        totalExpense: hasRawCash ? raw.totalExpense : (srv?.totalExpense || 0),
+        totalIncome: hasRawCash ? raw.totalIncome : (srv?.totalIncome || 0),
+        cashExpense: hasRawCash ? raw.cashExpense : (srv?.cashExpense || 0),
+        transferExpense: hasRawCash ? raw.transferExpense : (srv?.transferExpense || 0),
+        cashIncome: hasRawCash ? raw.cashIncome : (srv?.cashIncome || 0),
+        transferIncome: hasRawCash ? raw.transferIncome : (srv?.transferIncome || 0),
+        expenseInventory: hasRawCash ? raw.expenseInventory : (srv?.expenseInventory || 0),
+        expenseSalary: hasRawCash ? raw.expenseSalary : (srv?.expenseSalary || 0),
+        expenseRent: hasRawCash ? raw.expenseRent : (srv?.expenseRent || 0),
+        expenseOther: hasRawCash ? raw.expenseOther : (srv?.expenseOther || 0)
+      };
+    };
+
     // Hợp nhất dữ liệu: Đảm bảo nguyên tắc 1 nguồn duy nhất trọn vẹn cho từng ngày (Single Source of Truth)
-    // Tuyệt đối không kết hợp doanh thu của nguồn này với giá vốn của nguồn khác
     const stats: (DailyStats & { _source: 'serverStat' | 'rawStat' | 'empty' })[] = dates.map(d => {
       const serverStat = statsByDate.get(d);
       const isServerStatConfirmed = Boolean(serverStat && !(serverStat as any)._fromCache && dailyStatsReady);
       const isServerStatReconciled = Boolean(serverStat && (serverStat.coverageStatus === 'reconciled' || serverStat.coverageStatus === 'zero_activity'));
 
-      // Ngày d chỉ được coi là có chứng từ raw đã xác nhận khi ngày d nằm trong phạm vi đã truy vấn và được server xác nhận
-      const isDayWithinRawScope = Boolean(isRawActive && d >= rawScope.startDay && d <= rawScope.endDay);
+      // Ngày d chỉ được coi là có chứng từ raw đã xác nhận khi nằm trong phạm vi đã truy vấn và được server xác nhận
+      const isDayWithinRawScope = Boolean(isAnyRawActive && d >= rawScope.startDay && d <= rawScope.endDay);
       const rawStat = isDayWithinRawScope ? rawByDate.get(d) : undefined;
       const isRawConfirmed = Boolean(isDayWithinRawScope && rawStat);
 
       // 1. Ngày hôm nay (Live data)
       if (d === todayVietnam) {
-        if (isRawConfirmed && rawStat) {
+        if (rawStat) {
+          const merged = buildMergedRawStat(rawStat, serverStat);
           return {
-            ...rawStat,
-            coverageStatus: rawStat.coverageStatus || 'reconciled',
-            _source: 'rawStat'
-          };
-        }
-        if (rawByDate.has(d)) {
-          const partialRaw = rawByDate.get(d)!;
-          return {
-            ...partialRaw,
+            ...merged,
             coverageStatus: 'live_tracking',
             _source: 'rawStat'
           };
@@ -1528,8 +1617,8 @@ export const SummaryView = ({
       }
 
       // 2. Ngày quá khứ (d < todayVietnam)
-      // Tình huống 2a: Cả hai nguồn đều được xác nhận từ máy chủ cho ngày này
-      if (isRawConfirmed && isServerStatConfirmed) {
+      // Tình huống 2a: Nếu cả hai nguồn raw đều được nạp VÀ có serverStat đã xác nhận -> tiến hành đối soát
+      if (isBothRawActive && rawStat && isServerStatConfirmed) {
         const revDiff = Math.abs((serverStat?.totalRevenue || 0) - (rawStat?.totalRevenue || 0));
         const invDiff = Math.abs((serverStat?.invoiceCount || 0) - (rawStat?.invoiceCount || 0));
         const costDiff = (rawStat?.costStatus === 'complete' && typeof serverStat?.totalCost === 'number')
@@ -1538,18 +1627,8 @@ export const SummaryView = ({
         const cashDiff = Math.abs((serverStat?.totalCash || 0) - (rawStat?.totalCash || 0));
         const transferDiff = Math.abs((serverStat?.totalTransfer || 0) - (rawStat?.totalTransfer || 0));
         const discountDiff = Math.abs((serverStat?.totalDiscount || 0) - (rawStat?.totalDiscount || 0));
-
-        // Mở rộng đối chiếu tới toàn bộ thu / chi ngoài bán hàng và các nhóm chi phí
         const expenseDiff = Math.abs((serverStat?.totalExpense || 0) - (rawStat?.totalExpense || 0));
         const incomeDiff = Math.abs((serverStat?.totalIncome || 0) - (rawStat?.totalIncome || 0));
-        const cashExpenseDiff = Math.abs((serverStat?.cashExpense || 0) - (rawStat?.cashExpense || 0));
-        const transferExpenseDiff = Math.abs((serverStat?.transferExpense || 0) - (rawStat?.transferExpense || 0));
-        const cashIncomeDiff = Math.abs((serverStat?.cashIncome || 0) - (rawStat?.cashIncome || 0));
-        const transferIncomeDiff = Math.abs((serverStat?.transferIncome || 0) - (rawStat?.transferIncome || 0));
-        const expenseOtherDiff = Math.abs((serverStat?.expenseOther || 0) - (rawStat?.expenseOther || 0));
-        const expenseSalaryDiff = Math.abs((serverStat?.expenseSalary || 0) - (rawStat?.expenseSalary || 0));
-        const expenseRentDiff = Math.abs((serverStat?.expenseRent || 0) - (rawStat?.expenseRent || 0));
-        const expenseInventoryDiff = Math.abs((serverStat?.expenseInventory || 0) - (rawStat?.expenseInventory || 0));
 
         const isFinancialMatch =
           revDiff < 1 &&
@@ -1559,15 +1638,7 @@ export const SummaryView = ({
           transferDiff < 1 &&
           discountDiff < 1 &&
           expenseDiff < 1 &&
-          incomeDiff < 1 &&
-          cashExpenseDiff < 1 &&
-          transferExpenseDiff < 1 &&
-          cashIncomeDiff < 1 &&
-          transferIncomeDiff < 1 &&
-          expenseOtherDiff < 1 &&
-          expenseSalaryDiff < 1 &&
-          expenseRentDiff < 1 &&
-          expenseInventoryDiff < 1;
+          incomeDiff < 1;
 
         if (isFinancialMatch) {
           return {
@@ -1576,8 +1647,6 @@ export const SummaryView = ({
             _source: 'serverStat'
           };
         }
-        // Hai nguồn lệch nhau về tài chính (doanh thu, số HĐ, giá vốn hoặc thu/chi):
-        // Dùng TRỌN VẸN số liệu chứng từ gốc raw đã xác nhận, và đánh dấu partial để đối soát lại
         return {
           ...rawStat!,
           coverageStatus: 'partial',
@@ -1585,17 +1654,7 @@ export const SummaryView = ({
         };
       }
 
-      // Tình huống 2b: Raw chi tiết đã xác nhận từ server, còn serverStat chỉ là cache hoặc chưa có
-      // TUYỆT ĐỐI không để cached stats ghi đè raw đã xác nhận
-      if (isRawConfirmed && rawStat) {
-        return {
-          ...rawStat,
-          coverageStatus: rawStat.coverageStatus || 'reconciled',
-          _source: 'rawStat'
-        };
-      }
-
-      // Tình huống 2c: Server stats đã xác nhận từ server và đã đối soát
+      // Tình huống 2b: Server stats đã xác nhận từ server và đã đối soát (ưu tiên dùng khi chỉ tải 1 nguồn raw)
       if (isServerStatConfirmed && isServerStatReconciled) {
         return {
           ...serverStat!,
@@ -1604,14 +1663,17 @@ export const SummaryView = ({
         };
       }
 
-      // Tình huống 2d: Tạm hiển thị trong lúc đang đồng bộ
-      if (rawStat) {
+      // Tình huống 2c: Ngày quá khứ có rawStat (được merge an toàn với serverStat)
+      if (rawStat && (hasRawInvoices || hasRawCash)) {
+        const merged = buildMergedRawStat(rawStat, serverStat);
         return {
-          ...rawStat,
-          coverageStatus: 'partial',
+          ...merged,
+          coverageStatus: isBothRawActive ? (rawStat.coverageStatus || 'reconciled') : 'partial',
           _source: 'rawStat'
         };
       }
+
+      // Tình huống 2d: Tạm hiển thị serverStat trong lúc đang đồng bộ
       if (serverStat) {
         return {
           ...serverStat,
@@ -1666,8 +1728,8 @@ export const SummaryView = ({
     const isDayConfirmed = (s: DailyStats & { _source: 'serverStat' | 'rawStat' | 'empty' }) => {
       if (s._source === 'empty') return false;
       if (s._source === 'rawStat') {
-        // Nguồn raw phải nằm trong phạm vi ngày đã được xác nhận cả hóa đơn và sổ quỹ từ snapshot
-        return Boolean(isRawActive && s.date >= rawScope.startDay && s.date <= rawScope.endDay);
+        // Nguồn raw nằm trong phạm vi ngày đã được xác nhận từ snapshot
+        return Boolean(isAnyRawActive && s.date >= rawScope.startDay && s.date <= rawScope.endDay);
       }
       if (s._source === 'serverStat') {
         const srv = statsByDate.get(s.date);

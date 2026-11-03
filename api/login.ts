@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import crypto from 'node:crypto';
-import { adminDb, adminAuth } from './_firebaseAdmin.js';
+import { adminDb, adminAuth, safeDeleteSentinel } from './_firebaseAdmin.js';
 import { hashPassword, verifyPassword, encryptAes, decryptAes } from './_crypto.js';
 import { generateAuthToken } from './_token.js';
 
@@ -227,10 +227,8 @@ export default async function handler(req: any, res: any) {
         isPasswordValid = decrypted === cleanPassword;
       }
 
-      // Hỗ trợ đối soát với userData.password nếu tài khoản cũ chưa đồng bộ secret
-      if (!isPasswordValid && userData.password && String(userData.password).trim() === cleanPassword) {
-        isPasswordValid = true;
-      }
+      // TUYỆT ĐỐI KHÔNG đối soát với userData.password khi tài khoản đã có hash hợp lệ trong user_secrets!
+      // Tránh lỗ hổng bảo mật: đăng nhập bằng mật khẩu cũ trong users dù hash hiện tại trong user_secrets đã đổi.
 
       if (!isPasswordValid) {
         recordFailedAttempt(rateLimitKey);
@@ -292,11 +290,15 @@ export default async function handler(req: any, res: any) {
     // Đăng nhập thành công: Xóa bộ đếm sai
     loginFailAttempts.delete(rateLimitKey);
 
-    // Cập nhật thời điểm đăng nhập gần nhất
+    // Cập nhật thời điểm đăng nhập gần nhất và dọn dẹp trường password thô legacy trong users (nếu còn sót lại)
     try {
-      await adminDb.collection('users').doc(userId).update({
+      const updatePayload: Record<string, any> = {
         lastLogin: new Date().toISOString()
-      });
+      };
+      if (userData.password) {
+        updatePayload.password = safeDeleteSentinel();
+      }
+      await adminDb.collection('users').doc(userId).update(updatePayload);
     } catch (e) {}
 
     // 5. Cấp Session Token có chữ ký số bí mật HMAC-SHA256 kèm tokenVersion

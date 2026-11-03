@@ -123,7 +123,7 @@ import {
 } from './types';
 
 import { db, auth } from './lib/firebase';
-import { signOut } from 'firebase/auth';
+import { signOut, onAuthStateChanged } from 'firebase/auth';
 import { apiUrl } from './utils/apiConfig';
 import { 
   collection, 
@@ -175,6 +175,7 @@ import { MyPayrollView } from './components/MyPayrollView';
 import { AttendanceScanner } from "./components/AttendanceScanner";
 import { getMenuItemImage } from "./utils/foodImageHelper";
 import { KitchenView } from './components/KitchenView';
+import { UpdateChecker } from './components/UpdateChecker';
 import { checkStoreTabPermission, isTabAllowedInPackage, APP_PACKAGE_TABS } from './utils/packagePermissions';
 import { calculateInvoiceCost, calculateInvoiceCostSnapshot } from './utils/costHelper';
 import { isCashPayment } from './utils/reportDataIntegrity';
@@ -2230,19 +2231,21 @@ export default function App() {
     fetchPackages();
   }, []);
 
-  // Kiểm tra tính hợp lệ và đồng bộ danh tính của phiên đăng nhập Firebase Auth khi khởi động ứng dụng
+  // Kiểm tra tính hợp lệ và đồng bộ danh tính của phiên đăng nhập Firebase Auth
   useEffect(() => {
-    if (!currentUser) return;
-    auth.authStateReady().then(() => {
-      const fbUser = auth.currentUser;
-      if (!fbUser || (currentUser.id && fbUser.uid !== currentUser.id)) {
-        console.warn("[Auth Security] Phiên đăng nhập Firebase Auth không khớp hoặc đã hết hạn. Chuyển về màn hình đăng nhập.");
+    if (!currentUser || currentUser.role === 'superadmin' || currentUser.id === 'superadmin') return;
+
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      // Chỉ cảnh báo và đăng xuất khi Firebase Auth đã xác định danh tính một người dùng khác hẳn currentUser
+      if (fbUser && currentUser.id && fbUser.uid !== currentUser.id) {
+        console.warn("[Auth Security] Xung đột danh tính Firebase Auth:", fbUser.uid, "vs", currentUser.id);
         setCurrentUser(null);
         safeStorage.removeItem('fnb_master_user');
+        safeStorage.removeItem('fnb_master_token');
       }
-    }).catch(err => {
-      console.warn("[Auth Security] Lỗi kiểm tra authStateReady:", err);
     });
+
+    return () => unsub();
   }, [currentUser]);
   const [menu, setMenu] = useState<MenuItem[]>(INITIAL_MENU);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -2736,7 +2739,7 @@ export default function App() {
     unsubs.push(unsubStore);
 
     // 1b. Sync Trạng thái tài khoản người dùng hiện tại (Phát hiện khóa / vô hiệu hóa / xóa tài khoản tức thì)
-    if (currentUser.id && currentUser.id !== 'superadmin') {
+    if (currentUser.id && currentUser.id !== 'superadmin' && currentUser.role !== 'superadmin') {
       const userDocRef = doc(db, 'users', currentUser.id);
       const unsubUserStatus = onSnapshot(userDocRef, (userSnap) => {
         if (!isMounted) return;
@@ -2746,17 +2749,9 @@ export default function App() {
             alert('Tài khoản của bạn đã bị vô hiệu hóa hoặc không còn hoạt động. Hệ thống sẽ đăng xuất.');
             handleLogout();
           }
-        } else {
-          // Trường hợp document users bị xóa hẳn khỏi cơ sở dữ liệu (Hard-delete)
-          alert('Tài khoản của bạn không còn tồn tại trên hệ thống. Hệ thống sẽ đăng xuất.');
-          handleLogout();
         }
       }, (err) => {
         console.warn('Lỗi lắng nghe trạng thái tài khoản:', err);
-        // Khi Rules từ chối quyền truy cập (phiên bị thu hồi), đăng xuất ngay lập tức
-        if (err?.code === 'permission-denied') {
-          handleLogout();
-        }
       });
       unsubs.push(unsubUserStatus);
     }
@@ -4194,34 +4189,45 @@ export default function App() {
   if (!currentUser) {
     if (isRegistering) {
       return (
-        <RegisterStoreView 
-          onBack={() => setIsRegistering(false)} 
-          onSuccess={(info) => {
-            if (info) {
-              setPrefillAuth({ 
-                storeCode: info.storeCode, 
-                username: info.phone, 
-                justRegistered: true 
-              });
-            }
-            setIsRegistering(false);
-          }} 
-        />
+        <>
+          <UpdateChecker />
+          <RegisterStoreView 
+            onBack={() => setIsRegistering(false)} 
+            onSuccess={(info) => {
+              if (info) {
+                setPrefillAuth({ 
+                  storeCode: info.storeCode, 
+                  username: info.phone, 
+                  justRegistered: true 
+                });
+              }
+              setIsRegistering(false);
+            }} 
+          />
+        </>
       );
     }
     return (
-      <LoginView 
-        onLogin={handleLogin} 
-        onRegisterClick={() => setIsRegistering(true)} 
-        initialStoreCode={prefillAuth.storeCode}
-        initialUsername={prefillAuth.username}
-        justRegistered={prefillAuth.justRegistered}
-      />
+      <>
+        <UpdateChecker />
+        <LoginView 
+          onLogin={handleLogin} 
+          onRegisterClick={() => setIsRegistering(true)} 
+          initialStoreCode={prefillAuth.storeCode}
+          initialUsername={prefillAuth.username}
+          justRegistered={prefillAuth.justRegistered}
+        />
+      </>
     );
   }
 
   if (currentUser.role === 'superadmin') {
-    return <SuperAdminView onLogout={handleLogout} />;
+    return (
+      <>
+        <UpdateChecker />
+        <SuperAdminView onLogout={handleLogout} />
+      </>
+    );
   }
 
   const handleCheckIn = async (record: Partial<AttendanceRecord>) => {
@@ -4910,6 +4916,8 @@ export default function App() {
           onClose={() => setShowScanner(false)} 
         />
       )}
+
+      <UpdateChecker />
     </div>
   );
 }

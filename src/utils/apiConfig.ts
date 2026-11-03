@@ -7,25 +7,38 @@ import { Capacitor } from '@capacitor/core';
  *   do đó bắt buộc phải gọi đến domain backend thực tế thay vì relative path.
  */
 export function getApiBaseUrl(): string {
-  // 1. Kiểm tra cấu hình môi trường Vite (nếu được inject khi build APK hoặc web)
+  // 1. Kiểm tra URL máy chủ do người dùng hoặc quản trị viên cấu hình thủ công trong ứng dụng
+  const savedUrl = localStorage.getItem('fnb_backend_api_url');
+  if (savedUrl && savedUrl.trim().length > 0) {
+    const trimmed = savedUrl.trim().replace(/\/+$/, '');
+    // Tự động bỏ qua URL Cloud Run cũ đã ngừng hoạt động
+    if (!trimmed.includes('asia-southeast1.run.app')) {
+      return trimmed;
+    } else {
+      localStorage.removeItem('fnb_backend_api_url');
+    }
+  }
+
+  // 2. Kiểm tra cấu hình biến môi trường Vite (được nhúng khi build)
   const envUrl = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_SERVER_URL;
   if (envUrl && typeof envUrl === 'string' && envUrl.trim().length > 0) {
     return envUrl.trim().replace(/\/+$/, '');
   }
 
-  // 2. Nếu đang chạy trên Native APK (Android/iOS)
+  // 3. Nếu đang chạy trên ứng dụng Native (Android APK hoặc iOS TestFlight / App Store):
+  // Luôn trỏ mặc định về máy chủ backend Vercel production chính thức
   if (Capacitor.isNativePlatform()) {
-    // Cho phép người dùng hoặc admin cấu hình URL máy chủ tùy chỉnh nếu cần
-    const savedUrl = localStorage.getItem('fnb_backend_api_url');
-    if (savedUrl && savedUrl.trim().length > 0) {
-      return savedUrl.trim().replace(/\/+$/, '');
-    }
-
-    // URL Cloud Run production mặc định của ứng dụng
-    return 'https://ais-dev-6ow7kxztfy55cvar3b722d-91599679751.asia-southeast1.run.app';
+    return 'https://fnb-master.vercel.app';
   }
 
-  // 3. Môi trường trình duyệt Web: dùng đường dẫn tương đối
+  // 4. Môi trường trình duyệt Web:
+  // Nếu đang mở trên localhost / 127.0.0.1 (máy dev không cấu hình Firebase Admin SDK nội bộ),
+  // tự động chuyển hướng gọi API sang backend Vercel production để đảm bảo đăng nhập thành công.
+  if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+    return 'https://fnb-master.vercel.app';
+  }
+
+  // Môi trường web production (chạy trực tiếp trên domain Vercel fnb-master.vercel.app)
   return '';
 }
 
