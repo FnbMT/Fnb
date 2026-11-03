@@ -2850,6 +2850,8 @@ export default function App() {
           return { ...safeData, id: doc.id } as User;
         }).filter(u => !(u as any).isDeleted && (u as any).status !== 'deleted');
         setUsers(usersData);
+      }, (err) => {
+        console.warn('Lỗi đồng bộ danh sách nhân viên:', err);
       });
       unsubs.push(unsubUsers);
     }

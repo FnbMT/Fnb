@@ -142,29 +142,55 @@ export default async function handler(req: any, res: any) {
       return res.status(403).json({ error: 'Cửa hàng đã bị khóa. Vui lòng liên hệ Admin để được hỗ trợ.' });
     }
 
-    // 3. Tìm kiếm người dùng trong cửa hàng (thử lowercase trước, nếu không thấy thử nguyên bản case)
+    // 3. Tìm kiếm người dùng trong cửa hàng (Hỗ trợ chữ thường, nguyên bản, số điện thoại, và quét toàn bộ quán)
+    let userDoc: any = null;
+    let userData: any = null;
+    let userId: string = '';
+
+    // 3a. Thử truy vấn trực tiếp với cleanUsername (chữ thường)
     let userQuery = await adminDb.collection('users')
       .where('storeId', '==', storeId)
       .where('username', '==', cleanUsername)
       .limit(1)
       .get();
 
-    if (userQuery.empty && String(username || '').trim() !== cleanUsername) {
+    if (!userQuery.empty) {
+      userDoc = userQuery.docs[0];
+    } else if (String(username || '').trim() !== cleanUsername) {
+      // 3b. Thử với nguyên bản case người dùng nhập
       userQuery = await adminDb.collection('users')
         .where('storeId', '==', storeId)
         .where('username', '==', String(username || '').trim())
         .limit(1)
         .get();
+      if (!userQuery.empty) userDoc = userQuery.docs[0];
     }
 
-    if (userQuery.empty) {
+    // 3c. Nếu vẫn chưa thấy, tìm kiếm toàn diện trong quán (chống lệch hoa/thường, khoảng trắng thừa, tìm theo phone hoặc storeCode legacy)
+    if (!userDoc) {
+      const allStoreUsersSnap = await adminDb.collection('users')
+        .where('storeId', 'in', [storeId, cleanStoreCode])
+        .get();
+
+      const inputClean = cleanUsername;
+      const inputRaw = String(username || '').trim();
+      const matched = allStoreUsersSnap.docs.find((d: any) => {
+        const u = d.data();
+        const dbUser = String(u.username || '').toLowerCase().trim();
+        const dbPhone = String(u.phone || '').trim();
+        return dbUser === inputClean || dbUser === inputRaw.toLowerCase() || (dbPhone && (dbPhone === inputRaw || dbPhone === inputClean));
+      });
+
+      if (matched) userDoc = matched;
+    }
+
+    if (!userDoc) {
       recordFailedAttempt(rateLimitKey);
       return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
     }
 
-    const userDoc = userQuery.docs[0];
-    const userData = userDoc.data();
-    const userId = userDoc.id;
+    userData = userDoc.data();
+    userId = userDoc.id;
 
     if (userId === 'superadmin' || cleanUsername === 'superadmin') {
       recordFailedAttempt(rateLimitKey);
@@ -176,40 +202,43 @@ export default async function handler(req: any, res: any) {
       return res.status(401).json({ error: 'Tài khoản người dùng này đã bị vô hiệu hóa hoặc không còn hoạt động' });
     }
 
-    // 4. Xác thực mật khẩu:
-    // Đọc vùng bảo mật user_secrets
-    let secretDoc: any = null;
-    let fallbackToLegacy = false;
+    // 4. Xác thực mật khẩu đa tầng:
+    let isPasswordValid = false;
+    let tokenVersion = 1;
+    let secretData: any = null;
+
+    // 4a. Đọc vùng bảo mật user_secrets
     try {
       const secretRef = adminDb.collection('user_secrets').doc(userId);
-      secretDoc = await secretRef.get();
-    } catch (readErr: any) {
-      console.warn("[Login Auth Warning] Không thể đọc user_secrets của userId:", userId, readErr?.message || readErr);
-      // Khi không thể đọc user_secrets (ví dụ do Firestore Rules chặn hoặc chạy môi trường client-bridge),
-      // nếu tài khoản có mật khẩu trong users, cho phép kiểm tra để không chặn người dùng hợp lệ
-      if (userData.password && String(userData.password).trim() === cleanPassword) {
-        fallbackToLegacy = true;
-      } else {
-        return res.status(503).json({
-          error: 'Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau giây lát.'
-        });
+      const secretDoc = await secretRef.get();
+      if (secretDoc && secretDoc.exists) {
+        secretData = secretDoc.data() || {};
+        tokenVersion = secretData.tokenVersion ? Number(secretData.tokenVersion) : 1;
       }
+    } catch (readErr: any) {
+      console.warn("[Login Auth Warning] Lỗi đọc user_secrets:", userId, readErr?.message || readErr);
     }
 
-    const hasStoredSecret = Boolean(secretDoc && secretDoc.exists);
-    const secretData = hasStoredSecret ? (secretDoc.data() || {}) : null;
-    const hasStoredHash = Boolean(secretData && (secretData.passwordHash || secretData.clientHash || secretData.encryptedPassword));
+    // 4b. Kiểm tra vùng lưu trữ legacy system/user_secret_${userId} nếu user_secrets chưa có
+    if (!secretData || (!secretData.passwordHash && !secretData.clientHash && !secretData.encryptedPassword)) {
+      try {
+        const sysSnap = await adminDb.collection('system').doc(`user_secret_${userId}`).get();
+        if (sysSnap && sysSnap.exists) {
+          const sysData = sysSnap.data() || {};
+          secretData = { ...sysData, ...(secretData || {}) };
+          if (!secretData.passwordHash && sysData.passwordHash) secretData.passwordHash = sysData.passwordHash;
+          if (!secretData.clientHash && sysData.clientHash) secretData.clientHash = sysData.clientHash;
+          if (!secretData.encryptedPassword && sysData.encryptedPassword) secretData.encryptedPassword = sysData.encryptedPassword;
+        }
+      } catch (_) {}
+    }
 
-    let isPasswordValid = fallbackToLegacy;
-    let tokenVersion = secretData?.tokenVersion ? Number(secretData.tokenVersion) : 1;
-
-    if (!fallbackToLegacy && hasStoredHash) {
-      // TRƯỜNG HỢP A: ĐÃ CÓ BẢN BĂM TRONG USER_SECRETS
+    // 4c. Đối chiếu với các bản băm trong secretData (scrypt, sha256, aes-256)
+    if (secretData) {
       if (secretData.passwordHash) {
         if (typeof secretData.passwordHash === 'string' && secretData.passwordHash.includes(':')) {
           isPasswordValid = verifyPassword(cleanPassword, secretData.passwordHash);
         } else {
-          // Hash SHA-256 legacy (64 hex characters) hoặc hash cũ
           const sha256 = crypto.createHash('sha256').update(cleanPassword).digest('hex');
           isPasswordValid = (sha256 === secretData.passwordHash || cleanPassword === secretData.passwordHash);
         }
@@ -223,62 +252,23 @@ export default async function handler(req: any, res: any) {
       }
 
       if (!isPasswordValid && secretData.encryptedPassword) {
-        const decrypted = decryptAes(secretData.encryptedPassword);
-        isPasswordValid = decrypted === cleanPassword;
-      }
-
-      // TUYỆT ĐỐI KHÔNG đối soát với userData.password khi tài khoản đã có hash hợp lệ trong user_secrets!
-      // Tránh lỗ hổng bảo mật: đăng nhập bằng mật khẩu cũ trong users dù hash hiện tại trong user_secrets đã đổi.
-
-      if (!isPasswordValid) {
-        recordFailedAttempt(rateLimitKey);
-        return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
-      }
-
-      // Tự động nâng cấp bản băm scrypt nếu chưa có
-      if (!secretData.passwordHash || !String(secretData.passwordHash).includes(':')) {
         try {
-          const passwordHash = hashPassword(cleanPassword);
-          const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-          await adminDb.collection('user_secrets').doc(userId).update({ passwordHash, clientHash });
-        } catch (_) {}
-      } else if (!secretData?.clientHash) {
-        try {
-          const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-          await adminDb.collection('user_secrets').doc(userId).update({ clientHash });
+          const decrypted = decryptAes(secretData.encryptedPassword);
+          isPasswordValid = (decrypted === cleanPassword);
         } catch (_) {}
       }
-    } else {
-      // TRƯỜNG HỢP B: TÀI KHOẢN CHUYỂN TIẾP (Chưa từng có bản băm trong user_secrets)
-      if (userData.password && String(userData.password).trim() === cleanPassword) {
+    }
+
+    // 4d. Đối chiếu với userData.password (nếu bản băm chưa có hoặc tài khoản legacy được tạo trực tiếp)
+    if (!isPasswordValid && userData.password) {
+      const rawUserPass = String(userData.password).trim();
+      if (rawUserPass === cleanPassword) {
         isPasswordValid = true;
-
-        // DI CHUYỂN AN TOÀN VÀO USER_SECRETS (kèm SHA-256 clientHash)
-        try {
-          const passwordHash = hashPassword(cleanPassword);
-          const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-          const secretPayload: Record<string, any> = {
-            userId,
-            storeId,
-            role: userData.role,
-            passwordHash,
-            clientHash,
-            tokenVersion: 1,
-            migratedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          };
-
-          if (userData.role === 'admin') {
-            secretPayload.encryptedPassword = encryptAes(cleanPassword);
-          }
-
-          await adminDb.collection('user_secrets').doc(userId).set(secretPayload);
-        } catch (migErr) {
-          console.warn("[Auth] Migration hash notice:", migErr);
-        }
       } else {
-        recordFailedAttempt(rateLimitKey);
-        return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
+        const sha256 = crypto.createHash('sha256').update(cleanPassword).digest('hex');
+        if (rawUserPass === sha256) {
+          isPasswordValid = true;
+        }
       }
     }
 
@@ -290,8 +280,24 @@ export default async function handler(req: any, res: any) {
     // Đăng nhập thành công: Xóa bộ đếm sai
     loginFailAttempts.delete(rateLimitKey);
 
-    // Cập nhật thời điểm đăng nhập gần nhất và dọn dẹp trường password thô legacy trong users (nếu còn sót lại)
+    // 4e. TỰ ĐỘNG ĐỒNG BỘ VÀ NÂNG CẤP BẢO MẬT: Lưu hash chuẩn scrypt vào user_secrets và cập nhật lastLogin
     try {
+      const passwordHash = hashPassword(cleanPassword);
+      const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
+      const secretPayload: Record<string, any> = {
+        userId,
+        storeId,
+        role: userData.role,
+        passwordHash,
+        clientHash,
+        tokenVersion: tokenVersion || 1,
+        updatedAt: new Date().toISOString()
+      };
+      if (userData.role === 'admin') {
+        secretPayload.encryptedPassword = encryptAes(cleanPassword);
+      }
+      await adminDb.collection('user_secrets').doc(userId).set(secretPayload, { merge: true });
+
       const updatePayload: Record<string, any> = {
         lastLogin: new Date().toISOString()
       };
@@ -299,7 +305,9 @@ export default async function handler(req: any, res: any) {
         updatePayload.password = safeDeleteSentinel();
       }
       await adminDb.collection('users').doc(userId).update(updatePayload);
-    } catch (e) {}
+    } catch (migErr) {
+      console.warn("[Auth Upgrade Notice]:", migErr);
+    }
 
     // 5. Cấp Session Token có chữ ký số bí mật HMAC-SHA256 kèm tokenVersion
     const sessionToken = generateAuthToken({

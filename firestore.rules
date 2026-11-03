@@ -129,7 +129,6 @@ service cloud.firestore {
     // ==========================================
     match /users/{userId} {
       // Chỉ xem được danh sách nhân sự thuộc cùng cửa hàng hoặc tài khoản của chính mình.
-      // Dùng .get() kiểm tra isDeleted, status, isActive để tránh lỗi property undefined
       allow read: if isSuperAdmin() || (
         isSignedIn() && (
           request.auth.uid == userId ||
@@ -137,12 +136,6 @@ service cloud.firestore {
             resource == null || (
               resource.data.get('storeId', '') == request.auth.token.get('storeId', '')
             )
-          )
-        ) && (
-          resource == null || (
-            resource.data.get('isDeleted', false) != true &&
-            resource.data.get('status', '') != 'deleted' &&
-            resource.data.get('isActive', true) != false
           )
         )
       );

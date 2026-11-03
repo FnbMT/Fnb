@@ -387,7 +387,7 @@ export const LoginView = ({
               </div>
               
               {/* Nút hỗ trợ khắc phục nhanh khi máy chủ không phản hồi */}
-              {(error.includes('máy chủ') || error.includes('kết nối mạng') || isNative) && (
+              {(error.includes('máy chủ') || error.includes('kết nối mạng') || error.includes('không khả dụng')) && (
                 <button
                   type="button"
                   onClick={() => {
