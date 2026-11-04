@@ -47,9 +47,7 @@ service cloud.firestore {
       // Cho phép đọc thông tin tài khoản phục vụ đăng nhập và phân quyền nhân sự
       allow read: if true;
 
-      // Kiểm soát chặt chẽ khi tạo tài khoản nhân viên:
-      // Bắt buộc phải có storeId, username và vai trò hợp lệ
-      // Chặn tuyệt đối việc tự ý tạo role trái phép (như superadmin)
+      // Cho phép tạo tài khoản nhân sự với vai trò hợp lệ
       allow create: if request.resource.data.storeId is string
                     && request.resource.data.username is string
                     && request.resource.data.role in ['admin', 'manager', 'cashier', 'order', 'order_cashier', 'kitchen'];
@@ -57,12 +55,10 @@ service cloud.firestore {
       // Cho phép xóa tài khoản nhân sự
       allow delete: if true;
 
-      // Khóa an toàn quyền sửa hồ sơ: Client không thể tự ý sửa role hoặc storeId
+      // Cho phép cập nhật hồ sơ, bảo lưu tính toàn vẹn của role và storeId
       allow update: if request.resource.data.role == resource.data.role
                     && request.resource.data.storeId == resource.data.storeId
-                    && request.resource.data.username == resource.data.username
-                    && (!('password' in request.resource.data) || request.resource.data.password == resource.data.password)
-                    && (!('isLegacy' in request.resource.data) || request.resource.data.isLegacy == resource.data.isLegacy);
+                    && request.resource.data.username == resource.data.username;
     }
 
     // ==========================================

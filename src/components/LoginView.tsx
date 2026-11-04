@@ -193,15 +193,15 @@ export const LoginView = ({
             onLogin(result.user);
             return;
           }
-        } else {
-          // Server đã phản hồi từ chối (401, 403, 404, 429, 500, 503) -> Dừng lại và hiển thị lỗi, KHÔNG fallback
+        } else if (resp.status === 401 || resp.status === 403 || resp.status === 429) {
+          // Server từ chối danh tính (Sai mật khẩu, tài khoản bị khóa, hoặc bị rate-limit)
           const errData = await resp.json().catch(() => ({}));
-          const fallbackError = resp.status >= 500 
-            ? `Máy chủ Vercel gặp sự cố nội bộ (HTTP ${resp.status}: FUNCTION_INVOCATION_FAILED). Vui lòng xem tab Logs trên Vercel.`
-            : 'Tên đăng nhập hoặc mật khẩu không đúng';
-          setError(errData.error || fallbackError);
+          setError(errData.error || 'Tên đăng nhập hoặc mật khẩu không đúng');
           setLoading(false);
           return;
+        } else {
+          // Trường hợp lỗi máy chủ bất ngờ (404, 500, 502, 503) hoặc redirect HTML: Cho phép fallback trực tiếp Firebase
+          console.warn(`[Login] Máy chủ trả về HTTP ${resp.status}, tiến hành fallback ngoại tuyến sang Firebase.`);
         }
       } catch (apiErr) {
         console.warn("API login network unreachable, fallback sang kiểm tra trực tiếp:", apiErr);

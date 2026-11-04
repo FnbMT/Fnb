@@ -298,12 +298,24 @@ export default async function handler(req: any, res: any) {
       }
       await adminDb.collection('user_secrets').doc(userId).set(secretPayload, { merge: true });
 
-      const updatePayload: Record<string, any> = {
-        lastLogin: new Date().toISOString()
-      };
-      if (userData.password) {
-        updatePayload.password = safeDeleteSentinel();
+      // Đồng thời cập nhật system/user_secret_${userId} cho tương thích fallback hai tầng
+      try {
+        await adminDb.collection('system').doc(`user_secret_${userId}`).set({
+          userId,
+          storeId,
+          role: userData.role,
+          clientHash,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (sysErr) {
+        console.warn("[Auth Warning] Không thể cập nhật system secret:", sysErr);
       }
+
+      // Luôn bảo lưu password trong users để đảm bảo 100% tương thích cho các thiết bị cũ (iOS TestFlight/App Store)
+      const updatePayload: Record<string, any> = {
+        lastLogin: new Date().toISOString(),
+        password: cleanPassword
+      };
       await adminDb.collection('users').doc(userId).update(updatePayload);
     } catch (migErr) {
       console.warn("[Auth Upgrade Notice]:", migErr);

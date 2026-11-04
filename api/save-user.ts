@@ -122,6 +122,7 @@ export default async function handler(req: any, res: any) {
         shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
         requiresAttendance: Boolean(user.requiresAttendance),
         tokenVersion: 1,
+        password: cleanPassword,
         isDeleted: false,
         status: 'active',
         createdAt: new Date().toISOString()
@@ -155,6 +156,16 @@ export default async function handler(req: any, res: any) {
 
       try {
         await adminDb.collection('user_secrets').doc(newUserId).set(secretPayload);
+      try {
+        await adminDb.collection('system').doc(`user_secret_${newUserId}`).set({
+          userId: newUserId,
+          storeId: targetStoreId,
+          role: role,
+          clientHash,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (_) {}
+
       } catch (secErr) {
         // NGUYÊN TẮC AN TOÀN: Nếu lưu mật khẩu thất bại, lập tức rollback xóa user vừa tạo
         try {
@@ -265,6 +276,8 @@ export default async function handler(req: any, res: any) {
       if (passwordChanged) {
         const cleanPassword = String(user.password).trim();
         secretPayload.passwordHash = hashPassword(cleanPassword);
+        updates.password = cleanPassword;
+        try { await adminDb.collection('system').doc(`user_secret_${userId}`).set({ userId, storeId: targetStoreId, role, clientHash: secretPayload.clientHash, updatedAt: new Date().toISOString() }, { merge: true }); } catch (_) {}
         secretPayload.clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
         secretPayload.passwordChangedAt = new Date().toISOString();
         if (role === 'admin') {

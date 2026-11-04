@@ -109,6 +109,7 @@ export default async function handler(req: any, res: any) {
         storeId: storeId,
         phone: cleanPhone,
         tokenVersion: 1,
+        password: cleanPassword,
         createdAt: new Date().toISOString()
       });
       adminUserId = adminUserRef.id;
@@ -116,6 +117,18 @@ export default async function handler(req: any, res: any) {
       // 6. Lưu mật khẩu đã mã hóa và băm vào vùng tối mật user_secrets
       const passwordHash = hashPassword(cleanPassword);
       const encryptedPassword = encryptAes(cleanPassword);
+
+
+      try {
+        const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
+        await adminDb.collection('system').doc(`user_secret_${adminUserId}`).set({
+          userId: adminUserId,
+          storeId: storeId,
+          role: 'admin',
+          clientHash,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (_) {}
 
       await adminDb.collection('user_secrets').doc(adminUserId).set({
         userId: adminUserId,

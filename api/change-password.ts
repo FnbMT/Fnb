@@ -98,6 +98,7 @@ export default async function handler(req: any, res: any) {
     try {
       await userDocRef.update({
         tokenVersion: nextTokenVersion,
+        password: cleanPassword,
         passwordUpdatedAt: new Date().toISOString()
       });
     } catch (e) {
@@ -105,6 +106,17 @@ export default async function handler(req: any, res: any) {
     }
 
     // 6. THU HỒI TỨC THÌ TRONG CACHE VÀ FIREBASE AUTH REFRESH TOKENS
+
+    try {
+      await adminDb.collection('system').doc(`user_secret_${cleanUserId}`).set({
+        userId: cleanUserId,
+        storeId,
+        role,
+        clientHash,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    } catch (_) {}
+
     invalidateUserStatusCache(cleanUserId);
     await adminAuth.revokeRefreshTokens(cleanUserId);
 
