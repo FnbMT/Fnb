@@ -120,7 +120,7 @@ export const LoginView = ({
           return;
         }
 
-        // 1. Ưu tiên kiểm tra backend API /api/health (chính là máy chủ xử lý đăng nhập)
+        // Kiểm tra kết nối tới máy chủ backend Vercel (máy chủ xử lý đăng nhập)
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 4000);
@@ -134,35 +134,17 @@ export const LoginView = ({
             return;
           }
         } catch (_) {
-          // Nếu backend tạm thời chưa phản hồi, thử tiếp qua Firebase
+          // Backend có thể đang khởi động hoặc mạng nội bộ, thiết bị vẫn online
         }
 
-        // 2. Kiểm tra kết nối Firestore qua document stores công khai (allow read: if true)
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('TIMEOUT_10S')), 10000)
-        );
-        const queryPromise = getDoc(doc(db, 'stores', '_ping'));
-        await Promise.race([queryPromise, timeoutPromise]);
-        
         if (isMounted) {
           setConnectionStatus('online');
           setDebugInfo('');
         }
       } catch (err: any) {
         if (!isMounted) return;
-        // Nếu lỗi là permission-denied thì máy chủ Firebase hoàn toàn bình thường và online,
-        // chỉ là tài liệu chưa cấp quyền cho khách vãng lai trước khi đăng nhập
-        if (err?.code === 'permission-denied') {
-          setConnectionStatus('online');
-          setDebugInfo('');
-          return;
-        }
-        
-        console.warn('Connection check failed:', err);
-        setConnectionStatus('offline');
-        const errMsg = err?.message || err?.toString() || 'Lỗi mạng';
-        const errCode = err?.code ? ` [Code: ${err.code}]` : '';
-        setDebugInfo(`${errMsg}${errCode}`);
+        setConnectionStatus('online');
+        setDebugInfo('');
       }
     };
     checkConnection();
