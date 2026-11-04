@@ -29,19 +29,6 @@ export function getApiBaseUrl(): string {
   return '';
 }
 
-export function getCustomApiUrl(): string {
-  return localStorage.getItem('fnb_backend_api_url') || '';
-}
-
-export function setCustomApiUrl(url: string): void {
-  const clean = url.trim().replace(/\/+$/, '');
-  if (!clean) {
-    localStorage.removeItem('fnb_backend_api_url');
-  } else {
-    localStorage.setItem('fnb_backend_api_url', clean);
-  }
-}
-
 /**
  * Xây dựng URL hoàn chỉnh cho endpoint API
  */
@@ -50,4 +37,3 @@ export function apiUrl(endpoint: string): string {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   return `${base}${cleanEndpoint}`;
 }
-

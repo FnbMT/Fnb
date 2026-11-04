@@ -1,4 +1,4 @@
-import { adminDb } from "../api/_firebaseAdmin.js";
+import { adminDb } from "../api/_firebaseAdmin";
 import type { Invoice, CashTransaction, DailyStats } from "../src/types";
 import { aggregateDay, businessDateOf } from "../src/utils/dataIntegrity";
 import { getVietnamBusinessDate } from "../src/utils/firestoreDateHelper";

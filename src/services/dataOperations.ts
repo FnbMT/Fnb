@@ -500,8 +500,7 @@ export async function importStockAtomic(
   quantity: number,
   unitPrice: number,
   shiftId: string | undefined,
-  id: string,
-  paymentMethod: 'cash' | 'transfer' = 'cash'
+  id: string
 ) {
   if (!Number.isFinite(quantity) || quantity <= 0)
     throw new Error("Lượng nhập phải lớn hơn 0.");
@@ -513,9 +512,7 @@ export async function importStockAtomic(
     );
   const now = new Date().toISOString(),
     day = getVietnamBusinessDate(now);
-  const method: 'cash' | 'transfer' = paymentMethod === 'transfer' ? 'transfer' : 'cash';
-  const methodLabel = method === 'transfer' ? 'Chuyển khoản' : 'Tiền mặt';
-  const requestSignature = JSON.stringify({ itemId, quantity, unitPrice, paymentMethod: method });
+  const requestSignature = JSON.stringify({ itemId, quantity, unitPrice });
   const ref = doc(db, "menu", itemId),
     logRef = doc(db, "inventory_logs", `import_${id}`),
     cashRef = doc(db, "cash_transactions", `import_${id}`),
@@ -554,7 +551,6 @@ export async function importStockAtomic(
       unitPrice,
       totalPrice: Math.round(quantity * unitPrice),
       type: "import",
-      paymentMethod: method,
       date: now,
       operationId: id,
       requestSignature,
@@ -568,7 +564,7 @@ export async function importStockAtomic(
       type: "import",
       date: now,
       referenceId: logRef.id,
-      note: `Nhập kho (${methodLabel}): ${quantity} ${item.unit}`,
+      note: `Nhập kho: ${quantity} ${item.unit}`,
     });
     if (quantity * unitPrice > 0)
       writeCash(
@@ -577,9 +573,9 @@ export async function importStockAtomic(
         {
           amount: Math.round(quantity * unitPrice),
           type: "expense",
-          paymentMethod: method,
+          paymentMethod: "cash",
           category: "Nhập hàng",
-          note: `Nhập kho (${methodLabel}): ${quantity} ${item.unit} ${item.name}`,
+          note: `Nhập kho: ${quantity} ${item.unit} ${item.name}`,
           date: now,
           staffId: user.id,
           staffName: user.name,

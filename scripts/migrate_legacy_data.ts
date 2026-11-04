@@ -1,4 +1,4 @@
-import { adminDb } from '../api/_firebaseAdmin.js';
+import { adminDb } from '../api/_firebaseAdmin';
 import { randomUUID } from 'node:crypto';
 
 export function getVietnamBusinessDate(dateStr?: string | Date): string {

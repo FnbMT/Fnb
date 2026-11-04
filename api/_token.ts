@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { adminAuth, hasAdminCredential, adminDb } from './_firebaseAdmin.js';
+import { adminAuth, hasAdminCredential, adminDb } from './_firebaseAdmin';
 
 // Khóa bí mật dùng để ký và xác thực token JWT HMAC-SHA256 (Ưu tiên JWT_SECRET độc lập, fallback sang ENCRYPTION_KEY)
 const getSecretKey = (): Buffer => {

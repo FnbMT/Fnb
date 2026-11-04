@@ -1,4 +1,4 @@
-import { adminDb, hasAdminCredential } from "./_firebaseAdmin.js";
+import { adminDb, hasAdminCredential } from "./_firebaseAdmin";
 
 export default async function handler(req: any, res: any) {
   // 1. Chỉ chấp nhận phương thức POST

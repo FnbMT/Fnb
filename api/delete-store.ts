@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
-import { adminDb } from './_firebaseAdmin.js';
-import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
+import { adminDb } from './_firebaseAdmin';
+import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {

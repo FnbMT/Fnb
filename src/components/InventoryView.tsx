@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Package, Plus, Search, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, X, Edit2, Trash2, ClipboardCheck, History, List, ChevronRight, Info, Banknote, CreditCard } from 'lucide-react';
+import { Package, Plus, Search, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, X, Edit2, Trash2, ClipboardCheck, History, List, ChevronRight, Info } from 'lucide-react';
 import { MenuItem, InventoryAudit, AuditItem, StockCardEntry, User } from '../types';
 import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
@@ -17,7 +17,7 @@ const formatStock = (val: number | undefined | null): string => {
 
 export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, onDeleteItem, categories, onUpdateCategories, audits, onAudit, stockCard, currentUser }: { 
   menu: MenuItem[], 
-  onImportStock: (itemId: string, quantity: number, unitPrice: number, id?: string, paymentMethod?: 'cash' | 'transfer') => Promise<void>,
+  onImportStock: (itemId: string, quantity: number, unitPrice: number, id?: string) => Promise<void>,
   onAddItem: (item: MenuItem) => Promise<void>,
   onUpdateItem: (item: MenuItem, expected?: MenuItem) => Promise<void>,
   onDeleteItem: (id: string) => void,
@@ -36,7 +36,7 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
   const auditOperationRef=useRef<{id:string;signature:string;date:string}|null>(null);
   const [showAddNew, setShowAddNew] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
-  const [importData, setImportData] = useState<{ itemId: string; quantity: number; unitPrice: number; paymentMethod: 'cash' | 'transfer' }>({ itemId: '', quantity: 0, unitPrice: 0, paymentMethod: 'cash' });
+  const [importData, setImportData] = useState({ itemId: '', quantity: 0, unitPrice: 0 });
   const [newItem, setNewItem] = useState({ name: '', unit: 'kg', category: categories[0] || 'Nguyên liệu', costPrice: 0, minStock: 10, trackStock: true });
   const [showAddCat, setShowAddCat] = useState(false);
   const [newCat, setNewCat] = useState('');
@@ -62,27 +62,14 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
 
   const handleImport = async () => {
     if (!importData.itemId || importData.quantity <= 0 || isSaving) return;
-    const signature = JSON.stringify(importData);
-    if (importOperationRef.current?.signature !== signature) {
-      importOperationRef.current = { id: operationId('import'), signature };
-    }
+    const signature=JSON.stringify(importData);
+    if(importOperationRef.current?.signature!==signature)importOperationRef.current={id:operationId('import'),signature};
     setIsSaving(true);
     try {
-      await onImportStock(
-        importData.itemId,
-        importData.quantity,
-        importData.unitPrice,
-        importOperationRef.current!.id,
-        importData.paymentMethod
-      );
-      setShowImport(false);
-      setImportData({ itemId: '', quantity: 0, unitPrice: 0, paymentMethod: 'cash' });
-      importOperationRef.current = null;
-    } catch(error) {
-      alert(error instanceof Error ? error.message : 'Không thể nhập kho. Nội dung đã được giữ để thử lại.');
-    } finally {
-      setIsSaving(false);
-    }
+      await onImportStock(importData.itemId,importData.quantity,importData.unitPrice,importOperationRef.current!.id);
+      setShowImport(false);setImportData({itemId:'',quantity:0,unitPrice:0});importOperationRef.current=null;
+    } catch(error) {alert(error instanceof Error?error.message:'Không thể nhập kho. Nội dung đã được giữ để thử lại.');}
+    finally {setIsSaving(false);}
   };
 
   const handleSaveItem = async () => {
@@ -606,42 +593,6 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               <div>
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Giá tiền / 1 đơn vị <span className="text-rose-600 dark:text-rose-500">*</span></label>
                 <CurrencyInput className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50" value={importData.unitPrice || ''} onChange={val => setImportData({...importData, unitPrice: Number(val)})} />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Hình thức thanh toán <span className="text-rose-600 dark:text-rose-500">*</span></label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setImportData({ ...importData, paymentMethod: 'cash' })}
-                    className={cn(
-                      "py-2.5 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 transition-all cursor-pointer",
-                      importData.paymentMethod === 'cash'
-                        ? "bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-500/20"
-                        : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <Banknote className="w-4 h-4" />
-                    Tiền mặt
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setImportData({ ...importData, paymentMethod: 'transfer' })}
-                    className={cn(
-                      "py-2.5 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 transition-all cursor-pointer",
-                      importData.paymentMethod === 'transfer'
-                        ? "bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-600/20"
-                        : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <CreditCard className="w-4 h-4" />
-                    Chuyển khoản
-                  </button>
-                </div>
-                <p className="text-[11px] text-gray-500 mt-1 italic">
-                  {importData.paymentMethod === 'cash'
-                    ? '• Trừ vào quỹ tiền mặt / két của ca làm việc'
-                    : '• Thanh toán qua tài khoản ngân hàng (không trừ két tiền mặt)'}
-                </p>
               </div>
               <div className="p-4 bg-emerald-500/10 rounded-xl border border-emerald-500/20">
                 <p className="text-xs text-emerald-600 dark:text-emerald-500 uppercase font-bold mb-1">Tổng tiền nhập</p>

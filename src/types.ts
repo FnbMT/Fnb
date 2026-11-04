@@ -237,7 +237,6 @@ export interface InventoryTransaction {
   note?: string;
   referenceId?: string;
   storeId?: string;
-  paymentMethod?: 'cash' | 'transfer';
 }
 
 export interface AuditItem {

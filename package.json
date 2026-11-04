@@ -4,7 +4,7 @@
   "version": "1.0.3",
   "type": "module",
   "engines": {
-    "node": "22.x"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "dev": "VITE_DEV=true tsx server.ts",
@@ -16,12 +16,6 @@
     "lint": "tsc --noEmit",
     "migrate:legacy": "tsx scripts/migrate_legacy_data.ts",
     "postinstall": "patch-package"
-  },
-  "overrides": {
-    "jose": "^4.15.9"
-  },
-  "resolutions": {
-    "jose": "^4.15.9"
   },
   "dependencies": {
     "@capacitor/android": "^8.3.0",

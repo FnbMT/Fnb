@@ -55,16 +55,13 @@ export const hasAdminCredential = Boolean(
 export const getAdminStatus = () => ({
   hasCredential: hasAdminCredential,
   isInitialized: Boolean(rawAdminApp && rawAdminDb),
-  projectId,
-  initError: adminInitError
+  projectId
 });
 
-// 1. Khởi tạo Firebase Admin SDK (Chỉ khi có Service Account thật và bọc an toàn tránh sập module)
+// 1. Khởi tạo Firebase Admin SDK (Chỉ khi có Service Account thật)
 let rawAdminApp: any = null;
 let rawAdminDb: any = null;
 let rawAdminAuth: any = null;
-let rawFieldValue: any = null;
-let adminInitError: string | null = null;
 
 if (hasAdminCredential) {
   try {
@@ -72,21 +69,11 @@ if (hasAdminCredential) {
     if (existing.length > 0) {
       rawAdminApp = existing[0];
     } else if (serviceAccountRaw) {
-      let parsed: any;
-      try {
-        parsed = typeof serviceAccountRaw === 'string' ? JSON.parse(serviceAccountRaw) : serviceAccountRaw;
-      } catch (jsonErr) {
-        console.warn("[FirebaseAdmin] Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:", jsonErr);
-      }
-      if (parsed) {
-        if (parsed.private_key && typeof parsed.private_key === 'string') {
-          parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
-        }
-        rawAdminApp = initAdminApp({
-          credential: cert(parsed),
-          projectId: parsed.project_id || projectId
-        });
-      }
+      const parsed = JSON.parse(serviceAccountRaw);
+      rawAdminApp = initAdminApp({
+        credential: cert(parsed),
+        projectId: parsed.project_id || projectId
+      });
     } else if (clientEmail && privateKey) {
       rawAdminApp = initAdminApp({
         credential: cert({
@@ -101,39 +88,23 @@ if (hasAdminCredential) {
       rawAdminDb = getAdminFirestore(rawAdminApp);
       rawAdminAuth = getAdminAuth(rawAdminApp);
     }
-  } catch (err: any) {
-    adminInitError = err?.message || String(err);
+  } catch (err) {
     console.warn("[FirebaseAdmin] Failed to initialize Firebase Admin with service account:", err);
   }
 }
 
 // 2. Khởi tạo Firebase Client SDK trên server (làm cầu nối fallback siêu tốc và an toàn cho dev/preview)
-let _cachedClientDb: any = null;
 const getClientDbInstance = () => {
-  if (_cachedClientDb) return _cachedClientDb;
-  try {
-    const apps = getClientApps();
-    const cApp = apps.find(a => a.name === 'server-client-bridge') || initClientApp({
-      apiKey,
-      authDomain,
-      projectId,
-    }, 'server-client-bridge');
-    _cachedClientDb = getClientFirestore(cApp);
-    return _cachedClientDb;
-  } catch (err) {
-    console.warn("[FirebaseAdmin] getClientDbInstance fallback failed:", err);
-    return null;
-  }
+  const apps = getClientApps();
+  const cApp = apps.find(a => a.name === 'server-client-bridge') || initClientApp({
+    apiKey,
+    authDomain,
+    projectId,
+  }, 'server-client-bridge');
+  return getClientFirestore(cApp);
 };
 
-const cDb: any = new Proxy({} as any, {
-  get(_target, prop) {
-    const instance = getClientDbInstance();
-    if (!instance) return undefined;
-    const val = (instance as any)[prop];
-    return typeof val === 'function' ? val.bind(instance) : val;
-  }
-});
+const cDb = getClientDbInstance();
 
 // Hàm chuẩn hóa dữ liệu khi gửi qua Client SDK (thay thế FieldValue.delete)
 const sanitizeDataForClient = (data: any): any => {
@@ -674,4 +645,4 @@ export const adminAuth = {
   }
 };
 
-export const safeDeleteSentinel = () => (FieldValue?.delete ? FieldValue.delete() : clientDeleteField());
+export const safeDeleteSentinel = FieldValue.delete;

@@ -304,7 +304,6 @@ export const SummaryView = ({
   const [showQuickAddCategory, setShowQuickAddCategory] = useState(false);
   const [quickCategoryInput, setQuickCategoryInput] = useState('');
   const [cashFilterType, setCashFilterType] = useState<'all' | 'income' | 'expense'>('all');
-  const [cashMethodFilter, setCashMethodFilter] = useState<'all' | 'cash' | 'transfer'>('all');
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -1366,18 +1365,9 @@ export const SummaryView = ({
   }, [filteredCash, statsAggregates, dateFilter, filterType, shifts, activeShift]);
 
   const renderedCashTransactions = useMemo(() => {
-    let result = filteredCash;
-    if (cashFilterType !== 'all') {
-      result = result.filter(t => t.type === cashFilterType);
-    }
-    if (cashMethodFilter !== 'all') {
-      result = result.filter(t => {
-        const method = t.paymentMethod || 'cash';
-        return method === cashMethodFilter;
-      });
-    }
-    return result;
-  }, [filteredCash, cashFilterType, cashMethodFilter]);
+    if (cashFilterType === 'all') return filteredCash;
+    return filteredCash.filter(t => t.type === cashFilterType);
+  }, [filteredCash, cashFilterType]);
 
   const exportToExcel = () => {
     if (!reportDataReady || isLoadingHistorical || sourceMismatch) { alert('Chưa xác nhận đủ chứng từ từ server. Vui lòng đợi đồng bộ hoặc kết nối lại trước khi xuất.'); return; }
@@ -1401,7 +1391,6 @@ export const SummaryView = ({
       dataToExport = filteredLogs.map(log => ({
         'Thời gian': format(parseISO(log.date), 'HH:mm dd/MM/yyyy'),
         'Loại': log.type === 'import' ? 'Nhập hàng' : 'Trả hàng',
-        'PTTT': log.paymentMethod === 'transfer' ? 'Chuyển khoản' : 'Tiền mặt',
         'Mặt hàng': log.itemName,
         'Số lượng': log.quantity,
         'Tổng tiền': log.totalPrice
@@ -2108,26 +2097,15 @@ export const SummaryView = ({
               </div>
             )}
             {activeTab === 'cash' && (
-              <div className="flex items-center gap-2">
-                <select
-                  className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded px-2 py-1 outline-none text-gray-900 dark:text-white text-xs"
-                  value={cashFilterType}
-                  onChange={(e) => { setCashFilterType(e.target.value as any); setCurrentPage(1); }}
-                >
-                  <option value="all" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Tất cả Thu/Chi</option>
-                  <option value="income" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Chỉ phiếu Thu</option>
-                  <option value="expense" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Chỉ phiếu Chi</option>
-                </select>
-                <select
-                  className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded px-2 py-1 outline-none text-gray-900 dark:text-white text-xs"
-                  value={cashMethodFilter}
-                  onChange={(e) => { setCashMethodFilter(e.target.value as any); setCurrentPage(1); }}
-                >
-                  <option value="all" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Tất cả PTTT</option>
-                  <option value="cash" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Chỉ Tiền mặt</option>
-                  <option value="transfer" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Chỉ Chuyển khoản</option>
-                </select>
-              </div>
+              <select
+                className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded px-2 py-1 outline-none text-gray-900 dark:text-white"
+                value={cashFilterType}
+                onChange={(e) => { setCashFilterType(e.target.value as any); setCurrentPage(1); }}
+              >
+                <option value="all" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Tất cả Thu/Chi</option>
+                <option value="income" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Chỉ phiếu Thu</option>
+                <option value="expense" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">Chỉ phiếu Chi</option>
+              </select>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -2308,7 +2286,6 @@ export const SummaryView = ({
                   <tr className="bg-black/5 dark:bg-white/5 text-gray-600 dark:text-gray-400 text-xs uppercase tracking-wider">
                     <th className="px-6 py-4 font-medium">Thời gian</th>
                     <th className="px-6 py-4 font-medium">Loại</th>
-                    <th className="px-6 py-4 font-medium">PTTT</th>
                     <th className="px-6 py-4 font-medium">Mặt hàng</th>
                     <th className="px-6 py-4 font-medium text-right">Số lượng</th>
                     <th className="px-6 py-4 font-medium text-right">Tổng tiền</th>
@@ -2318,7 +2295,7 @@ export const SummaryView = ({
                 <tbody className="divide-y divide-black/5 dark:divide-white/5">
                   {filteredLogs.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="px-6 py-12 text-center text-gray-500 italic">Không có dữ liệu nhập/trả hàng</td>
+                      <td colSpan={6} className="px-6 py-12 text-center text-gray-500 italic">Không có dữ liệu nhập/trả hàng</td>
                     </tr>
                   ) : (
                     paginate(filteredLogs).map(log => (
@@ -2332,20 +2309,7 @@ export const SummaryView = ({
                             {log.type === 'import' ? 'Nhập hàng' : 'Trả hàng'}
                           </span>
                         </td>
-                        <td className="px-6 py-4">
-                          {log.paymentMethod === 'transfer' ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-                              <CreditCard className="w-3 h-3" />
-                              Chuyển khoản
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                              <Banknote className="w-3 h-3" />
-                              Tiền mặt
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900 dark:text-white">{log.itemName}</td>
+                        <td className="px-6 py-4 text-sm">{log.itemName}</td>
                         <td className="px-6 py-4 text-right font-mono">{log.quantity.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })}</td>
                         <td className="px-6 py-4 text-right font-mono font-bold">{(log.totalPrice || 0).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</td>
                         <td className="px-6 py-4 text-right">
@@ -2723,17 +2687,7 @@ export const SummaryView = ({
                         <td className="px-6 py-4 text-sm">{format(parseISO(t.date), 'HH:mm dd/MM/yyyy')}</td>
                         <td className="px-6 py-4 text-sm font-bold">{t.category}</td>
                         <td className="px-6 py-4">
-                          {t.paymentMethod === 'transfer' ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-                              <CreditCard className="w-3 h-3" />
-                              Chuyển khoản
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                              <Banknote className="w-3 h-3" />
-                              Tiền mặt
-                            </span>
-                          )}
+                          <span className="px-2 py-1 bg-black/5 dark:bg-white/5 rounded text-[10px] uppercase">{paymentMethodMap[t.paymentMethod as keyof typeof paymentMethodMap] || t.paymentMethod}</span>
                         </td>
                         <td className="px-6 py-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-500">
                           {t.type === 'income' ? `+${t.amount.toLocaleString('vi-VN')}đ` : ''}
@@ -3045,54 +2999,20 @@ export const SummaryView = ({
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-500 uppercase font-bold mb-1.5 block">
-                  Phương thức thanh toán <span className="text-rose-500">*</span>
-                </label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setNewCash({...newCash, paymentMethod: 'cash'})}
-                    className={cn(
-                      "py-3 px-4 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition-all cursor-pointer",
-                      newCash.paymentMethod === 'cash' 
-                        ? "bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-500/20" 
-                        : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-700 dark:text-gray-300 hover:bg-black/10 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <Banknote className="w-4 h-4" />
-                    <span>Tiền mặt</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewCash({...newCash, paymentMethod: 'transfer'})}
-                    className={cn(
-                      "py-3 px-4 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition-all cursor-pointer",
-                      newCash.paymentMethod === 'transfer' 
-                        ? "bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-600/20" 
-                        : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-700 dark:text-gray-300 hover:bg-black/10 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <CreditCard className="w-4 h-4" />
-                    <span>Chuyển khoản</span>
-                  </button>
-                </div>
-                <div className={cn(
-                  "mt-2 p-2.5 rounded-xl text-[11px] leading-relaxed border flex items-start gap-2",
-                  newCash.paymentMethod === 'cash'
-                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-400"
-                    : "bg-blue-500/10 border-blue-500/20 text-blue-700 dark:text-blue-400"
-                )}>
-                  {newCash.paymentMethod === 'cash' ? (
-                    <>
-                      <Banknote className="w-4 h-4 shrink-0 mt-0.5" />
-                      <span><strong>Tiền mặt:</strong> {showAddCashModal === 'expense' ? 'Trừ trực tiếp' : 'Cộng trực tiếp'} vào két tiền mặt của ca & cửa hàng, ảnh hưởng đến số dư tiền mặt thực tế.</span>
-                    </>
-                  ) : (
-                    <>
-                      <CreditCard className="w-4 h-4 shrink-0 mt-0.5" />
-                      <span><strong>Chuyển khoản:</strong> Ghi nhận vào số dư ngân hàng, <strong>không</strong> làm thay đổi tiền mặt tại két.</span>
-                    </>
-                  )}
+                <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">PTTT</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['cash', 'transfer'] as const).map(m => (
+                    <button
+                      key={m}
+                      onClick={() => setNewCash({...newCash, paymentMethod: m})}
+                      className={cn(
+                        "py-2 rounded-lg text-xs font-bold border transition-all",
+                        newCash.paymentMethod === m ? "bg-emerald-500 text-white border-emerald-500" : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-500"
+                      )}
+                    >
+                      {m === 'cash' ? 'Tiền mặt' : 'Chuyển khoản'}
+                    </button>
+                  ))}
                 </div>
               </div>
               <div className="relative">
@@ -3292,22 +3212,6 @@ export const SummaryView = ({
               <div className="flex justify-between text-sm">
                 <span className="text-gray-500">Đơn giá:</span>
                 <span className="text-gray-900 dark:text-white">{viewingLog.unitPrice?.toLocaleString()}đ</span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-500">Phương thức TT:</span>
-                <span className="text-gray-900 dark:text-white font-medium flex items-center gap-1.5">
-                  {viewingLog.paymentMethod === 'transfer' ? (
-                    <>
-                      <CreditCard className="w-3.5 h-3.5 text-blue-500" />
-                      <span className="text-blue-600 dark:text-blue-400 font-bold">Chuyển khoản</span>
-                    </>
-                  ) : (
-                    <>
-                      <Banknote className="w-3.5 h-3.5 text-emerald-500" />
-                      <span className="text-emerald-600 dark:text-emerald-400 font-bold">Tiền mặt</span>
-                    </>
-                  )}
-                </span>
               </div>
               <div className="flex justify-between text-lg font-bold text-amber-600 dark:text-amber-500 pt-4 border-t border-black/5 dark:border-white/5">
                 <span>Tổng tiền:</span>

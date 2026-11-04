@@ -3288,9 +3288,9 @@ export default function App() {
   };
 
   // Inventory Management
-  const handleImportStock = async (itemId: string, quantity: number, unitPrice: number, id = operationId('import'), paymentMethod: 'cash' | 'transfer' = 'cash') => {
+  const handleImportStock = async (itemId: string, quantity: number, unitPrice: number, id = operationId('import')) => {
     if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
-    await importStockAtomic(currentUser, itemId, quantity, unitPrice, activeShift?.id, id, paymentMethod);
+    await importStockAtomic(currentUser, itemId, quantity, unitPrice, activeShift?.id, id);
     // An auxiliary status refresh must never turn a committed import into a failed import.
     await updateOutOfStockStatus([], [itemId]).catch(console.warn);
   };
@@ -4390,8 +4390,6 @@ export default function App() {
                   attendanceStatus={attendanceStatus}
                   onScanQR={() => setShowScanner(true)}
                   isAttendanceAllowed={checkStoreTabPermission('attendance', currentUser, packages)}
-                  onAddCashTransaction={handleAddCashTransaction}
-                  settings={systemSettings}
                 />
               )}
               {view === 'menu_mgmt' && (

@@ -1,6 +1,6 @@
 import React from 'react';
-import { Wallet, Clock, ArrowRight, Lock, Unlock, History, X, AlertTriangle, Eye, Check, QrCode, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, Banknote, CreditCard, Plus } from 'lucide-react';
-import { Shift, VoidLog, User, Table, CashTransaction, SystemSettings } from '../types';
+import { Wallet, Clock, ArrowRight, Lock, Unlock, History, X, AlertTriangle, Eye, Check, QrCode, CheckCircle2 } from 'lucide-react';
+import { Shift, VoidLog, User, Table } from '../types';
 import { format, isAfter, subDays } from 'date-fns';
 import { cn } from '../lib/utils';
 
@@ -15,9 +15,7 @@ export const ShiftView = ({
   tables = [],
   attendanceStatus = 'none',
   onScanQR,
-  isAttendanceAllowed = true,
-  onAddCashTransaction,
-  settings
+  isAttendanceAllowed = true
 }: { 
   activeShift: Shift | null, 
   allActiveShifts?: Shift[],
@@ -29,9 +27,7 @@ export const ShiftView = ({
   tables?: Table[],
   attendanceStatus?: 'none' | 'checked_in' | 'checked_out',
   onScanQR?: () => void,
-  isAttendanceAllowed?: boolean,
-  onAddCashTransaction?: (transaction: Omit<CashTransaction, 'id' | 'storeId'>) => Promise<void>,
-  settings?: SystemSettings
+  isAttendanceAllowed?: boolean
 }) => {
   const [showOpenModal, setShowOpenModal] = React.useState(false);
   const [showCloseModal, setShowCloseModal] = React.useState(false);
@@ -42,15 +38,6 @@ export const ShiftView = ({
   const [showCheckinReminder, setShowCheckinReminder] = React.useState(false);
   const [showCheckoutReminder, setShowCheckoutReminder] = React.useState(false);
   const [dontRemind, setDontRemind] = React.useState(false);
-
-  // Quick cash transaction inside shift
-  const [showCashModal, setShowCashModal] = React.useState<'expense' | 'income' | null>(null);
-  const [cashTxAmount, setCashTxAmount] = React.useState(0);
-  const [cashTxAmountStr, setCashTxAmountStr] = React.useState('');
-  const [cashTxMethod, setCashTxMethod] = React.useState<'cash' | 'transfer'>('cash');
-  const [cashTxCategory, setCashTxCategory] = React.useState('');
-  const [cashTxNote, setCashTxNote] = React.useState('');
-  const [isSavingCashTx, setIsSavingCashTx] = React.useState(false);
 
   const isAdminOrManager = currentUser?.role === 'admin' || currentUser?.role === 'manager';
   const isOrderOnly = currentUser?.role === 'order';
@@ -88,55 +75,6 @@ export const ShiftView = ({
     } else {
       setCashAmount(num);
       setCashAmountStr(num.toLocaleString('vi-VN'));
-    }
-  };
-
-  const handleOpenCashModal = (type: 'expense' | 'income') => {
-    setShowCashModal(type);
-    setCashTxAmount(0);
-    setCashTxAmountStr('');
-    setCashTxMethod('cash');
-    setCashTxCategory(type === 'expense' ? 'Tiền điện' : 'Thu khác');
-    setCashTxNote('');
-  };
-
-  const handleCashTxAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    const digits = val.replace(/\D/g, '');
-    const num = Number(digits);
-    if (!digits) {
-      setCashTxAmount(0);
-      setCashTxAmountStr('');
-    } else {
-      setCashTxAmount(num);
-      setCashTxAmountStr(num.toLocaleString('vi-VN'));
-    }
-  };
-
-  const handleSaveCashTransaction = async () => {
-    if (!onAddCashTransaction || !showCashModal || isSavingCashTx) return;
-    if (cashTxAmount <= 0) {
-      alert('Vui lòng nhập số tiền hợp lệ lớn hơn 0đ.');
-      return;
-    }
-    const category = cashTxCategory.trim() || (showCashModal === 'expense' ? 'Chi khác' : 'Thu khác');
-    setIsSavingCashTx(true);
-    try {
-      await onAddCashTransaction({
-        date: new Date().toISOString(),
-        type: showCashModal,
-        amount: cashTxAmount,
-        paymentMethod: cashTxMethod,
-        category,
-        note: cashTxNote.trim(),
-        staffId: currentUser?.id,
-        staffName: currentUser?.name
-      });
-      setShowCashModal(null);
-    } catch (err: any) {
-      alert(err?.message || 'Có lỗi khi tạo phiếu thu/chi.');
-    } finally {
-      setIsSavingCashTx(false);
     }
   };
 
@@ -284,28 +222,6 @@ export const ShiftView = ({
                     <p className="text-xs text-emerald-700 dark:text-emerald-400 uppercase font-bold">Tiền mặt dự kiến tại két</p>
                     <p className="text-xl font-mono font-bold text-emerald-600 dark:text-emerald-500">{((activeShift.startCash || 0) + (activeShift.totalCash || 0)).toLocaleString()}đ</p>
                   </div>
-                </div>
-              )}
-
-              {/* Quick Expense / Income buttons inside active shift */}
-              {onAddCashTransaction && (
-                <div className="pt-4 border-t border-black/10 dark:border-white/10 relative z-10 flex flex-col sm:flex-row gap-3">
-                  <button
-                    type="button"
-                    onClick={() => handleOpenCashModal('expense')}
-                    className="flex-1 py-3 px-4 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/20 font-bold text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-sm"
-                  >
-                    <ArrowUpFromLine className="w-4 h-4" />
-                    Tạo phiếu chi
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenCashModal('income')}
-                    className="flex-1 py-3 px-4 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 font-bold text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-sm"
-                  >
-                    <ArrowDownToLine className="w-4 h-4" />
-                    Tạo phiếu thu
-                  </button>
                 </div>
               )}
 
@@ -769,187 +685,6 @@ export const ShiftView = ({
                 className="px-6 py-3 bg-black/10 dark:bg-white/10 hover:bg-white/20 rounded-xl font-bold transition-all"
               >
                 Đóng
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Quick Cash Transaction Modal in Shift */}
-      {showCashModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200">
-          <div className="bg-white dark:bg-[#1a1b1e] w-full max-w-md rounded-3xl p-6 md:p-8 border border-black/10 dark:border-white/10 shadow-2xl space-y-5">
-            <div className="flex justify-between items-center">
-              <div className="flex items-center gap-2.5">
-                <div className={cn(
-                  "w-10 h-10 rounded-xl flex items-center justify-center",
-                  showCashModal === 'expense' ? "bg-rose-500/10 text-rose-600 dark:text-rose-400" : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                )}>
-                  {showCashModal === 'expense' ? <ArrowUpFromLine className="w-5 h-5" /> : <ArrowDownToLine className="w-5 h-5" />}
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold text-gray-900 dark:text-white">
-                    Tạo phiếu {showCashModal === 'expense' ? 'chi' : 'thu'} trong ca
-                  </h3>
-                  <p className="text-xs text-gray-500">Ghi nhận giao dịch tài chính phát sinh</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setShowCashModal(null)} 
-                className="text-gray-400 hover:text-gray-700 dark:hover:text-white p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs text-gray-500 uppercase font-bold mb-1.5 block">
-                  Phương thức thanh toán <span className="text-rose-500">*</span>
-                </label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setCashTxMethod('cash')}
-                    className={cn(
-                      "py-3 px-4 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition-all cursor-pointer",
-                      cashTxMethod === 'cash' 
-                        ? "bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-500/20" 
-                        : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-700 dark:text-gray-300 hover:bg-black/10 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <Banknote className="w-4 h-4" />
-                    <span>Tiền mặt</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCashTxMethod('transfer')}
-                    className={cn(
-                      "py-3 px-4 rounded-xl text-xs font-bold border flex items-center justify-center gap-2 transition-all cursor-pointer",
-                      cashTxMethod === 'transfer' 
-                        ? "bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-600/20" 
-                        : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-700 dark:text-gray-300 hover:bg-black/10 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <CreditCard className="w-4 h-4" />
-                    <span>Chuyển khoản</span>
-                  </button>
-                </div>
-                <div className={cn(
-                  "mt-2 p-2.5 rounded-xl text-[11px] leading-relaxed border flex items-start gap-2",
-                  cashTxMethod === 'cash'
-                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-400"
-                    : "bg-blue-500/10 border-blue-500/20 text-blue-700 dark:text-blue-400"
-                )}>
-                  {cashTxMethod === 'cash' ? (
-                    <>
-                      <Banknote className="w-4 h-4 shrink-0 mt-0.5" />
-                      <span><strong>Tiền mặt:</strong> {showCashModal === 'expense' ? 'Trừ trực tiếp' : 'Cộng trực tiếp'} vào két tiền của ca, ảnh hưởng tiền mặt dự kiến khi kiểm kê đóng ca.</span>
-                    </>
-                  ) : (
-                    <>
-                      <CreditCard className="w-4 h-4 shrink-0 mt-0.5" />
-                      <span><strong>Chuyển khoản:</strong> Ghi nhận vào số dư ngân hàng, <strong>không</strong> làm thay đổi tiền mặt tại két của ca.</span>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs text-gray-500 uppercase font-bold mb-1.5 block">
-                  Số tiền <span className="text-rose-500">*</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="0"
-                    value={cashTxAmountStr}
-                    onChange={handleCashTxAmountChange}
-                    className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-lg font-mono font-bold text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
-                  />
-                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-gray-400 font-bold">VNĐ</span>
-                </div>
-                <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1 custom-scrollbar">
-                  {[50000, 100000, 200000, 500000].map(amt => (
-                    <button
-                      key={amt}
-                      type="button"
-                      onClick={() => {
-                        const newAmt = cashTxAmount + amt;
-                        setCashTxAmount(newAmt);
-                        setCashTxAmountStr(newAmt.toLocaleString('vi-VN'));
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-xs font-mono text-gray-700 dark:text-gray-300 shrink-0 cursor-pointer transition-all"
-                    >
-                      +{amt.toLocaleString('vi-VN')}đ
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs text-gray-500 uppercase font-bold mb-1.5 block">Hạng mục</label>
-                <div className="space-y-2">
-                  <select
-                    value={(settings?.cashCategories || []).includes(cashTxCategory) ? cashTxCategory : '__custom__'}
-                    onChange={(e) => {
-                      if (e.target.value !== '__custom__') {
-                        setCashTxCategory(e.target.value);
-                      }
-                    }}
-                    className="w-full bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-xl py-2.5 px-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500"
-                  >
-                    {(settings?.cashCategories || ['Tiền điện', 'Tiền nước', 'Tiền mặt bằng', 'Nhập hàng', 'Lương nhân viên', 'Khác'])
-                      .filter(c => c !== 'Bán hàng')
-                      .map(cat => (
-                        <option key={cat} value={cat}>{cat}</option>
-                      ))}
-                    <option value="__custom__">Hạng mục tự nhập...</option>
-                  </select>
-                  <input
-                    type="text"
-                    placeholder="Nhập tên hạng mục nếu khác..."
-                    value={cashTxCategory}
-                    onChange={(e) => setCashTxCategory(e.target.value)}
-                    className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-2.5 px-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs text-gray-500 uppercase font-bold mb-1.5 block">Ghi chú chi tiết</label>
-                <textarea
-                  rows={2}
-                  placeholder="VD: Mua đá lạnh khẩn cấp, trả ship nguyên liệu..."
-                  value={cashTxNote}
-                  onChange={(e) => setCashTxNote(e.target.value)}
-                  className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-2 px-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500 resize-none"
-                />
-              </div>
-            </div>
-
-            <div className="flex gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowCashModal(null)}
-                disabled={isSavingCashTx}
-                className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-700 dark:text-gray-300 font-bold hover:bg-black/5 dark:hover:bg-white/5 transition-all cursor-pointer disabled:opacity-50"
-              >
-                Hủy
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveCashTransaction}
-                disabled={isSavingCashTx || cashTxAmount <= 0}
-                className={cn(
-                  "flex-1 py-3 rounded-xl font-bold transition-all text-white shadow-lg cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2",
-                  showCashModal === 'expense'
-                    ? "bg-rose-500 hover:bg-rose-600 shadow-rose-500/20"
-                    : "bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20"
-                )}
-              >
-                {isSavingCashTx ? 'Đang lưu...' : (showCashModal === 'expense' ? 'Xác nhận chi' : 'Xác nhận thu')}
               </button>
             </div>
           </div>
