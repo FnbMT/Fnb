@@ -24,6 +24,7 @@ import deleteStoreHandler from "./api/delete-store";
 import registerStoreHandler from "./api/register-store";
 import resetPasswordHandler from "./api/reset-password";
 import migrateStoreHandler from "./api/migrate-store";
+import syncLegacyUsersHandler from "./api/sync-legacy-users";
 import { hasAdminCredential, getAdminStatus } from "./api/_firebaseAdmin";
 
 export interface ServerReadiness {
@@ -196,6 +197,7 @@ export async function createApp(): Promise<express.Application> {
   app.post('/api/delete-store', (req, res) => deleteStoreHandler(req, res));
   app.post('/api/register-store', (req, res) => registerStoreHandler(req, res));
   app.post('/api/migrate-store', (req, res) => migrateStoreHandler(req, res));
+  app.all('/api/sync-legacy-users', (req, res) => syncLegacyUsersHandler(req, res));
 
   const distPath = path.join(process.cwd(), 'dist');
   const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
