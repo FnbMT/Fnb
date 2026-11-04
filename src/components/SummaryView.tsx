@@ -416,8 +416,8 @@ export const SummaryView = ({
   const [hasMoreLogs, setHasMoreLogs] = useState(false);
   const [lastLogDoc, setLastLogDoc] = useState<QueryDocumentSnapshot | null>(null);
   const [isLoadingMoreLogs, setIsLoadingMoreLogs] = useState(false);
-  const [invoiceQueryConfig, setInvoiceQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'modern', ordered: true });
-  const [cashQueryConfig, setCashQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'modern', ordered: true });
+  const [invoiceQueryConfig, setInvoiceQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'modern', ordered: false });
+  const [cashQueryConfig, setCashQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'modern', ordered: false });
 
   // Request ID guard để chống đua lệnh (race condition / abort) khi người dùng đổi ngày/kỳ nhanh
   const activeRequestId = useRef(0);
@@ -553,7 +553,11 @@ export const SummaryView = ({
         snap = await getDocs(nextQuery);
       } catch (qErr: any) {
         if (qErr?.code === 'failed-precondition') {
-          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+          try {
+            snap = await getDocs(buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, lastInvoiceDoc, 30));
+          } catch (_) {
+            snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), where('businessDate', '==', dateFilter.slice(0, 10)), limit(100)));
+          }
         } else {
           throw qErr;
         }
@@ -635,8 +639,12 @@ export const SummaryView = ({
         snap = await getDocs(nextQuery);
       } catch (qErr: any) {
         if (qErr?.code === 'failed-precondition') {
-          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
-        } else {
+            try {
+              snap = await getDocs(buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, cursor, 100));
+            } catch (_) {
+              snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), where('businessDate', '==', dateFilter.slice(0, 10)), limit(100)));
+            }
+          } else {
           throw qErr;
         }
       }
@@ -704,7 +712,11 @@ export const SummaryView = ({
         snap = await getDocs(nextQuery);
       } catch (qErr: any) {
         if (qErr?.code === 'failed-precondition') {
-          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+          try {
+            snap = await getDocs(buildCashQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, lastCashDoc, 30));
+          } catch (_) {
+            snap = await getDocs(query(collection(db, 'cash_transactions'), where('storeId', '==', storeId), limit(100)));
+          }
         } else {
           throw qErr;
         }
@@ -768,7 +780,7 @@ export const SummaryView = ({
         snap = await getDocs(nextQuery);
       } catch (qErr: any) {
         if (qErr?.code === 'failed-precondition') {
-          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
+          snap = await getDocs(query(collection(db, 'inventory_logs'), where('storeId', '==', storeId), limit(100)));
         } else {
           throw qErr;
         }
@@ -837,8 +849,8 @@ export const SummaryView = ({
         snap = await getDocs(nextQuery);
       } catch (qErr: any) {
         if (qErr?.code === 'failed-precondition') {
-          snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), limit(100)));
-        } else {
+            snap = await getDocs(query(collection(db, 'inventory_logs'), where('storeId', '==', storeId), limit(100)));
+          } else {
           throw qErr;
         }
       }

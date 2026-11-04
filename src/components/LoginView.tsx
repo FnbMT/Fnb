@@ -99,7 +99,7 @@ export const LoginView = ({
 
   const handleResetServerUrl = () => {
     setCustomApiUrl('');
-    setServerInputUrl(getApiBaseUrl());
+    setServerInputUrl(getApiBaseUrl() || "https://fnb-master.vercel.app");
     setServerTestResult(null);
   };
 
@@ -109,28 +109,64 @@ export const LoginView = ({
   }, [initialStoreCode, initialUsername]);
 
   useEffect(() => {
+    let isMounted = true;
     const checkConnection = async () => {
       try {
-        // Cài đặt bộ đếm thời gian 15 giây để chống treo vô hạn
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          if (isMounted) {
+            setConnectionStatus('offline');
+            setDebugInfo('Thiết bị đang không có kết nối Internet.');
+          }
+          return;
+        }
+
+        // 1. Ưu tiên kiểm tra backend API /api/health (chính là máy chủ xử lý đăng nhập)
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 4000);
+          const healthResp = await fetch(apiUrl('/api/health'), { signal: controller.signal });
+          clearTimeout(timer);
+          if (healthResp.ok) {
+            if (isMounted) {
+              setConnectionStatus('online');
+              setDebugInfo('');
+            }
+            return;
+          }
+        } catch (_) {
+          // Nếu backend tạm thời chưa phản hồi, thử tiếp qua Firebase
+        }
+
+        // 2. Kiểm tra kết nối Firestore qua document stores công khai (allow read: if true)
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('TIMEOUT_15S')), 15000)
+          setTimeout(() => reject(new Error('TIMEOUT_10S')), 10000)
         );
-        // Kiểm tra kết nối qua tài liệu cài đặt công khai thay vì đọc bảng users
-        const queryPromise = getDoc(doc(db, 'app_settings', 'android_version'));
-        
+        const queryPromise = getDoc(doc(db, 'stores', '_ping'));
         await Promise.race([queryPromise, timeoutPromise]);
         
-        setConnectionStatus('online');
+        if (isMounted) {
+          setConnectionStatus('online');
+          setDebugInfo('');
+        }
       } catch (err: any) {
-        console.error('Firebase connection check failed:', err);
-        setConnectionStatus('offline');
+        if (!isMounted) return;
+        // Nếu lỗi là permission-denied thì máy chủ Firebase hoàn toàn bình thường và online,
+        // chỉ là tài liệu chưa cấp quyền cho khách vãng lai trước khi đăng nhập
+        if (err?.code === 'permission-denied') {
+          setConnectionStatus('online');
+          setDebugInfo('');
+          return;
+        }
         
-        const errMsg = err?.message || err?.toString() || 'Unknown error';
+        console.warn('Connection check failed:', err);
+        setConnectionStatus('offline');
+        const errMsg = err?.message || err?.toString() || 'Lỗi mạng';
         const errCode = err?.code ? ` [Code: ${err.code}]` : '';
         setDebugInfo(`${errMsg}${errCode}`);
       }
     };
     checkConnection();
+    return () => { isMounted = false; };
   }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -508,14 +544,14 @@ export const LoginView = ({
                   <Globe className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   <input
                     type="url"
-                    placeholder="https://fnb-xxx.vercel.app"
+                    placeholder="https://fnb-master.vercel.app"
                     value={serverInputUrl}
                     onChange={(e) => setServerInputUrl(e.target.value)}
                     className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-2.5 pl-10 pr-3 text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500"
                   />
                 </div>
                 <p className="text-[11px] text-gray-400 leading-relaxed">
-                  💡 Nhập link dự án Vercel của bạn (ví dụ <span className="font-mono text-emerald-400">https://fnb-20.vercel.app</span>). Khi lưu, ứng dụng Android sẽ gọi trực tiếp đến server này.
+                  💡 Nhập link dự án Vercel của bạn (ví dụ <span className="font-mono text-emerald-400">https://fnb-master.vercel.app</span>). Khi lưu, ứng dụng Android sẽ gọi trực tiếp đến server này.
                 </p>
 
                 {serverTestResult && (

@@ -11,8 +11,11 @@ export function getApiBaseUrl(): string {
   const savedUrl = localStorage.getItem('fnb_backend_api_url');
   if (savedUrl && savedUrl.trim().length > 0) {
     const trimmed = savedUrl.trim().replace(/\/+$/, '');
-    // Tự động bỏ qua URL Cloud Run cũ đã ngừng hoạt động
-    if (!trimmed.includes('asia-southeast1.run.app')) {
+    // Tự động bỏ qua URL Cloud Run cũ đã ngừng hoạt động hoặc link placeholder không hợp lệ
+    const isDefunct = trimmed.includes('asia-southeast1.run.app') || 
+                      trimmed.includes('fnb-20.vercel.app') ||
+                      trimmed === 'https://fnb-xxx.vercel.app';
+    if (!isDefunct) {
       return trimmed;
     } else {
       localStorage.removeItem('fnb_backend_api_url');
@@ -48,7 +51,7 @@ export function getCustomApiUrl(): string {
 
 export function setCustomApiUrl(url: string): void {
   const clean = url.trim().replace(/\/+$/, '');
-  if (!clean) {
+  if (!clean || clean.includes('asia-southeast1.run.app') || clean.includes('fnb-20.vercel.app') || clean === 'https://fnb-xxx.vercel.app') {
     localStorage.removeItem('fnb_backend_api_url');
   } else {
     localStorage.setItem('fnb_backend_api_url', clean);
@@ -63,4 +66,3 @@ export function apiUrl(endpoint: string): string {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   return `${base}${cleanEndpoint}`;
 }
-
