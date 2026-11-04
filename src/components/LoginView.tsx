@@ -349,6 +349,9 @@ export const LoginView = ({
               <input 
                 type="text" 
                 placeholder="Mã cửa hàng"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl py-4 pl-12 pr-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-all"
                 value={storeCode}
                 onChange={(e) => setStoreCode(e.target.value)}
@@ -360,6 +363,9 @@ export const LoginView = ({
               <input 
                 type="text" 
                 placeholder="Tên đăng nhập"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl py-4 pl-12 pr-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-all"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -371,6 +377,9 @@ export const LoginView = ({
               <input 
                 type="password" 
                 placeholder="Mật khẩu"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl py-4 pl-12 pr-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-all"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

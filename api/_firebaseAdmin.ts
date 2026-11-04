@@ -1,6 +1,5 @@
 import { initializeApp as initAdminApp, getApps as getAdminApps, cert } from 'firebase-admin/app';
 import { getFirestore as getAdminFirestore, FieldValue } from 'firebase-admin/firestore';
-import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { initializeApp as initClientApp, getApps as getClientApps } from 'firebase/app';
 import {
   getFirestore as getClientFirestore,
@@ -99,13 +98,27 @@ if (hasAdminCredential) {
     }
     if (rawAdminApp) {
       rawAdminDb = getAdminFirestore(rawAdminApp);
-      rawAdminAuth = getAdminAuth(rawAdminApp);
     }
   } catch (err: any) {
     adminInitError = err?.message || String(err);
     console.warn("[FirebaseAdmin] Failed to initialize Firebase Admin with service account:", err);
   }
 }
+
+// Hàm khởi tạo Auth bất đồng bộ (tránh sập module tĩnh khi khởi động serverless)
+const getRawAdminAuth = async () => {
+  if (rawAdminAuth) return rawAdminAuth;
+  if (!rawAdminApp) return null;
+  try {
+    const { getAuth } = await import('firebase-admin/auth');
+    rawAdminAuth = getAuth(rawAdminApp);
+    return rawAdminAuth;
+  } catch (err: any) {
+    adminInitError = err?.message || String(err);
+    console.warn("[FirebaseAdmin] Failed to initialize Firebase Admin Auth:", err);
+    return null;
+  }
+};
 
 // 2. Khởi tạo Firebase Client SDK trên server (làm cầu nối fallback siêu tốc và an toàn cho dev/preview)
 let _cachedClientDb: any = null;
@@ -568,9 +581,10 @@ export const adminDb = {
 // 5. Unified adminAuth: Xác thực và ký token qua Firebase Admin SDK chính thức
 export const adminAuth = {
   async createCustomToken(uid: string, developerClaims?: Record<string, any>): Promise<string | null> {
-    if (hasAdminCredential && rawAdminAuth) {
+    const auth = await getRawAdminAuth();
+    if (hasAdminCredential && auth) {
       try {
-        return await rawAdminAuth.createCustomToken(uid, developerClaims);
+        return await auth.createCustomToken(uid, developerClaims);
       } catch (err: any) {
         console.warn("[AdminAuth] createCustomToken error:", err.message);
         return null;
@@ -586,16 +600,18 @@ export const adminAuth = {
     if (token.startsWith('dev_token_')) {
       throw new Error('[Security Error] Từ chối token giả lập (dev_token) - cơ chế bị loại bỏ hoàn toàn.');
     }
-    if (hasAdminCredential && rawAdminAuth) {
-      return await rawAdminAuth.verifyIdToken(token);
+    const auth = await getRawAdminAuth();
+    if (hasAdminCredential && auth) {
+      return await auth.verifyIdToken(token);
     }
     throw new Error('[Security Error] Firebase Admin SDK chưa được cấu hình Service Account hợp lệ để xác minh chữ ký token.');
   },
 
   async revokeRefreshTokens(uid: string): Promise<void> {
-    if (hasAdminCredential && rawAdminAuth) {
+    const auth = await getRawAdminAuth();
+    if (hasAdminCredential && auth) {
       try {
-        await rawAdminAuth.revokeRefreshTokens(uid);
+        await auth.revokeRefreshTokens(uid);
       } catch (err: any) {
         console.warn("[AdminAuth] revokeRefreshTokens error for uid:", uid, err?.message || err);
       }

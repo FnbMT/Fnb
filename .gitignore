@@ -12,6 +12,10 @@ coverage/
 local.properties
 **/local.properties
 android/build_apk/
+android/build_out/
 dist_old/
+dist_backup_now/
+*_bak/
+android/*_bak/
 android/app/src/main/assets/public_old/
 

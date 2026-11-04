@@ -23,7 +23,7 @@ allprojects {
         google()
         mavenCentral()
     }
-    layout.buildDirectory.set(file("${rootDir}/build_apk/${project.name}"))
+    layout.buildDirectory.set(file("${rootDir}/build_out/${project.name}"))
 }
 
 task clean(type: Delete) {
