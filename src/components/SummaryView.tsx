@@ -5,12 +5,27 @@ import { format, isSameDay, isSameMonth, isSameYear, parseISO, startOfMonth, end
 import { cn } from '../lib/utils';
 import * as XLSX from 'xlsx';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot, onSnapshot, writeBatch, updateDoc, Query } from 'firebase/firestore';
-import { getDateRangeIso, getVietnamBusinessDate, getVietnamYesterdayDate } from '../utils/firestoreDateHelper';
+import { collection, query, where, getDocs, getDocsFromServer, orderBy, limit, startAfter, doc, getDoc, QueryDocumentSnapshot, onSnapshot, writeBatch, updateDoc, Query, runTransaction, getDocFromServer } from 'firebase/firestore';
+import { getDateRangeIso, getVietnamBusinessDate, getVietnamYesterdayDate, getVietnamDayBoundariesIso } from '../utils/firestoreDateHelper';
 import { calculateInvoiceCost, calculateInvoiceCostSnapshot, isCostExplicitlyVerified } from '../utils/costHelper';
 import { isCashPayment, isReconciledDailyStat } from '../utils/reportDataIntegrity';
-import { dailyStatsFromSources, invoiceCostIsComplete, operationId, receiptMismatch, isSalesCategory, allocatedItemRevenue } from '../utils/dataIntegrity';
-import { subscribeDateRange } from '../utils/completeDataSource';
+import { invoiceCostIsComplete, operationId, receiptMismatch, isSalesCategory, allocatedItemRevenue, validInvoiceAmount, validCashAmount, reconcileDay } from '../utils/dataIntegrity';
+import { subscribeDateRange, fetchDateRangeRows, fetchFinancialPeriodSources } from '../utils/completeDataSource';
+import { subscribeSharedQuery } from '../utils/sharedFirestoreQuery';
+import { mergeDaySources, reconciledSource, verifiedDayCost, contiguousDateRanges, cashBookTotals, aggregateReportDays } from '../utils/reportSources';
+import { legacyReceiptCandidates, MissingInvoiceReceiptError, type InvoiceCancellation } from '../services/dataOperations';
+import { checkStoreTabPermission } from '../utils/packagePermissions';
+
+export function safeFormatDate(dateVal: any, formatStr: string = 'HH:mm dd/MM/yyyy', fallback: string = '—'): string {
+  if (!dateVal) return fallback;
+  try {
+    const d = typeof dateVal === 'string' ? parseISO(dateVal) : new Date(dateVal);
+    if (isNaN(d.getTime())) return fallback;
+    return format(d, formatStr);
+  } catch {
+    return fallback;
+  }
+}
 
 // Hàm xác định toàn bộ danh sách ngày dự kiến trong kỳ (không lấy ngày tương lai vượt quá hôm nay)
 function getExpectedPeriodDates(dateFilter: string, filterType: 'day' | 'month' | 'year', todayStr: string): string[] {
@@ -155,19 +170,8 @@ const buildInvoiceQuery = (
   cursor?: QueryDocumentSnapshot | null,
   pageSize = 30
 ) => {
-  const constraints: any[] = [where('storeId', '==', storeId)];
-  if (mode === 'legacy') {
-    constraints.push(where('date', '>=', startIso));
-    constraints.push(where('date', '<', endExclusiveIso));
-  } else {
-    const filterField = filterType === 'day' ? 'businessDate' : filterType === 'month' ? 'businessMonth' : 'businessYear';
-    const filterVal = filterType === 'day' ? dateFilter.slice(0, 10) : filterType === 'month' ? dateFilter.slice(0, 7) : (parseInt(dateFilter.slice(0, 4), 10) || new Date().getFullYear());
-    constraints.push(where(filterField, '==', filterVal));
-  }
-
-  if (ordered) {
-    constraints.push(orderBy('date', 'desc'));
-  }
+  const constraints: any[] = [where('storeId', '==', storeId), where('date', '>=', startIso),
+    where('date', '<', endExclusiveIso), orderBy('date', 'desc')];
 
   if (cursor) {
     constraints.push(startAfter(cursor));
@@ -188,19 +192,8 @@ const buildCashQuery = (
   cursor?: QueryDocumentSnapshot | null,
   pageSize = 30
 ) => {
-  const constraints: any[] = [where('storeId', '==', storeId)];
-  if (mode === 'legacy') {
-    constraints.push(where('date', '>=', startIso));
-    constraints.push(where('date', '<', endExclusiveIso));
-  } else {
-    const filterField = filterType === 'day' ? 'businessDate' : filterType === 'month' ? 'businessMonth' : 'businessYear';
-    const filterVal = filterType === 'day' ? dateFilter.slice(0, 10) : filterType === 'month' ? dateFilter.slice(0, 7) : (parseInt(dateFilter.slice(0, 4), 10) || new Date().getFullYear());
-    constraints.push(where(filterField, '==', filterVal));
-  }
-
-  if (ordered) {
-    constraints.push(orderBy('date', 'desc'));
-  }
+  const constraints: any[] = [where('storeId', '==', storeId), where('date', '>=', startIso),
+    where('date', '<', endExclusiveIso), orderBy('date', 'desc')];
 
   if (cursor) {
     constraints.push(startAfter(cursor));
@@ -233,6 +226,7 @@ const buildLogQuery = (
 export const SummaryView = ({ 
   invoices, 
   isInvoicesReady = true,
+  todaySourceEnabled = false,
   inventoryLogs, 
   cashTransactions, 
   payrollRecords, 
@@ -248,17 +242,19 @@ export const SummaryView = ({
   businessDate,
   menu = [],
   inventoryItems = [],
-  onNavigateToMenu
+  onNavigateToMenu,
+  packages = []
 }: { 
   invoices: Invoice[], 
   isInvoicesReady?: boolean,
+  todaySourceEnabled?: boolean,
   inventoryLogs: InventoryTransaction[],
   cashTransactions: CashTransaction[],
   payrollRecords: PayrollRecord[],
   shifts?: Shift[],
   activeShift?: Shift | null,
   onAddCashTransaction: (t: Omit<CashTransaction, 'id' | 'storeId'>, id?: string) => Promise<void>,
-  onDeleteInvoice?: (invoiceId: string) => Promise<boolean> | boolean,
+  onDeleteInvoice?: (invoiceId: string, confirmedReceiptId?: string) => Promise<InvoiceCancellation>,
   currentUser: User | null,
   settings: SystemSettings,
   onUpdateSettings: (s: SystemSettings) => void,
@@ -267,10 +263,15 @@ export const SummaryView = ({
   businessDate?: string,
   menu?: MenuItem[],
   inventoryItems?: any[],
-  onNavigateToMenu?: () => void
+  onNavigateToMenu?: () => void,
+  packages?: any[]
 }) => {
   const isAdmin = currentUser?.role === 'admin';
   const isAdminOrManager = currentUser?.role === 'admin' || currentUser?.role === 'manager';
+  const currentPackageId = currentUser?.store?.subscription?.packageId || 'trial';
+  const currentPkg = packages.find((p: any) => p?.id === currentPackageId);
+  const isFinancialReportsUnlocked = checkStoreTabPermission('reports', currentUser, packages);
+  const isHistoryLimitedToDaily = currentPkg?.features?.invoiceHistory === 'daily';
   const [activeTab, setActiveTab] = useState<'sales' | 'inventory' | 'items' | 'cash' | 'financial'>('sales');
   
   // Khởi tạo ngày theo múi giờ Việt Nam đồng bộ với App.tsx
@@ -281,6 +282,12 @@ export const SummaryView = ({
   const [taxRevenueType, setTaxRevenueType] = useState<'under_1b' | 'over_1b'>('under_1b');
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [confirmDeleteInvoice, setConfirmDeleteInvoice] = useState<Invoice | null>(null);
+  const [cancelError, setCancelError] = useState('');
+  const [receiptReview, setReceiptReview] = useState<{ invoiceId: string; candidates: CashTransaction[]; selectedId: string } | null>(null);
+  useEffect(() => {
+    setCancelError('');
+    setReceiptReview(null);
+  }, [confirmDeleteInvoice?.id]);
   const [isDeletingInvoice, setIsDeletingInvoice] = useState(false);
   const [showMissingCostModal, setShowMissingCostModal] = useState(false);
   const [onlyShowMissingCostItems, setOnlyShowMissingCostItems] = useState(false);
@@ -359,10 +366,12 @@ export const SummaryView = ({
 
   interface RawDataScope {
     periodKey: string;
-    startDay: string;
-    endDay: string;
     invoicesConfirmed: boolean;
+    invoicesStartDay: string;
+    invoicesEndDay: string;
     cashConfirmed: boolean;
+    cashStartDay: string;
+    cashEndDay: string;
     isFullPeriod: boolean;
   }
 
@@ -370,26 +379,13 @@ export const SummaryView = ({
   const [dailyStatsReady, setDailyStatsReady] = useState(false);
   const [rawScope, setRawScope] = useState<RawDataScope>({
     periodKey: '',
-    startDay: '',
-    endDay: '',
     invoicesConfirmed: false,
+    invoicesStartDay: '',
+    invoicesEndDay: '',
     cashConfirmed: false,
+    cashStartDay: '',
+    cashEndDay: '',
     isFullPeriod: false
-  });
-  const activeRawSubRef = useRef<{
-    periodKey: string;
-    subKey?: string;
-    startDay: string;
-    endDay: string;
-    unsubInv: (() => void) | null;
-    unsubCash: (() => void) | null;
-  }>({
-    periodKey: '',
-    subKey: '',
-    startDay: '',
-    endDay: '',
-    unsubInv: null,
-    unsubCash: null
   });
   const [historicalInvoices, setHistoricalInvoices] = useState<Invoice[]>([]);
   const [historicalCash, setHistoricalCash] = useState<CashTransaction[]>([]);
@@ -398,11 +394,7 @@ export const SummaryView = ({
   const [isLoadingHistorical, setIsLoadingHistorical] = useState(false);
   const needsInv = activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial';
   const needsCash = activeTab === 'cash' || activeTab === 'financial';
-  const reportDataReady = Boolean(
-    rawScope.isFullPeriod &&
-    (!needsInv || rawScope.invoicesConfirmed) &&
-    (!needsCash || rawScope.cashConfirmed)
-  );
+  const usesParentToday = todaySourceEnabled && getExpectedPeriodDates(dateFilter, filterType, todayVietnam).includes(todayVietnam);
   const [reportError, setReportError] = useState('');
   const [payrollDataReady, setPayrollDataReady] = useState(false);
   const [isSavingCash, setIsSavingCash] = useState(false);
@@ -416,36 +408,74 @@ export const SummaryView = ({
   const [hasMoreLogs, setHasMoreLogs] = useState(false);
   const [lastLogDoc, setLastLogDoc] = useState<QueryDocumentSnapshot | null>(null);
   const [isLoadingMoreLogs, setIsLoadingMoreLogs] = useState(false);
-  const [invoiceQueryConfig, setInvoiceQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'modern', ordered: false });
-  const [cashQueryConfig, setCashQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'modern', ordered: false });
+  const [invoiceQueryConfig, setInvoiceQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'legacy', ordered: true });
+  const [cashQueryConfig, setCashQueryConfig] = useState<{ mode: 'modern' | 'legacy', ordered: boolean }>({ mode: 'legacy', ordered: true });
 
   // Request ID guard để chống đua lệnh (race condition / abort) khi người dùng đổi ngày/kỳ nhanh
   const activeRequestId = useRef(0);
+  const periodKey = `${currentUser?.storeId}_${dateFilter}_${filterType}`;
+  const currentPeriodRef = useRef(periodKey);
+  currentPeriodRef.current = periodKey;
+  const [inventoryDataReady, setInventoryDataReady] = useState(false);
+  const [statsLoaded, setStatsLoaded] = useState(false);
+  const [statsPeriodKey, setStatsPeriodKey] = useState('');
+  const [statsFailed, setStatsFailed] = useState(false);
+  const reportDataReady = Boolean(
+    filterType === 'day'
+      ? (rawScope.periodKey === periodKey && rawScope.isFullPeriod &&
+          (!needsInv || rawScope.invoicesConfirmed) &&
+          (!needsCash || rawScope.cashConfirmed) && (!usesParentToday || isInvoicesReady))
+      : (statsLoaded && (dailyStatsReady || statsFailed) &&
+          (!needsInv || rawScope.invoicesConfirmed) &&
+          (!needsCash || rawScope.cashConfirmed) && (!usesParentToday || isInvoicesReady))
+  );
+  const [supplemental, setSupplemental] = useState<{ key: string; invoices: Invoice[]; cash: CashTransaction[]; invoiceDays: string[]; cashDays: string[] }>({ key: '', invoices: [], cash: [], invoiceDays: [], cashDays: [] });
+  const [isExporting, setIsExporting] = useState(false);
+  const exportLock = useRef(false);
+  const pageLocks = useRef(new Set<string>());
+  const detailNeeds = { invoices: filterType === 'day' || needsInv, cash: filterType === 'day' || needsCash,
+    todayReady: !usesParentToday || isInvoicesReady };
+  const detailNeedsRef = useRef(detailNeeds);
+  detailNeedsRef.current = detailNeeds;
+  const detailController = useRef<{ ensure: (invoices: boolean, cash: boolean) => void } | null>(null);
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+
 
   // Gộp dữ liệu: Dữ liệu thời gian thực hôm nay (Live) PHẢI GHI ĐÈ LÊN Lịch sử để bản mới nhất luôn thắng, lọc đúng quán hiện tại
   const allInvoices = useMemo(() => {
     const storeId = currentUser?.storeId;
     const map = new Map<string, Invoice>();
     historicalInvoices.forEach(i => {
-      if ((!storeId || i.storeId === storeId) && i.status !== 'cancelled') map.set(i.id, i);
+      if ((!storeId || i.storeId === storeId) && i.status !== 'cancelled' && !(isInvoicesReady && (i.businessDate || getVietnamBusinessDate(i.date)) === todayVietnam) && !(supplemental.key === periodKey && supplemental.invoiceDays.includes(i.businessDate || getVietnamBusinessDate(i.date)))) map.set(i.id, i);
     });
+    if (supplemental.key === periodKey) supplemental.invoices.forEach(i => { if (i.status !== 'cancelled' && i.storeId === storeId) map.set(i.id, i); });
     (invoices || []).forEach(i => {
-      if ((!storeId || i.storeId === storeId) && i.status !== 'cancelled') map.set(i.id, i);
+      const day = i.businessDate || getVietnamBusinessDate(i.date);
+      const confirmedRaw = (rawScope.periodKey === periodKey && rawScope.invoicesConfirmed
+        && day >= rawScope.invoicesStartDay && day <= rawScope.invoicesEndDay)
+        || (supplemental.key === periodKey && supplemental.invoiceDays.includes(day));
+      if ((!storeId || i.storeId === storeId) && i.status !== 'cancelled' && (isInvoicesReady || !confirmedRaw)) map.set(i.id, i);
     });
     return Array.from(map.values());
-  }, [historicalInvoices, invoices, currentUser?.storeId]);
+  }, [historicalInvoices, invoices, currentUser?.storeId, supplemental, periodKey, isInvoicesReady, todayVietnam, rawScope]);
 
   const allCashTransactions = useMemo(() => {
     const storeId = currentUser?.storeId;
     const map = new Map<string, CashTransaction>();
     historicalCash.forEach(c => {
-      if (!storeId || c.storeId === storeId) map.set(c.id, c);
+      if ((!storeId || c.storeId === storeId) && !(isInvoicesReady && (c.businessDate || getVietnamBusinessDate(c.date)) === todayVietnam) && !(supplemental.key === periodKey && supplemental.cashDays.includes(c.businessDate || getVietnamBusinessDate(c.date)))) map.set(c.id, c);
     });
+    if (supplemental.key === periodKey) supplemental.cash.forEach(c => { if (c.storeId === storeId) map.set(c.id, c); });
     (cashTransactions || []).forEach(c => {
-      if (!storeId || c.storeId === storeId) map.set(c.id, c);
+      const day = c.businessDate || getVietnamBusinessDate(c.date);
+      const confirmedRaw = (rawScope.periodKey === periodKey && rawScope.cashConfirmed
+        && day >= rawScope.cashStartDay && day <= rawScope.cashEndDay)
+        || (supplemental.key === periodKey && supplemental.cashDays.includes(day));
+      if ((!storeId || c.storeId === storeId) && (isInvoicesReady || !confirmedRaw)) map.set(c.id, c);
     });
     return Array.from(map.values());
-  }, [historicalCash, cashTransactions, currentUser?.storeId]);
+  }, [historicalCash, cashTransactions, currentUser?.storeId, supplemental, periodKey, isInvoicesReady, todayVietnam, rawScope]);
 
   const allInventoryLogs = useMemo(() => {
     const storeId = currentUser?.storeId;
@@ -526,368 +556,143 @@ export const SummaryView = ({
     });
   };
 
-  // Phân trang Cursor Firestore (startAfter) - Tải thêm hóa đơn dùng chung query builder chuẩn hóa
-  const handleLoadMoreInvoices = async () => {
-    if (!currentUser?.storeId || !lastInvoiceDoc || isLoadingMoreInvoices) return;
-    setIsLoadingMoreInvoices(true);
-    const storeId = currentUser.storeId;
-    const currentPeriodKey = `${storeId}_${dateFilter}_${filterType}`;
-    const reqId = activeRequestId.current;
-
+  const loadMoreSource = async (source: 'invoices' | 'cash_transactions' | 'inventory_logs') => {
+    const cursor = source === 'invoices' ? lastInvoiceDoc : source === 'cash_transactions' ? lastCashDoc : lastLogDoc;
+    if (!currentUser?.storeId || !cursor || pageLocks.current.has(source)) return;
+    const key = periodKey, requestId = activeRequestId.current;
+    const pageSize = source === 'inventory_logs' ? 50 : 30;
+    pageLocks.current.add(source);
+    const setLoading = source === 'invoices' ? setIsLoadingMoreInvoices : source === 'cash_transactions' ? setIsLoadingMoreCash : setIsLoadingMoreLogs;
+    setLoading(true);
     try {
       const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
-      const nextQuery = buildInvoiceQuery(
-        storeId,
-        filterType,
-        dateFilter,
-        startIso,
-        endExclusiveIso,
-        invoiceQueryConfig.mode,
-        invoiceQueryConfig.ordered,
-        lastInvoiceDoc,
-        30
-      );
-
-      let snap;
-      try {
-        snap = await getDocs(nextQuery);
-      } catch (qErr: any) {
-        if (qErr?.code === 'failed-precondition') {
-          try {
-            snap = await getDocs(buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, lastInvoiceDoc, 30));
-          } catch (_) {
-            snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), where('businessDate', '==', dateFilter.slice(0, 10)), limit(100)));
-          }
-        } else {
-          throw qErr;
-        }
-      }
-
-      // Request Guard: Tránh response về muộn ghi đè cursor hoặc dữ liệu kỳ khác khi đã chuyển ngày/kỳ
-      const nowPeriodKey = `${currentUser.storeId}_${dateFilter}_${filterType}`;
-      if (currentPeriodKey !== nowPeriodKey || reqId !== activeRequestId.current) {
-        return;
-      }
-
-      if (!snap.empty) {
-        const moreDocs = snap.docs
-          .map(d => ({ ...(d.data() as any), id: d.id } as Invoice));
-        const newLastDoc = snap.docs[snap.docs.length - 1];
-        const newHasMore = snap.docs.length >= 30;
-
-        setHistoricalInvoices(prev => {
-          const existingIds = new Set(prev.map(i => i.id));
-          const uniqueNewDocs = moreDocs.filter(d => !existingIds.has(d.id));
-          const combined = [...prev, ...uniqueNewDocs].sort((a, b) => 
-            (b.completedAt || b.date).localeCompare(a.completedAt || a.date)
-          );
-
-          const cached = summaryPeriodCache.get(currentPeriodKey);
-          if (cached) {
-            cached.invoices = combined;
-            cached.lastInvoiceDoc = newLastDoc;
-            cached.hasMoreInvoices = newHasMore;
-          }
-          return combined;
-        });
-
-        setLastInvoiceDoc(newLastDoc);
-        setHasMoreInvoices(newHasMore);
-      } else {
-        setHasMoreInvoices(false);
-        const cached = summaryPeriodCache.get(currentPeriodKey);
-        if (cached) {
-          cached.hasMoreInvoices = false;
-        }
-      }
-    } catch (err) {
-      console.warn('Lỗi tải thêm hóa đơn:', err);
+      const target = source === 'invoices' ? buildInvoiceQuery(currentUser.storeId, filterType, dateFilter, startIso, endExclusiveIso, 'legacy', true, cursor, pageSize)
+        : source === 'cash_transactions' ? buildCashQuery(currentUser.storeId, filterType, dateFilter, startIso, endExclusiveIso, 'legacy', true, cursor, pageSize)
+        : buildLogQuery(currentUser.storeId, startIso, endExclusiveIso, cursor, pageSize);
+      const snapshot = await getDocsFromServer(target);
+      if (key !== currentPeriodRef.current || requestId !== activeRequestId.current) return;
+      if (snapshot.metadata.hasPendingWrites) throw new Error('Chứng từ đang chờ lưu. Vui lòng đợi đồng bộ.');
+      const rows = snapshot.docs.map(d => ({ ...d.data(), id: d.id }));
+      const merge = (previous: any[]) => Array.from(new Map([...previous, ...rows].map(row => [row.id, row])).values()).sort((x: any, y: any) => String(y.date || '').localeCompare(String(x.date || '')));
+      const last = snapshot.docs[snapshot.docs.length - 1] || null, more = snapshot.size >= pageSize;
+      if (source === 'invoices') { setHistoricalInvoices(merge); setLastInvoiceDoc(last); setHasMoreInvoices(more); }
+      else if (source === 'cash_transactions') { setHistoricalCash(merge); setLastCashDoc(last); setHasMoreCash(more); }
+      else { setHistoricalLogs(merge); setLastLogDoc(last); setHasMoreLogs(more); }
+      setReportError('');
+    } catch (error) {
+      if (key === currentPeriodRef.current && requestId === activeRequestId.current) setReportError(error instanceof Error ? error.message : 'Không thể tải tiếp chứng từ.');
     } finally {
-      setIsLoadingMoreInvoices(false);
+      if (key === currentPeriodRef.current && requestId === activeRequestId.current) {
+        pageLocks.current.delete(source); setLoading(false);
+      }
     }
   };
 
-  // Tải toàn bộ hóa đơn của kỳ khi cần báo cáo hoặc xuất Excel toàn kỳ
-  const handleLoadAllInvoices = async () => {
-    if (!currentUser?.storeId || !lastInvoiceDoc || isLoadingMoreInvoices) return;
-    setIsLoadingMoreInvoices(true);
+  const loadAllSource = async (source: 'invoices' | 'cash_transactions' | 'inventory_logs') => {
+    if (!currentUser?.storeId) throw new Error('Vui lòng đăng nhập lại.');
+    const key = periodKey, requestId = activeRequestId.current;
+    const dates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam);
+    const setLoading = source === 'invoices' ? setIsLoadingMoreInvoices : source === 'cash_transactions' ? setIsLoadingMoreCash : setIsLoadingMoreLogs;
+    setLoading(true);
+    try {
+      const rows = (await fetchDateRangeRows<any>(source, currentUser.storeId, dates[0], dates[dates.length - 1])).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+      if (key !== currentPeriodRef.current || requestId !== activeRequestId.current) throw new Error('Kỳ báo cáo đã thay đổi. Vui lòng thực hiện lại.');
+      if (source === 'invoices') { setHistoricalInvoices(rows); setLastInvoiceDoc(null); setHasMoreInvoices(false); }
+      else if (source === 'cash_transactions') { setHistoricalCash(rows); setLastCashDoc(null); setHasMoreCash(false); }
+      else { setHistoricalLogs(rows); setLastLogDoc(null); setHasMoreLogs(false); }
+      return rows;
+    } finally {
+      if (key === currentPeriodRef.current && requestId === activeRequestId.current) setLoading(false);
+    }
+  };
+  const handleLoadMoreInvoices = () => loadMoreSource('invoices');
+  const handleLoadMoreCash = () => loadMoreSource('cash_transactions');
+  const handleLoadMoreLogs = () => loadMoreSource('inventory_logs');
+  const loadAllForDisplay = async (source: 'invoices' | 'cash_transactions' | 'inventory_logs') => {
+    const key = periodKey, requestId = activeRequestId.current;
+    try { return await loadAllSource(source); }
+    catch (error) {
+      if (key === currentPeriodRef.current && requestId === activeRequestId.current)
+        setReportError(error instanceof Error ? error.message : 'Không thể tải đủ chứng từ.');
+      return [];
+    }
+  };
+  const handleLoadAllInvoices = () => loadAllForDisplay('invoices');
+  const handleLoadAllCash = () => loadAllForDisplay('cash_transactions');
+  const handleLoadAllLogs = () => loadAllForDisplay('inventory_logs');
+
+  const [isReconcilingMissingDays, setIsReconcilingMissingDays] = useState(false);
+
+  const handleReconcileMissingDays = async () => {
+    if (!currentUser?.storeId || isReconcilingMissingDays) return;
     const storeId = currentUser.storeId;
-    const currentPeriodKey = `${storeId}_${dateFilter}_${filterType}`;
-    const reqId = activeRequestId.current;
+    const byDate = new Map<string, DailyStats>(dailyStats.map(stat => [stat.date, stat]));
+    const pastDates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(day => day < todayVietnam);
+    const missingDays = pastDates.filter(day => !reconciledSource(byDate.get(day), 'invoices') || !reconciledSource(byDate.get(day), 'cash'));
+
+    if (missingDays.length === 0) {
+      alert('Tất cả các ngày trong kỳ đã được đối soát đầy đủ.');
+      return;
+    }
+
+    if (!window.confirm(`Bạn có muốn đối soát và chốt số liệu thống kê cho ${missingDays.length} ngày trong quá khứ không? Dữ liệu sau khi chốt sẽ được lưu vào máy chủ để tăng tốc độ tải báo cáo và tiết kiệm lượt đọc.`)) {
+      return;
+    }
+
+    setIsReconcilingMissingDays(true);
+    let successCount = 0;
+    const fingerprint = (value: unknown) => JSON.stringify(Object.entries(value || {}).sort(([a], [b]) => a.localeCompare(b)));
 
     try {
-      const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
-      let cursor: QueryDocumentSnapshot | null = lastInvoiceDoc;
-      let hasMore = true;
-      let accumulated: Invoice[] = [];
+      for (const day of missingDays) {
+        try {
+          const statsRef = doc(db, 'daily_stats', `${storeId}_${day}`);
+          const baseline = await getDocFromServer(statsRef);
+          if (baseline.metadata.hasPendingWrites) continue;
+          const baselineFingerprint = fingerprint(baseline.data());
 
-      while (hasMore && cursor) {
-        if (reqId !== activeRequestId.current) break;
-        const nextQuery = buildInvoiceQuery(
-          storeId,
-          filterType,
-          dateFilter,
-          startIso,
-          endExclusiveIso,
-          invoiceQueryConfig.mode,
-          invoiceQueryConfig.ordered,
-          cursor,
-          100
-        );
-        let snap;
-      try {
-        snap = await getDocs(nextQuery);
-      } catch (qErr: any) {
-        if (qErr?.code === 'failed-precondition') {
-            try {
-              snap = await getDocs(buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, cursor, 100));
-            } catch (_) {
-              snap = await getDocs(query(collection(db, 'invoices'), where('storeId', '==', storeId), where('businessDate', '==', dateFilter.slice(0, 10)), limit(100)));
+          const [invRows, cashRows] = await Promise.all([
+            fetchDateRangeRows<Invoice>('invoices', storeId, day, day),
+            fetchDateRangeRows<CashTransaction>('cash_transactions', storeId, day, day),
+          ]);
+
+          const stat = reconcileDay(storeId, day, invRows, cashRows);
+
+          await runTransaction(db, async txn => {
+            const current = await txn.get(statsRef);
+            if (current.exists() !== baseline.exists() || fingerprint(current.data()) !== baselineFingerprint) {
+              throw new Error('Có giao dịch mới phát sinh trong lúc đối soát.');
             }
-          } else {
-          throw qErr;
+            const now = new Date().toISOString();
+            const revision = Number(current.data()?.sourceRevision || 0);
+            txn.set(statsRef, {
+              ...stat,
+              reconciledAt: now,
+              updatedAt: now,
+              sourceRevision: (Number.isFinite(revision) ? revision : 0) + 1,
+            }, { merge: true });
+          });
+          successCount++;
+        } catch (dayErr) {
+          console.warn(`Lỗi đối soát ngày ${day}:`, dayErr);
         }
       }
-        if (snap.empty) {
-          hasMore = false;
-          break;
-        }
-        const docs = snap.docs.map(d => ({ ...(d.data() as any), id: d.id } as Invoice));
-        accumulated = [...accumulated, ...docs];
-        cursor = snap.docs[snap.docs.length - 1];
-        hasMore = snap.docs.length >= 100;
-      }
-
-      if (currentPeriodKey !== `${currentUser.storeId}_${dateFilter}_${filterType}` || reqId !== activeRequestId.current) {
-        return;
-      }
-
-      setHistoricalInvoices(prev => {
-        const existingIds = new Set(prev.map(i => i.id));
-        const unique = accumulated.filter(d => !existingIds.has(d.id));
-        const combined = [...prev, ...unique].sort((a, b) =>
-          (b.completedAt || b.date).localeCompare(a.completedAt || a.date)
-        );
-        const cached = summaryPeriodCache.get(currentPeriodKey);
-        if (cached) {
-          cached.invoices = combined;
-          cached.lastInvoiceDoc = undefined;
-          cached.hasMoreInvoices = false;
-        }
-        return combined;
-      });
-      setLastInvoiceDoc(null);
-      setHasMoreInvoices(false);
-    } catch (e) {
-      console.warn("Lỗi tải toàn bộ hóa đơn:", e);
-    } finally {
-      setIsLoadingMoreInvoices(false);
-    }
-  };
-
-  // Phân trang Cursor Firestore (startAfter) - Tải thêm chứng từ sổ quỹ dùng chung query builder chuẩn hóa
-  const handleLoadMoreCash = async () => {
-    if (!currentUser?.storeId || !lastCashDoc || isLoadingMoreCash) return;
-    setIsLoadingMoreCash(true);
-    const storeId = currentUser.storeId;
-    const currentPeriodKey = `${storeId}_${dateFilter}_${filterType}`;
-    const reqId = activeRequestId.current;
-
-    try {
-      const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
-      const nextQuery = buildCashQuery(
-        storeId,
-        filterType,
-        dateFilter,
-        startIso,
-        endExclusiveIso,
-        cashQueryConfig.mode,
-        cashQueryConfig.ordered,
-        lastCashDoc,
-        30
-      );
-
-      let snap;
-      try {
-        snap = await getDocs(nextQuery);
-      } catch (qErr: any) {
-        if (qErr?.code === 'failed-precondition') {
-          try {
-            snap = await getDocs(buildCashQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'modern', false, lastCashDoc, 30));
-          } catch (_) {
-            snap = await getDocs(query(collection(db, 'cash_transactions'), where('storeId', '==', storeId), limit(100)));
-          }
-        } else {
-          throw qErr;
-        }
-      }
-
-      // Request Guard: Tránh response về muộn ghi đè cursor hoặc dữ liệu kỳ khác khi đã chuyển ngày/kỳ
-      const nowPeriodKey = `${currentUser.storeId}_${dateFilter}_${filterType}`;
-      if (currentPeriodKey !== nowPeriodKey || reqId !== activeRequestId.current) {
-        return;
-      }
-
-      if (!snap.empty) {
-        const moreDocs = snap.docs
-          .map(d => ({ ...(d.data() as any), id: d.id } as CashTransaction));
-        const newLastDoc = snap.docs[snap.docs.length - 1];
-        const newHasMore = snap.docs.length >= 30;
-
-        setHistoricalCash(prev => {
-          const existingIds = new Set(prev.map(c => c.id));
-          const uniqueNewDocs = moreDocs.filter(c => !existingIds.has(c.id));
-          const combined = [...prev, ...uniqueNewDocs].sort((a, b) => b.date.localeCompare(a.date));
-
-          const cached = summaryPeriodCache.get(currentPeriodKey);
-          if (cached) {
-            cached.cash = combined;
-            cached.lastCashDoc = newLastDoc;
-            cached.hasMoreCash = newHasMore;
-          }
-          return combined;
-        });
-
-        setLastCashDoc(newLastDoc);
-        setHasMoreCash(newHasMore);
-      } else {
-        setHasMoreCash(false);
-        const cached = summaryPeriodCache.get(currentPeriodKey);
-        if (cached) {
-          cached.hasMoreCash = false;
-        }
-      }
+      alert(`Đã đối soát và chốt thành công ${successCount}/${missingDays.length} ngày vào máy chủ!`);
     } catch (err) {
-      console.warn('Lỗi tải thêm sổ quỹ:', err);
+      console.error('Lỗi quá trình đối soát ngày cũ:', err);
+      alert('Có lỗi xảy ra trong quá trình đối soát ngày cũ.');
     } finally {
-      setIsLoadingMoreCash(false);
+      setIsReconcilingMissingDays(false);
     }
   };
 
-  // Phân trang Cursor Firestore (startAfter) - Tải thêm nhật ký kho on-demand dùng chung query builder
-  const handleLoadMoreLogs = async () => {
-    if (!currentUser?.storeId || !lastLogDoc || isLoadingMoreLogs) return;
-    setIsLoadingMoreLogs(true);
-    const storeId = currentUser.storeId;
-    const currentPeriodKey = `${storeId}_${dateFilter}_${filterType}`;
-    const reqId = activeRequestId.current;
-
-    try {
-      const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
-      const nextQuery = buildLogQuery(storeId, startIso, endExclusiveIso, lastLogDoc, 50);
-      let snap;
-      try {
-        snap = await getDocs(nextQuery);
-      } catch (qErr: any) {
-        if (qErr?.code === 'failed-precondition') {
-          snap = await getDocs(query(collection(db, 'inventory_logs'), where('storeId', '==', storeId), limit(100)));
-        } else {
-          throw qErr;
-        }
-      }
-
-      // Request Guard
-      const nowPeriodKey = `${currentUser.storeId}_${dateFilter}_${filterType}`;
-      if (currentPeriodKey !== nowPeriodKey || reqId !== activeRequestId.current) {
-        return;
-      }
-
-      if (!snap.empty) {
-        const moreDocs = snap.docs.map(d => ({ ...(d.data() as any), id: d.id } as InventoryTransaction));
-        const newLastDoc = snap.docs[snap.docs.length - 1];
-        const newHasMore = snap.docs.length >= 50;
-
-        setHistoricalLogs(prev => {
-          const existingIds = new Set(prev.map(l => l.id));
-          const uniqueNewDocs = moreDocs.filter(l => !existingIds.has(l.id));
-          const combined = [...prev, ...uniqueNewDocs].sort((a, b) => b.date.localeCompare(a.date));
-
-          const cached = summaryPeriodCache.get(currentPeriodKey);
-          if (cached) {
-            cached.logs = combined;
-            cached.lastLogDoc = newLastDoc;
-            cached.hasMoreLogs = newHasMore;
-          }
-          return combined;
-        });
-
-        setLastLogDoc(newLastDoc);
-        setHasMoreLogs(newHasMore);
-      } else {
-        setHasMoreLogs(false);
-        const cached = summaryPeriodCache.get(currentPeriodKey);
-        if (cached) {
-          cached.hasMoreLogs = false;
-        }
-      }
-    } catch (err) {
-      console.warn('Lỗi tải thêm nhật ký kho:', err);
-    } finally {
-      setIsLoadingMoreLogs(false);
-    }
-  };
-
-  // Tải toàn bộ nhật ký kho của kỳ khi cần báo cáo đầy đủ
-  const handleLoadAllLogs = async () => {
-    if (!currentUser?.storeId || !lastLogDoc || isLoadingMoreLogs) return;
-    setIsLoadingMoreLogs(true);
-    const storeId = currentUser.storeId;
-    const currentPeriodKey = `${storeId}_${dateFilter}_${filterType}`;
-    const reqId = activeRequestId.current;
-
-    try {
-      const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
-      let cursor: QueryDocumentSnapshot | null = lastLogDoc;
-      let hasMore = true;
-      let accumulated: InventoryTransaction[] = [];
-
-      while (hasMore && cursor) {
-        if (reqId !== activeRequestId.current) break;
-        const nextQuery = buildLogQuery(storeId, startIso, endExclusiveIso, cursor, 100);
-        let snap;
-      try {
-        snap = await getDocs(nextQuery);
-      } catch (qErr: any) {
-        if (qErr?.code === 'failed-precondition') {
-            snap = await getDocs(query(collection(db, 'inventory_logs'), where('storeId', '==', storeId), limit(100)));
-          } else {
-          throw qErr;
-        }
-      }
-        if (snap.empty) {
-          hasMore = false;
-          break;
-        }
-        const docs = snap.docs.map(d => ({ ...(d.data() as any), id: d.id } as InventoryTransaction));
-        accumulated = [...accumulated, ...docs];
-        cursor = snap.docs[snap.docs.length - 1];
-        hasMore = snap.docs.length >= 100;
-      }
-
-      if (currentPeriodKey !== `${currentUser.storeId}_${dateFilter}_${filterType}` || reqId !== activeRequestId.current) {
-        return;
-      }
-
-      setHistoricalLogs(prev => {
-        const existingIds = new Set(prev.map(l => l.id));
-        const unique = accumulated.filter(l => !existingIds.has(l.id));
-        const combined = [...prev, ...unique].sort((a, b) => b.date.localeCompare(a.date));
-        const cached = summaryPeriodCache.get(currentPeriodKey);
-        if (cached) {
-          cached.logs = combined;
-          cached.lastLogDoc = undefined;
-          cached.hasMoreLogs = false;
-        }
-        return combined;
-      });
-      setLastLogDoc(null);
-      setHasMoreLogs(false);
-    } catch (e) {
-      console.warn("Lỗi tải toàn bộ phiếu kho:", e);
-    } finally {
-      setIsLoadingMoreLogs(false);
-    }
-  };
+  useEffect(() => {
+    if (!invoiceSearch.trim() || filterType === 'day' || activeTab !== 'sales' || !hasMoreInvoices) return;
+    const timer = setTimeout(() => { handleLoadAllInvoices().catch(error => {
+      if (currentPeriodRef.current === periodKey) setReportError(error instanceof Error ? error.message : 'Không thể tải đủ kết quả tìm kiếm.');
+    }); }, 300);
+    return () => clearTimeout(timer);
+  }, [invoiceSearch, periodKey, activeTab, hasMoreInvoices]);
 
   // 1. Lắng nghe daily_stats theo kỳ đã chọn (Độc lập khỏi activeTab để không bao giờ bị hủy/tải lại khi chuyển tab)
   useEffect(() => {
@@ -896,7 +701,10 @@ export const SummaryView = ({
     let disposed = false;
 
     setDailyStats([]);
+    setStatsPeriodKey(periodKey);
     setDailyStatsReady(false);
+    setStatsLoaded(false);
+    setStatsFailed(false);
 
     try {
       let statsQuery: Query;
@@ -923,7 +731,7 @@ export const SummaryView = ({
         );
       }
 
-      const unsub = onSnapshot(statsQuery, { includeMetadataChanges: true }, (snapshot) => {
+      const unsub = subscribeSharedQuery(statsQuery, (snapshot) => {
         if (disposed) return;
         const isStatsConfirmed = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
         const list = snapshot.docs.map(d => ({
@@ -934,9 +742,10 @@ export const SummaryView = ({
         list.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
         setDailyStats(list);
         setDailyStatsReady(isStatsConfirmed);
+        if (isStatsConfirmed) setStatsLoaded(true);
       }, (err) => {
         console.warn('Lỗi tải daily_stats trong SummaryView:', err);
-        if (!disposed) setDailyStatsReady(false);
+        if (!disposed) { setDailyStatsReady(false); setStatsFailed(true); setStatsLoaded(true); }
       });
 
       return () => {
@@ -945,177 +754,212 @@ export const SummaryView = ({
       };
     } catch (statsErr) {
       console.warn('Không thể khởi tạo query daily_stats trong SummaryView:', statsErr);
+      if (!disposed) { setStatsFailed(true); setStatsLoaded(true); }
     }
   }, [currentUser?.storeId, dateFilter, filterType]);
 
-  // 2. Lắng nghe chứng từ chi tiết (invoices, cash_transactions) theo nhu cầu và phạm vi kỳ
+  // Giữ nguồn TOÀN KỲ đã mở cho tới khi đổi kỳ/rời màn hình.
+  // Đổi sales/items/financial không hủy và tải lại cùng nguồn; không có query 30 dòng
+  // ghi đè mảng chứng từ đã xác nhận đầy đủ.
   useEffect(() => {
-    if (!currentUser?.storeId) return;
-    const storeId = currentUser.storeId;
-    const periodKey = `${storeId}_${dateFilter}_${filterType}`;
-
-    const expected = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
-    if (!expected.length) {
-      setIsLoadingHistorical(false);
-      setReportError('Vui lòng chọn kỳ không vượt quá ngày hiện tại.');
-      return;
-    }
-    const first = expected[0], last = expected[expected.length - 1];
-    const includesToday = expected.includes(todayVietnam);
-    // Tối ưu hóa Reads: Tách biệt nhu cầu chứng từ theo từng tab.
-    // - Tab 'sales' và 'items': CHỈ tải invoices, TUYỆT ĐỐI KHÔNG tải cash_transactions (tiết kiệm 50% reads).
-    // - Tab 'cash': CHỈ tải cash_transactions, TUYỆT ĐỐI KHÔNG tải invoices.
-    // - Tab 'financial': Tải cả invoices và cash_transactions để đối soát P&L trọn vẹn.
-    const needsInv = activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial';
-    const needsCash = activeTab === 'cash' || activeTab === 'financial';
-    const needsFullRaw = needsInv || needsCash;
-    const subKey = `${periodKey}_inv:${needsInv}_cash:${needsCash}`;
-
-    // Xác định phạm vi ngày cần nghe cho raw documents:
-    let targetStart = '';
-    let targetEnd = '';
-
-    if (needsFullRaw) {
-      targetStart = first;
-      targetEnd = last;
-    } else if (
-      activeRawSubRef.current.periodKey === periodKey &&
-      activeRawSubRef.current.startDay === first &&
-      activeRawSubRef.current.endDay === last
-    ) {
-      // Đã có subscription toàn kỳ đang hoạt động: GIỮ NGUYÊN để không hủy listener live của hôm nay
-      targetStart = first;
-      targetEnd = last;
-    } else if (includesToday) {
-      targetStart = todayVietnam;
-      targetEnd = todayVietnam;
-    }
-
-    // Nếu subscription hiện tại đã đúng subKey và phạm vi [targetStart, targetEnd], tiếp tục giữ nguyên
-    if (
-      activeRawSubRef.current.subKey === subKey &&
-      activeRawSubRef.current.startDay === targetStart &&
-      activeRawSubRef.current.endDay === targetEnd
-    ) {
-      return;
-    }
-
-    // Nếu subKey đổi hoặc phạm vi thay đổi: Hủy subscription cũ
-    if (activeRawSubRef.current.unsubInv) {
-      activeRawSubRef.current.unsubInv();
-    }
-    if (activeRawSubRef.current.unsubCash) {
-      activeRawSubRef.current.unsubCash();
-    }
-    activeRawSubRef.current = {
-      periodKey: '',
-      subKey: '',
-      startDay: '',
-      endDay: '',
-      unsubInv: null,
-      unsubCash: null
-    };
-
-    // Nếu periodKey đổi, xóa mảng chứng từ cũ
-    if (rawScope.periodKey !== periodKey) {
-      setHistoricalInvoices([]);
-      setHistoricalCash([]);
-      setHasMoreInvoices(false);
-      setHasMoreCash(false);
-      setLastInvoiceDoc(null);
-      setLastCashDoc(null);
-    }
-
-    // Cập nhật rawScope: CHỈ đánh dấu confirmed khi thực sự được query và máy chủ xác nhận
-    const isTargetFull = Boolean(targetStart && targetEnd && targetStart === first && targetEnd === last);
-    setRawScope({
-      periodKey,
-      startDay: targetStart,
-      endDay: targetEnd,
-      invoicesConfirmed: false,
-      cashConfirmed: false,
-      isFullPeriod: isTargetFull
-    });
-
-    if (!targetStart || !targetEnd || (!needsInv && !needsCash)) {
-      // Không cần query raw (kỳ quá khứ ở tab tài chính/tổng quan hoặc tab không yêu cầu)
-      setIsLoadingHistorical(false);
-      setReportError('');
-      return;
-    }
-
-    setIsLoadingHistorical(true);
-    setReportError('');
+    const requestId = ++activeRequestId.current;
     let disposed = false;
-    let invConfirmed = false;
-    let cashConfirmed = false;
-
-    const updateReadiness = () => {
-      if (disposed) return;
-      const tabDataReady = (!needsInv || invConfirmed) && (!needsCash || cashConfirmed);
-      setRawScope(prev => ({
-        ...prev,
-        invoicesConfirmed: invConfirmed,
-        cashConfirmed: cashConfirmed
-      }));
-      if (tabDataReady) {
-        setIsLoadingHistorical(false);
-        setReportError('');
-      }
+    const current = () => !disposed && requestId === activeRequestId.current && periodKey === currentPeriodRef.current;
+    const sources = {
+      invoices: { requested: false, confirmed: false, stop: undefined as (() => void) | undefined, error: '' },
+      cash: { requested: false, confirmed: false, stop: undefined as (() => void) | undefined, error: '' },
     };
-
-    const onError = (err: Error) => {
-      if (disposed) return;
-      invConfirmed = false;
-      cashConfirmed = false;
-      setReportError(err.message || 'Không thể xác nhận đủ chứng từ.');
+    pageLocks.current.clear();
+    setIsLoadingMoreInvoices(false); setIsLoadingMoreCash(false); setIsLoadingMoreLogs(false);
+    setHistoricalInvoices([]); setHistoricalCash([]);
+    setHasMoreInvoices(false); setHasMoreCash(false); setLastInvoiceDoc(null); setLastCashDoc(null);
+    setRawScope({ periodKey, invoicesConfirmed: false, invoicesStartDay: '', invoicesEndDay: '',
+      cashConfirmed: false, cashStartDay: '', cashEndDay: '', isFullPeriod: false });
+    setReportError('');
+    if (typeof detailController !== 'undefined' && detailController) detailController.current = null;
+    const dates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(day => day <= todayVietnam);
+    if (!currentUser?.storeId || !dates.length) {
       setIsLoadingHistorical(false);
-      setRawScope(prev => ({
-        ...prev,
-        invoicesConfirmed: false,
-        cashConfirmed: false
-      }));
-    };
-
-    let unsubInv: (() => void) | null = null;
-    let unsubCash: (() => void) | null = null;
-
-    if (needsInv) {
-      unsubInv = subscribeDateRange<Invoice>('invoices', storeId, targetStart, targetEnd, (rows, confirmed) => {
-        if (disposed) return;
-        setHistoricalInvoices(rows);
-        invConfirmed = confirmed;
-        updateReadiness();
-      }, onError);
+      if (currentUser?.storeId) setReportError('Vui lòng chọn kỳ không vượt quá ngày hiện tại.');
+      return () => { disposed = true; };
     }
-
-    if (needsCash) {
-      unsubCash = subscribeDateRange<CashTransaction>('cash_transactions', storeId, targetStart, targetEnd, (rows, confirmed) => {
-        if (disposed) return;
-        setHistoricalCash(rows);
-        cashConfirmed = confirmed;
-        updateReadiness();
-      }, onError);
-    }
-
-    activeRawSubRef.current = {
-      periodKey,
-      subKey,
-      startDay: targetStart,
-      endDay: targetEnd,
-      unsubInv: unsubInv ? () => { disposed = true; unsubInv!(); } : null,
-      unsubCash: unsubCash ? () => { disposed = true; unsubCash!(); } : null
+    // Hôm nay đã được App đồng bộ đầy đủ: chỉ đọc phần lịch sử chưa có trên máy.
+    // Dùng cờ nguồn được bật, không dùng cờ confirmed để quyết định phạm vi query;
+    // nhờ đó pending/offline không làm bật thêm một query trùng hôm nay.
+    const isTodayEnabled = typeof todaySourceEnabled !== 'undefined' && Boolean(todaySourceEnabled);
+    const queryDates = isTodayEnabled ? dates.filter(day => day !== todayVietnam) : dates;
+    const storeId = currentUser.storeId, first = queryDates[0] || '', last = queryDates[queryDates.length - 1] || '';
+    let sourceError = '';
+    const publishSourceError = () => {
+      const previous = sourceError;
+      const next = [sources.invoices.error, sources.cash.error].filter(Boolean).join('\n');
+      sourceError = next;
+      // Chỉ xóa lỗi của chính nguồn này; không xóa nhầm lỗi xuất file/thao tác khác.
+      setReportError(value => (next || value === previous) ? next : value);
     };
-  }, [currentUser?.storeId, dateFilter, filterType, todayVietnam, activeTab]);
+    const update = () => {
+      if (!current()) return;
+      const isDay = filterType === 'day';
+      setRawScope({ periodKey,
+        invoicesConfirmed: sources.invoices.confirmed,
+        invoicesStartDay: sources.invoices.requested && isDay ? first : '',
+        invoicesEndDay: sources.invoices.requested && isDay ? last : '',
+        cashConfirmed: sources.cash.confirmed,
+        cashStartDay: sources.cash.requested && isDay ? first : '',
+        cashEndDay: sources.cash.requested && isDay ? last : '',
+        isFullPeriod: isDay && (sources.invoices.requested || sources.cash.requested) });
+      const reqInvoices = typeof detailNeedsRef !== 'undefined' && detailNeedsRef ? detailNeedsRef.current.invoices : (typeof detailNeeds !== 'undefined' ? detailNeeds.invoices : (filterType === 'day' || activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial'));
+      const reqCash = typeof detailNeedsRef !== 'undefined' && detailNeedsRef ? detailNeedsRef.current.cash : (typeof detailNeeds !== 'undefined' ? detailNeeds.cash : (filterType === 'day' || activeTab === 'cash' || activeTab === 'financial'));
+      const reqTodayReady = typeof detailNeedsRef !== 'undefined' && detailNeedsRef ? detailNeedsRef.current.todayReady : (typeof detailNeeds !== 'undefined' ? detailNeeds.todayReady : true);
+      setIsLoadingHistorical((reqInvoices && !sources.invoices.confirmed)
+        || (reqCash && !sources.cash.confirmed) || !reqTodayReady);
+    };
+    const fail = (kind: 'invoices' | 'cash', error: Error) => {
+      if (!current()) return;
+      sources[kind].confirmed = false; sources[kind].error = error.message || 'Chưa xác nhận đủ chứng từ.';
+      update(); setIsLoadingHistorical(false);
+      publishSourceError();
+    };
+    const controller = {
+      ensure(invoices: boolean, cash: boolean) {
+        if (!current()) return;
+        if (invoices && !sources.invoices.requested) {
+          sources.invoices.requested = true;
+          if (!queryDates.length) {
+            sources.invoices.confirmed = true;
+            update();
+          } else if (filterType === 'day') {
+            sources.invoices.stop = subscribeDateRange<Invoice>('invoices', storeId, first, last, (rows, confirmed) => {
+              if (!current()) return;
+              setHistoricalInvoices(rows); sources.invoices.confirmed = confirmed;
+              if (confirmed) sources.invoices.error = '';
+              update(); publishSourceError();
+            }, error => fail('invoices', error));
+          } else {
+            // Phân trang danh sách chi tiết (30 dòng đầu) khi xem theo kỳ tháng / năm
+            const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
+            const q = buildInvoiceQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'legacy', true, null, 30);
+            getDocsFromServer(q).then(snapshot => {
+              if (!current()) return;
+              if (snapshot.metadata.hasPendingWrites) throw new Error('Chứng từ đang chờ lưu. Vui lòng đợi đồng bộ.');
+              const rows = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as Invoice));
+              setHistoricalInvoices(rows);
+              setLastInvoiceDoc(snapshot.docs[snapshot.docs.length - 1] || null);
+              setHasMoreInvoices(snapshot.size >= 30);
+              sources.invoices.confirmed = true;
+              sources.invoices.error = '';
+              update();
+              publishSourceError();
+            }).catch(error => fail('invoices', error));
+          }
+        }
+        if (cash && !sources.cash.requested) {
+          sources.cash.requested = true;
+          if (!queryDates.length) {
+            sources.cash.confirmed = true;
+            update();
+          } else if (filterType === 'day') {
+            sources.cash.stop = subscribeDateRange<CashTransaction>('cash_transactions', storeId, first, last, (rows, confirmed) => {
+              if (!current()) return;
+              setHistoricalCash(rows); sources.cash.confirmed = confirmed;
+              if (confirmed) sources.cash.error = '';
+              update(); publishSourceError();
+            }, error => fail('cash', error));
+          } else {
+            // Phân trang danh sách chi tiết (30 dòng đầu) khi xem theo kỳ tháng / năm
+            const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
+            const q = buildCashQuery(storeId, filterType, dateFilter, startIso, endExclusiveIso, 'legacy', true, null, 30);
+            getDocsFromServer(q).then(snapshot => {
+              if (!current()) return;
+              if (snapshot.metadata.hasPendingWrites) throw new Error('Chứng từ đang chờ lưu. Vui lòng đợi đồng bộ.');
+              const rows = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as CashTransaction));
+              setHistoricalCash(rows);
+              setLastCashDoc(snapshot.docs[snapshot.docs.length - 1] || null);
+              setHasMoreCash(snapshot.size >= 30);
+              sources.cash.confirmed = true;
+              sources.cash.error = '';
+              update();
+              publishSourceError();
+            }).catch(error => fail('cash', error));
+          }
+        }
+        update();
+      },
+    };
+    if (typeof detailController !== 'undefined' && detailController) detailController.current = controller;
+    const reqInvoices = typeof detailNeeds !== 'undefined' ? detailNeeds.invoices : (filterType === 'day' || activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial');
+    const reqCash = typeof detailNeeds !== 'undefined' ? detailNeeds.cash : (filterType === 'day' || activeTab === 'cash' || activeTab === 'financial');
+    controller.ensure(reqInvoices, reqCash);
 
-  // Dọn dẹp subscription raw khi component unmount
-  useEffect(() => {
     return () => {
-      if (activeRawSubRef.current.unsubInv) activeRawSubRef.current.unsubInv();
-      if (activeRawSubRef.current.unsubCash) activeRawSubRef.current.unsubCash();
-      activeRawSubRef.current = { periodKey: '', subKey: '', startDay: '', endDay: '', unsubInv: null, unsubCash: null };
+      disposed = true;
+      if (requestId === activeRequestId.current) activeRequestId.current++;
+      if (typeof detailController !== 'undefined' && detailController && detailController.current === controller) detailController.current = null;
+      sources.invoices.stop?.(); sources.cash.stop?.();
     };
-  }, []);
+  }, [currentUser?.storeId, dateFilter, filterType, todayVietnam, todaySourceEnabled]);
+
+  useEffect(() => {
+    detailController.current?.ensure(detailNeeds.invoices, detailNeeds.cash);
+  }, [currentUser?.storeId, dateFilter, filterType, todayVietnam, todaySourceEnabled,
+    detailNeeds.invoices, detailNeeds.cash, detailNeeds.todayReady]);
+
+  // Chỉ bổ sung những ngày mà tổng hợp chưa bao phủ đủ nguồn; không ghi ngược dữ liệu.
+  const supplementPlan = useMemo(() => {
+    type Plan = { kind: 'invoices' | 'cash'; start: string; end: string; dates: string[] };
+    if (!statsLoaded || statsPeriodKey !== periodKey) return [] as Plan[];
+    const byDate = new Map<string, DailyStats>(dailyStats.map(stat => [stat.date, stat]));
+    const pastDates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(day => day < todayVietnam);
+    // Không mở nguồn bổ sung cho phần đang có listener TOÀN KỲ (kể cả đang đợi server).
+    // Nguồn toàn kỳ lỗi vẫn giữ trạng thái chưa xác nhận; không giả định số 0.
+    const fullInvoices = filterType === 'day' ? detailNeeds.invoices : (rawScope.periodKey === periodKey && Boolean(rawScope.invoicesStartDay));
+    const fullCash = filterType === 'day' ? detailNeeds.cash : (rawScope.periodKey === periodKey && Boolean(rawScope.cashStartDay));
+    const plans: Plan[] = [];
+    for (const kind of ['invoices', 'cash'] as const) {
+      if (kind === 'invoices' ? fullInvoices : fullCash) continue;
+      // Tối ưu hóa Reads: Khi xem kỳ Tháng / Năm, chỉ tải bù nguồn chứng từ nào mà tab hoặc chỉ tiêu hiện tại cần
+      if (filterType !== 'day') {
+        if (kind === 'invoices' && !detailNeeds.invoices) continue;
+        if (kind === 'cash' && !detailNeeds.cash) continue;
+      }
+      const missing = pastDates.filter(day => statsFailed || !reconciledSource(byDate.get(day), kind));
+      plans.push(...contiguousDateRanges(missing).map(range => ({ ...range, kind })));
+    }
+    return plans;
+  }, [statsLoaded, statsPeriodKey, periodKey, dailyStats, statsFailed, dateFilter, filterType, todayVietnam,
+    detailNeeds.invoices, detailNeeds.cash, rawScope.periodKey, rawScope.invoicesStartDay, rawScope.cashStartDay]);
+  const supplementPlanKey = supplementPlan.map(range => range.kind + ':' + range.start + ':' + range.end).join('|');
+  useEffect(() => {
+    let disposed = false;
+    const sources = new Map<string, { kind: 'invoices' | 'cash'; dates: string[]; rows: any[]; confirmed: boolean }>();
+    const stops: (() => void)[] = [];
+    setSupplemental({ key: periodKey, invoices: [], cash: [], invoiceDays: [], cashDays: [] });
+    if (!currentUser?.storeId) return;
+    const publish = () => {
+      if (disposed || periodKey !== currentPeriodRef.current) return;
+      const invoices = new Map<string, Invoice>(), cash = new Map<string, CashTransaction>();
+      const invoiceDays = new Set<string>(), cashDays = new Set<string>();
+      for (const source of sources.values()) {
+        const target = source.kind === 'invoices' ? invoices : cash;
+        source.rows.forEach(row => target.set(row.id, row));
+        if (source.confirmed) source.dates.forEach(day => (source.kind === 'invoices' ? invoiceDays : cashDays).add(day));
+      }
+      setSupplemental({ key: periodKey, invoices: [...invoices.values()], cash: [...cash.values()], invoiceDays: [...invoiceDays], cashDays: [...cashDays] });
+    };
+    for (const range of supplementPlan) {
+      const kind = range.kind;
+      const key = kind + ':' + range.start + ':' + range.end;
+      sources.set(key, { kind, dates: range.dates, rows: [], confirmed: false });
+      stops.push(subscribeDateRange<any>(kind === 'invoices' ? 'invoices' : 'cash_transactions', currentUser.storeId, range.start, range.end, (rows, confirmed) => {
+        if (disposed) return;
+        sources.set(key, { kind, dates: range.dates, rows, confirmed }); publish();
+      }, failure => {
+        if (disposed || periodKey !== currentPeriodRef.current) return;
+        sources.get(key)!.confirmed = false; publish(); setReportError(failure.message);
+      }));
+    }
+    return () => { disposed = true; stops.forEach(stop => stop()); };
+  }, [currentUser?.storeId, periodKey, supplementPlanKey]);
 
   // 2. Chỉ tải inventory_logs khi người dùng chủ động mở tab Kho
   useEffect(() => {
@@ -1125,14 +969,19 @@ export const SummaryView = ({
     if (!expected.length) return;
     const first = expected[0], last = expected[expected.length-1];
     let disposed = false;
-    setHistoricalLogs([]); setHasMoreLogs(false); setLastLogDoc(null);
-    const unsub = subscribeDateRange<InventoryTransaction>('inventory_logs',storeId,first,last,(rows)=>{ if(!disposed)setHistoricalLogs(rows); },(err)=>console.warn('Lỗi tải inventory logs:',err));
+    setHistoricalLogs([]); setInventoryDataReady(false); setHasMoreLogs(false); setLastLogDoc(null);
+    const unsub = subscribeDateRange<InventoryTransaction>('inventory_logs',storeId,first,last,(rows, confirmed)=>{ if(!disposed){setHistoricalLogs(rows);setInventoryDataReady(confirmed);} },(err)=>{if(!disposed){setInventoryDataReady(false);setReportError(err.message);}});
     return () => { disposed = true; unsub(); };
   }, [currentUser?.storeId, dateFilter, filterType, activeTab, todayVietnam]);
 
-  // 3. Chỉ tải payroll_records khi người dùng chủ động mở tab Tài chính (cho đúng kỳ đang chọn, không bị cắt bởi limit)
+  // 3. Chỉ tải payroll_records khi người dùng chủ động mở tab Tài chính VÀ chọn chỉ tiêu tính theo bảng lương đã chốt
+  // (Mặc định báo cáo Tài chính tính theo phiếu chi lương thực tế nên không cần tải bảng lương, tiết kiệm reads)
   useEffect(() => {
-    if (!currentUser?.storeId || activeTab !== 'financial') return;
+    if (!currentUser?.storeId || activeTab !== 'financial' || financialCostBasis !== 'payroll') {
+      setPayrollDataReady(false);
+      setPeriodPayrolls([]);
+      return;
+    }
     const storeId = currentUser.storeId;
     let disposed = false;
     setPayrollDataReady(false);
@@ -1166,7 +1015,7 @@ export const SummaryView = ({
       if (!disposed) setPayrollDataReady(false);
     });
     return () => { disposed = true; unsub(); };
-  }, [currentUser?.storeId, dateFilter, filterType, activeTab]);
+  }, [currentUser?.storeId, dateFilter, filterType, activeTab, financialCostBasis]);
 
   // 1. Toàn bộ hóa đơn thuộc kỳ được chọn của cửa hàng (KHÔNG bị lọc bởi ô tìm kiếm) dùng để tính toán số liệu, KPI, COGS
   const periodInvoices = useMemo(() => {
@@ -1186,7 +1035,7 @@ export const SummaryView = ({
         matchDate = invBDate.slice(0, 4) === targetYear || (inv.date >= startIso && inv.date < endExclusiveIso);
       }
       return matchDate;
-    }).sort((a, b) => (b.completedAt || b.date).localeCompare(a.completedAt || a.date));
+    }).sort((a, b) => String(b.completedAt || b.date || '').localeCompare(String(a.completedAt || a.date || '')));
   }, [allInvoices, dateFilter, filterType]);
 
   // 2. Danh sách hóa đơn hiển thị trong bảng (áp dụng thêm bộ lọc tìm kiếm mã HĐ, tên bàn, nhân viên)
@@ -1220,33 +1069,23 @@ export const SummaryView = ({
         matchDate = lDateStr.slice(0, 4) === targetYear || (log.date >= startIso && log.date < endExclusiveIso);
       }
       return matchDate;
-    }).sort((a, b) => b.date.localeCompare(a.date));
+    }).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
   }, [allInventoryLogs, dateFilter, filterType]);
 
-  // 3. Toàn bộ giao dịch sổ quỹ trong kỳ của cửa hàng (dùng tính số liệu, số dư, P&L, KPI)
-  const periodCash = useMemo(() => {
+  // Nguồn tính/đối soát dùng đủ chứng từ trong phạm vi; bộ lọc quyền chỉ áp dụng danh sách hiển thị.
+  const sourcePeriodCash = useMemo(() => {
     const { startIso, endExclusiveIso } = getDateRangeIso(dateFilter, filterType);
-    const targetDay = dateFilter.slice(0, 10);
-    const targetMonth = dateFilter.slice(0, 7);
-    const targetYear = dateFilter.slice(0, 4);
-
-    return allCashTransactions.filter(t => {
-      const isAuto = isSalesCategory(t.category) || t.category === 'Nhập hàng' || t.category === 'Trả hàng';
-      if (!isAdminOrManager && (t.staffId !== currentUser?.id || isAuto)) return false;
-
-      const tDateStr = getVietnamBusinessDate(t.date);
-      let matchDate = false;
-      if (filterType === 'day') {
-        matchDate = tDateStr === targetDay || (t.date >= startIso && t.date < endExclusiveIso);
-      } else if (filterType === 'month') {
-        matchDate = tDateStr.slice(0, 7) === targetMonth || (t.date >= startIso && t.date < endExclusiveIso);
-      } else {
-        matchDate = tDateStr.slice(0, 4) === targetYear || (t.date >= startIso && t.date < endExclusiveIso);
-      }
-      return matchDate;
-    }).sort((a, b) => b.date.localeCompare(a.date));
-  }, [allCashTransactions, dateFilter, filterType, isAdminOrManager, currentUser]);
-
+    return allCashTransactions.filter(row => {
+      const day = getVietnamBusinessDate(row.date);
+      const matches = filterType === 'day' ? day === dateFilter.slice(0, 10)
+        : filterType === 'month' ? day.slice(0, 7) === dateFilter.slice(0, 7) : day.slice(0, 4) === dateFilter.slice(0, 4);
+      return matches || (row.date >= startIso && row.date < endExclusiveIso);
+    }).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  }, [allCashTransactions, dateFilter, filterType]);
+  const periodCash = useMemo(() => sourcePeriodCash.filter(row => {
+    const automatic = isSalesCategory(row.category) || row.category === 'Nhập hàng' || row.category === 'Trả hàng';
+    return isAdminOrManager || (row.staffId === currentUser?.id && !automatic);
+  }), [sourcePeriodCash, isAdminOrManager, currentUser?.id]);
   const filteredCash = periodCash;
 
   // Calculate item sales summary từ toan bo hóa đơn trong kỳ (không bị ảnh hưởng bởi ô tìm kiếm)
@@ -1411,117 +1250,26 @@ export const SummaryView = ({
     );
   }, [sortedItemSales, onlyShowMissingCostItems, missingCostIdSet, missingCostNameSet]);
 
-  // Tính toán lại giá vốn thực tế cho từng hóa đơn khi người dùng đã cập nhật giá vốn món ăn trong Thực đơn / Kho
+  // Tính giá vốn từ hóa đơn: Giữ nguyên snapshot giá vốn đã lưu trên hóa đơn tại thời điểm bán,
+  // tuyệt đối không tính lại từ thực đơn hiện tại làm sai lệch dữ liệu lịch sử.
   const { recomputedInvoices, totalRecomputedCost, hasAnyIncompleteInvoice } = useMemo(() => {
-    const menuMap = new Map((menu || []).map(m => [m.id, m]));
-    const menuByName = new Map((menu || []).map(m => [m.name.toLowerCase().trim(), m]));
-    const invMap = new Map((inventoryItems || []).map(i => [i.id, i]));
-    const invByName = new Map((inventoryItems || []).map(i => [i.name.toLowerCase().trim(), i]));
-    const getCostSource = (id: string, name?: string) => {
-      let found = menuMap.get(id) || invMap.get(id);
-      if (!found && name) {
-        const clean = name.toLowerCase().trim();
-        found = menuByName.get(clean) || invByName.get(clean);
+    let totalCost = 0, incomplete = false;
+
+    const rows = periodInvoices.map(invoice => {
+      if (invoice.status === 'cancelled') return { ...invoice, effectiveCost: 0, isCostComplete: true, shouldUpdateInDb: false };
+      const complete = invoiceCostIsComplete(invoice);
+      let cost = 0;
+      if (typeof invoice.totalCost === 'number' && Number.isFinite(invoice.totalCost) && invoice.totalCost >= 0) {
+        cost = invoice.totalCost;
+      } else {
+        cost = Math.max(0, calculateInvoiceCost(invoice.items || []));
       }
-      return found;
-    };
-
-    // Kiểm tra xem hóa đơn có thực sự đã có giá vốn đã xác minh tại thời điểm bán hay không
-    const isInvoiceHistoricallyVerified = (inv: Invoice): boolean => {
-      // 1. Phải có costStatus === 'complete' và costVersion >= 2
-      if (inv.costStatus !== 'complete' || (inv.costVersion || 0) < 2) return false;
-      if (typeof inv.totalCost !== 'number' || inv.totalCost < 0) return false;
-
-      // 2. Nếu hóa đơn có doanh thu bán hàng > 0 nhưng totalCost = 0:
-      // Trừ khi tất cả món đều là verified = 0 hoặc món tặng miễn phí, còn lại là từng bị đánh dấu complete nhầm
-      if (inv.totalCost === 0 && (inv.subtotal > 0 || inv.total > 0)) {
-        const hasUnverifiedZeroCostItem = (inv.items || []).some(item => {
-          const p = item.price || 0;
-          const c = item.costPrice || 0;
-          const verified = Boolean((item as any).costVerified || (item as any).isFreeCost);
-          const hasRecipe = Boolean(item.recipe && item.recipe.length > 0);
-          return p > 0 && c <= 0 && !hasRecipe && !verified;
-        });
-        if (hasUnverifiedZeroCostItem) {
-          return false; // Hóa đơn này thực tế chưa đủ dữ liệu giá vốn
-        }
-      }
-
-      // 3. Kiểm tra xem trên hóa đơn có món bán thu tiền nào mà lúc bán costPrice <= 0 và không có recipe hợp lệ
-      const hasMissingCostItemOnInvoice = (inv.items || []).some(item => {
-        const p = item.price || 0;
-        const c = item.costPrice || 0;
-        const verified = Boolean((item as any).costVerified || (item as any).isFreeCost);
-        const hasRecipe = Boolean(item.recipe && item.recipe.length > 0);
-        if (p > 0 && c <= 0 && !hasRecipe && !verified) return true;
-        // Kiểm tra topping có tính tiền nhưng không có giá vốn
-        for (const addon of item.selectedAddOns || []) {
-          if ((addon.price || 0) > 0 && (!addon.costPrice || addon.costPrice <= 0) && !(addon as any).costVerified) {
-            return true;
-          }
-        }
-        return false;
-      });
-
-      if (hasMissingCostItemOnInvoice) {
-        return false; // Hóa đơn này có món thiếu giá vốn, được phép bổ sung khi chủ quán khai báo
-      }
-
-      return true; // Hóa đơn đã có giá vốn xác minh tại thời điểm bán -> Giữ nguyên bất biến!
-    };
-
-    let totalCost = 0;
-    let anyIncomplete = false;
-    const recomputed = periodInvoices.map(inv => {
-      if (inv.status === 'cancelled') {
-        return { ...inv, effectiveCost: 0, isCostComplete: true, shouldUpdateInDb: false };
-      }
-
-      // NGUYÊN TẮC BẤT BIẾN KẾ TOÁN (IMMUTABLE COST SNAPSHOT):
-      // Chỉ giữ nguyên các hóa đơn đã thực sự có giá vốn xác minh đầy đủ tại thời điểm bán!
-      // Không khóa những hóa đơn từng bị đánh dấu nhầm khi giá vốn chưa khai báo.
-      if (isInvoiceHistoricallyVerified(inv)) {
-        totalCost += inv.totalCost!;
-        return {
-          ...inv,
-          effectiveCost: inv.totalCost!,
-          isCostComplete: true,
-          shouldUpdateInDb: false
-        };
-      }
-      
-      // Bổ sung giá vốn cho hóa đơn trước đây thực sự chưa đủ dữ liệu:
-      const snapshot = calculateInvoiceCostSnapshot(inv.items || [], getCostSource);
-      
-      // Nếu sau khi điền giá vốn trong thực đơn, hóa đơn này đã đủ 100% giá vốn:
-      if (snapshot.isComplete) {
-        totalCost += snapshot.totalCost;
-        return {
-          ...inv,
-          effectiveCost: snapshot.totalCost,
-          isCostComplete: true,
-          shouldUpdateInDb: true // Nâng cấp từ estimated sang complete
-        };
-      }
-
-      // Nếu vẫn còn món thiếu giá vốn:
-      anyIncomplete = true;
-      const fallbackCost = typeof inv.totalCost === 'number' && inv.totalCost > 0 ? inv.totalCost : snapshot.totalCost;
-      totalCost += fallbackCost;
-      return {
-        ...inv,
-        effectiveCost: fallbackCost,
-        isCostComplete: false,
-        shouldUpdateInDb: false
-      };
+      totalCost += cost;
+      if (!complete && cost === 0) incomplete = true;
+      return { ...invoice, effectiveCost: cost, isCostComplete: complete || cost > 0, shouldUpdateInDb: false };
     });
-
-    return {
-      recomputedInvoices: recomputed,
-      totalRecomputedCost: totalCost,
-      hasAnyIncompleteInvoice: anyIncomplete
-    };
-  }, [periodInvoices, menu, inventoryItems]);
+    return { recomputedInvoices: rows, totalRecomputedCost: Math.max(0, totalCost), hasAnyIncompleteInvoice: incomplete };
+  }, [periodInvoices]);
 
   const [isSyncingCosts, setIsSyncingCosts] = useState(false);
   const [costSyncDone, setCostSyncDone] = useState(false);
@@ -1534,68 +1282,57 @@ export const SummaryView = ({
   }, []);
 
   // Tổng hợp dữ liệu đa tầng theo từng ngày (Per-day Single Source of Truth, 100% toàn vẹn)
-  const sourceMismatch=useMemo(()=>receiptMismatch(periodInvoices,periodCash),[periodInvoices,periodCash]);
-  const statsAggregates = useMemo(() => {
-    const dates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
-    const statsByDate = new Map<string, DailyStats>(dailyStats.map(s => [s.date, s]));
-
-    // 1. Chỉ tính rawStats cho các ngày thực sự nằm trong phạm vi ngày đã được truy vấn raw từ server
-    let rawStats: DailyStats[] = [];
-    const hasRawInvoices = Boolean((rawScope.invoicesConfirmed && rawScope.startDay && rawScope.endDay) || (isInvoicesReady && isViewingCurrentPeriod && periodInvoices.length > 0));
-    const hasRawCash = Boolean((rawScope.cashConfirmed && rawScope.startDay && rawScope.endDay) || (isInvoicesReady && isViewingCurrentPeriod));
-    const isBothRawActive = hasRawInvoices && hasRawCash;
-    const isAnyRawActive = hasRawInvoices || hasRawCash;
-
-    const coveredRawDates = isAnyRawActive
-      ? dates.filter(d => (rawScope.startDay && rawScope.endDay ? (d >= rawScope.startDay && d <= rawScope.endDay) : false) || (isViewingCurrentPeriod && d === todayVietnam))
-      : [];
-
-    if (coveredRawDates.length > 0) {
-      try {
-        rawStats = dailyStatsFromSources(currentUser?.storeId || '', coveredRawDates, periodInvoices, periodCash, true);
-      } catch {
-        rawStats = [];
+  const expectedReportDates = useMemo(() => getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(day => day <= todayVietnam), [dateFilter, filterType, todayVietnam]);
+  const sourceCoverage = useMemo(() => {
+    const invoiceDays = new Set<string>(), cashDays = new Set<string>();
+    for (const day of expectedReportDates) {
+      if (day === todayVietnam && isInvoicesReady) { invoiceDays.add(day); cashDays.add(day); }
+      if (rawScope.periodKey === periodKey) {
+        if (rawScope.invoicesConfirmed && day >= rawScope.invoicesStartDay && day <= rawScope.invoicesEndDay) invoiceDays.add(day);
+        if (rawScope.cashConfirmed && day >= rawScope.cashStartDay && day <= rawScope.cashEndDay) cashDays.add(day);
       }
     }
-    const rawByDate = new Map<string, DailyStats>(rawStats.map(s => [s.date, s]));
+    if (supplemental.key === periodKey) {
+      supplemental.invoiceDays.forEach(day => invoiceDays.add(day));
+      supplemental.cashDays.forEach(day => cashDays.add(day));
+    }
+    return { invoiceDays, cashDays };
+  }, [expectedReportDates, todayVietnam, isInvoicesReady, rawScope, periodKey, supplemental]);
+  const rawReport = useMemo(() => aggregateReportDays(currentUser?.storeId || '', expectedReportDates, periodInvoices, sourcePeriodCash, sourceCoverage),
+    [currentUser?.storeId, expectedReportDates, periodInvoices, sourcePeriodCash, sourceCoverage]);
+  const sourceMismatch = [...rawReport.receiptIssues].map(([day, issue]) => `${day} · ${issue}`).join('\n');
+  const statsAggregates = useMemo(() => {
+    const dates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(d => d <= todayVietnam);
+    const statsByDate = new Map<string, DailyStats>((statsPeriodKey === periodKey ? dailyStats : []).map(s => [s.date, s]));
 
-    // Helper: Hợp nhất an toàn giữa rawStat và serverStat khi một trong 2 nguồn chưa được nạp
-    // Tuyệt đối không để mảng rỗng của nguồn chưa nạp ghi đè 0 vào nguồn kia
-    const buildMergedRawStat = (raw: DailyStats, srv: DailyStats | undefined): DailyStats => {
-      return {
-        ...raw,
-        totalRevenue: hasRawInvoices ? raw.totalRevenue : (srv?.totalRevenue || 0),
-        invoiceCount: hasRawInvoices ? raw.invoiceCount : (srv?.invoiceCount || 0),
-        totalCost: hasRawInvoices ? raw.totalCost : (srv?.totalCost || 0),
-        totalDiscount: hasRawInvoices ? raw.totalDiscount : (srv?.totalDiscount || 0),
-        totalExpense: hasRawCash ? raw.totalExpense : (srv?.totalExpense || 0),
-        totalIncome: hasRawCash ? raw.totalIncome : (srv?.totalIncome || 0),
-        cashExpense: hasRawCash ? raw.cashExpense : (srv?.cashExpense || 0),
-        transferExpense: hasRawCash ? raw.transferExpense : (srv?.transferExpense || 0),
-        cashIncome: hasRawCash ? raw.cashIncome : (srv?.cashIncome || 0),
-        transferIncome: hasRawCash ? raw.transferIncome : (srv?.transferIncome || 0),
-        expenseInventory: hasRawCash ? raw.expenseInventory : (srv?.expenseInventory || 0),
-        expenseSalary: hasRawCash ? raw.expenseSalary : (srv?.expenseSalary || 0),
-        expenseRent: hasRawCash ? raw.expenseRent : (srv?.expenseRent || 0),
-        expenseOther: hasRawCash ? raw.expenseOther : (srv?.expenseOther || 0)
-      };
-    };
+    // 1. Xác định phạm vi ngày thực sự đã tải và xác nhận cho từng nguồn (invoices vs cash)
+    const isDayInRawInvoices = (day: string) => sourceCoverage.invoiceDays.has(day);
+    const isDayInRawCash = (day: string) => sourceCoverage.cashDays.has(day);
+
+    const isDayInAnyRaw = (d: string) => isDayInRawInvoices(d) || isDayInRawCash(d);
+    const isDayInBothRaw = (d: string) => isDayInRawInvoices(d) && isDayInRawCash(d);
+
+    const rawByDate = rawReport.stats;
+
+    // Helper: Hợp nhất an toàn giữa rawStat và serverStat theo từng chỉ tiêu và từng nguồn ngày
+    // Tuyệt đối không để nguồn chưa tải (hoặc chỉ tải hôm nay) ghi đè 0 vào dữ liệu ngày quá khứ
+    const buildMergedRawStat = (raw: DailyStats, server: DailyStats | undefined, day: string): DailyStats =>
+      mergeDaySources(raw, server, isDayInRawInvoices(day), isDayInRawCash(day));
 
     // Hợp nhất dữ liệu: Đảm bảo nguyên tắc 1 nguồn duy nhất trọn vẹn cho từng ngày (Single Source of Truth)
     const stats: (DailyStats & { _source: 'serverStat' | 'rawStat' | 'empty' })[] = dates.map(d => {
       const serverStat = statsByDate.get(d);
       const isServerStatConfirmed = Boolean(serverStat && !(serverStat as any)._fromCache && dailyStatsReady);
-      const isServerStatReconciled = Boolean(serverStat && (serverStat.coverageStatus === 'reconciled' || serverStat.coverageStatus === 'zero_activity'));
+      const isServerStatReconciled = reconciledSource(serverStat, 'invoices') && reconciledSource(serverStat, 'cash');
 
-      // Ngày d chỉ được coi là có chứng từ raw đã xác nhận khi nằm trong phạm vi đã truy vấn và được server xác nhận
-      const isDayWithinRawScope = Boolean(isAnyRawActive && d >= rawScope.startDay && d <= rawScope.endDay);
-      const rawStat = isDayWithinRawScope ? rawByDate.get(d) : undefined;
-      const isRawConfirmed = Boolean(isDayWithinRawScope && rawStat);
+      const dayHasRaw = isDayInAnyRaw(d);
+      const dayHasBothRaw = isDayInBothRaw(d);
+      const rawStat = dayHasRaw ? rawByDate.get(d) : undefined;
 
       // 1. Ngày hôm nay (Live data)
       if (d === todayVietnam) {
         if (rawStat) {
-          const merged = buildMergedRawStat(rawStat, serverStat);
+          const merged = buildMergedRawStat(rawStat, serverStat, d);
           return {
             ...merged,
             coverageStatus: 'live_tracking',
@@ -1629,45 +1366,27 @@ export const SummaryView = ({
       }
 
       // 2. Ngày quá khứ (d < todayVietnam)
-      // Tình huống 2a: Nếu cả hai nguồn raw đều được nạp VÀ có serverStat đã xác nhận -> tiến hành đối soát
-      if (isBothRawActive && rawStat && isServerStatConfirmed) {
-        const revDiff = Math.abs((serverStat?.totalRevenue || 0) - (rawStat?.totalRevenue || 0));
-        const invDiff = Math.abs((serverStat?.invoiceCount || 0) - (rawStat?.invoiceCount || 0));
-        const costDiff = (rawStat?.costStatus === 'complete' && typeof serverStat?.totalCost === 'number')
-          ? Math.abs((serverStat.totalCost || 0) - (rawStat.totalCost || 0))
-          : 0;
-        const cashDiff = Math.abs((serverStat?.totalCash || 0) - (rawStat?.totalCash || 0));
-        const transferDiff = Math.abs((serverStat?.totalTransfer || 0) - (rawStat?.totalTransfer || 0));
-        const discountDiff = Math.abs((serverStat?.totalDiscount || 0) - (rawStat?.totalDiscount || 0));
-        const expenseDiff = Math.abs((serverStat?.totalExpense || 0) - (rawStat?.totalExpense || 0));
-        const incomeDiff = Math.abs((serverStat?.totalIncome || 0) - (rawStat?.totalIncome || 0));
-
-        const isFinancialMatch =
-          revDiff < 1 &&
-          invDiff === 0 &&
-          costDiff < 1 &&
-          cashDiff < 1 &&
-          transferDiff < 1 &&
-          discountDiff < 1 &&
-          expenseDiff < 1 &&
-          incomeDiff < 1;
-
-        if (isFinancialMatch) {
-          return {
-            ...serverStat!,
-            coverageStatus: serverStat!.coverageStatus || 'reconciled',
-            _source: 'serverStat'
-          };
-        }
+      // Cả hai nguồn chứng từ đã đầy đủ: giữ đúng số và trạng thái giá vốn của chứng từ.
+      // Không lấy costStatus/chi tiết thu chi cũ từ daily_stats chỉ vì tổng tiền trùng nhau.
+      if (dayHasBothRaw && rawStat) {
         return {
-          ...rawStat!,
-          coverageStatus: 'partial',
+          ...rawStat,
+          coverageStatus: !rawReport.invoiceDays.has(d) || !rawReport.cashDays.has(d) || rawReport.receiptIssues.has(d)
+            ? 'partial' : rawStat.hasData ? 'reconciled' : 'zero_activity',
           _source: 'rawStat'
         };
       }
 
-      // Tình huống 2b: Server stats đã xác nhận từ server và đã đối soát (ưu tiên dùng khi chỉ tải 1 nguồn raw)
+      // Tình huống 2b: Server stats đã xác nhận từ server và đã đối soát (ưu tiên dùng khi chỉ tải 1 nguồn raw hoặc không tải raw)
       if (isServerStatConfirmed && isServerStatReconciled) {
+        if (rawStat && dayHasRaw) {
+          const merged = buildMergedRawStat(rawStat, serverStat, d);
+          return {
+            ...merged,
+            coverageStatus: 'reconciled',
+            _source: 'serverStat'
+          };
+        }
         return {
           ...serverStat!,
           coverageStatus: serverStat!.coverageStatus || 'reconciled',
@@ -1676,11 +1395,11 @@ export const SummaryView = ({
       }
 
       // Tình huống 2c: Ngày quá khứ có rawStat (được merge an toàn với serverStat)
-      if (rawStat && (hasRawInvoices || hasRawCash)) {
-        const merged = buildMergedRawStat(rawStat, serverStat);
+      if (rawStat && dayHasRaw) {
+        const merged = buildMergedRawStat(rawStat, serverStat, d);
         return {
           ...merged,
-          coverageStatus: isBothRawActive ? (rawStat.coverageStatus || 'reconciled') : 'partial',
+          coverageStatus: dayHasBothRaw && !sourceMismatch ? (rawStat.hasData ? 'reconciled' : 'zero_activity') : 'partial',
           _source: 'rawStat'
         };
       }
@@ -1717,11 +1436,13 @@ export const SummaryView = ({
       totalRevenue: 0, totalCash: 0, totalTransfer: 0, invoiceCount: 0,
       totalDiscount: 0, totalCost: 0, totalIncome: 0, totalExpense: 0,
       cashExpense: 0, transferExpense: 0, cashIncome: 0, transferIncome: 0,
-      expenseInventory: 0, expenseSalary: 0, expenseRent: 0, expenseOther: 0
+      expenseInventory: 0, expenseSalary: 0, expenseRent: 0, expenseOther: 0,
+      salesCashIncome: 0, salesTransferIncome: 0
     };
     for (const stat of stats) {
       for (const key of Object.keys(totals)) {
-        totals[key] += Number((stat as any)[key]) || 0;
+        const value = stat[key as keyof DailyStats];
+        if (typeof value === 'number' && Number.isFinite(value)) totals[key] += value;
       }
     }
     const sales = periodInvoices.filter(i => i.status !== 'cancelled');
@@ -1729,65 +1450,86 @@ export const SummaryView = ({
     // Chỉ cho phép dùng totalRecomputedCost khi toàn bộ các ngày trong kỳ đều dùng nguồn raw
     // VÀ toàn bộ hóa đơn của kỳ đã được xác nhận đầy đủ từ máy chủ không bị phân trang dở
     const isEntirePeriodRawAndReady = reportDataReady && !hasMoreInvoices && periodInvoices.length > 0 && stats.every(s => s._source === 'rawStat');
-    const isCostFullyResolved = isEntirePeriodRawAndReady && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
+    const isCostFullyResolved = isEntirePeriodRawAndReady && dates.every(day => rawReport.invoiceDays.has(day))
+      && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
 
-    const isAllStatsReconciled = dailyStatsReady && dates.length > 0 && dates.every(d => {
-      const s = statsByDate.get(d);
-      return s && !(s as any)._fromCache && (s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
-    });
-
-    // Hàm đánh giá xem từng ngày có nguồn dữ liệu được xác nhận từ server hay chưa
-    const isDayConfirmed = (s: DailyStats & { _source: 'serverStat' | 'rawStat' | 'empty' }) => {
-      if (s._source === 'empty') return false;
-      if (s._source === 'rawStat') {
-        // Nguồn raw nằm trong phạm vi ngày đã được xác nhận từ snapshot
-        return Boolean(isAnyRawActive && s.date >= rawScope.startDay && s.date <= rawScope.endDay);
-      }
-      if (s._source === 'serverStat') {
-        const srv = statsByDate.get(s.date);
-        if (!srv || (srv as any)._fromCache || !dailyStatsReady) return false;
-        if (s.date < todayVietnam) {
-          return s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity';
-        }
-        return true;
-      }
-      return false;
+    // Đánh giá trạng thái xác nhận theo từng chỉ tiêu độc lập cho từng ngày
+    const isDayRevenueConfirmed = (d: string) => {
+      if (isDayInRawInvoices(d)) return rawReport.invoiceDays.has(d);
+      if (d === todayVietnam) return isInvoicesReady;
+      const srv = statsByDate.get(d);
+      return Boolean(srv && !(srv as any)._fromCache && dailyStatsReady && reconciledSource(srv, 'invoices'));
     };
 
-    // Toàn bộ các ngày trong kỳ đã có nguồn dữ liệu xác nhận (kể cả kỳ kết hợp stats ngày cũ + raw hôm nay)
-    const isAllDaysConfirmed = dates.length > 0 && stats.every(isDayConfirmed);
-    const isComplete = (reportDataReady && !hasMoreInvoices) || isAllStatsReconciled || isAllDaysConfirmed;
+    const isDayExpenseConfirmed = (d: string) => {
+      if (isDayInRawCash(d)) return rawReport.cashDays.has(d);
+      if (d === todayVietnam) return isInvoicesReady;
+      const srv = statsByDate.get(d);
+      return Boolean(srv && !(srv as any)._fromCache && dailyStatsReady && reconciledSource(srv, 'cash'));
+    };
+
+    const isDayCostConfirmed = (d: string) => {
+      if (d === todayVietnam) {
+        return isDayRevenueConfirmed(d) && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
+      }
+      const s = stats.find(stat => stat.date === d);
+      return isDayRevenueConfirmed(d) && verifiedDayCost(s);
+    };
+
+    const isRevenueComplete = dates.length > 0 && dates.every(isDayRevenueConfirmed);
+    const isExpenseComplete = dates.length > 0 && dates.every(isDayExpenseConfirmed);
+    const isCostComplete = dates.length > 0 && dates.every(isDayCostConfirmed);
+    const isProfitComplete = isRevenueComplete && isExpenseComplete && isCostComplete;
+
+    // Trạng thái đầy đủ theo từng phân hệ/tab
+    let isComplete = false;
+    if (activeTab === 'sales' || activeTab === 'items') {
+      isComplete = isRevenueComplete;
+    } else if (activeTab === 'cash') {
+      isComplete = isExpenseComplete;
+    } else if (activeTab === 'financial') {
+      isComplete = isProfitComplete;
+    } else {
+      isComplete = isProfitComplete;
+    }
+
+    // Đánh giá ngày đã xác nhận chung: ngày đó phải có ít nhất 1 nguồn hợp lệ
+    const isDayConfirmed = (stat: DailyStats & { _source: 'serverStat' | 'rawStat' | 'empty' }) =>
+      stat._source !== 'empty' && isDayRevenueConfirmed(stat.date) && isDayExpenseConfirmed(stat.date);
 
     // Số ngày thiếu: Là những ngày không có nguồn dữ liệu nào được xác nhận (missing / empty)
     const missingDaysCount = stats.filter(s => !isDayConfirmed(s)).length;
-    const reconciledDaysCount = stats.filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity').length;
+    const reconciledDaysCount = stats.filter(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity' || s.coverageStatus === 'live_tracking').length;
     const daysUsingServerStats = stats.filter(s => s._source === 'serverStat').length;
     const daysUsingRawStats = stats.filter(s => s._source === 'rawStat').length;
 
     // Trạng thái giá vốn toàn kỳ:
-    const isAllCostsComplete = stats.every(s => (s.costStatus === 'complete' && typeof s.totalCost === 'number') || s.coverageStatus === 'zero_activity');
     const hasAnyCostEstimated = stats.some(s => s.costStatus === 'estimated');
-    const calculatedCostStatus: 'complete' | 'estimated' | 'partial' = !isComplete
-      ? 'partial'
-      : isCostFullyResolved || isAllCostsComplete
-      ? 'complete'
-      : hasAnyCostEstimated
-      ? 'estimated'
-      : 'partial';
+    const calculatedCostStatus: 'complete' | 'estimated' | 'partial' = !isRevenueComplete ? 'partial'
+      : isCostComplete ? 'complete' : hasAnyCostEstimated ? 'estimated' : 'partial';
 
     // Trạng thái đối soát toàn kỳ (coverageStatus):
-    const isAllReconciledOrZero = stats.every(s => s.coverageStatus === 'reconciled' || s.coverageStatus === 'zero_activity');
-    const calculatedCoverageStatus: 'reconciled' | 'partial' = isComplete && !sourceMismatch && missingDaysCount === 0 && isAllReconciledOrZero
+    const isAllReconciledOrZero = stats.every(s => 
+      s.coverageStatus === 'reconciled' || 
+      s.coverageStatus === 'zero_activity' || 
+      s.coverageStatus === 'live_tracking'
+    );
+    const isTodayConfirmed = isViewingTodayOnly && isRevenueComplete && isExpenseComplete && !hasAnyIncompleteInvoice && missingCostItems.length === 0;
+    const calculatedCoverageStatus: 'reconciled' | 'partial' = (isProfitComplete || isTodayConfirmed) && !sourceMismatch && missingDaysCount === 0 && isAllReconciledOrZero
       ? 'reconciled'
       : 'partial';
 
     return {
       ...totals,
-      totalCost: isCostFullyResolved && totalRecomputedCost > 0 ? totalRecomputedCost : totals.totalCost,
+      totalCost: isCostFullyResolved ? totalRecomputedCost : totals.totalCost,
       hasExpenseBreakdown: true,
       costStatus: calculatedCostStatus,
       coverageStatus: calculatedCoverageStatus,
       isComplete,
+      isRevenueComplete,
+      isExpenseComplete,
+      isCostComplete,
+      isProfitComplete,
       missingDaysCount,
       reconciledDaysCount,
       daysUsingServerStats,
@@ -1799,101 +1541,16 @@ export const SummaryView = ({
       zeroActivityDaysCount: stats.filter(s => !s.hasData && s.coverageStatus === 'zero_activity').length,
       daysUsingFallbackInvoices: 0,
       daysUsingFallbackCash: 0,
-      isInvoicePartial: !isComplete,
-      isCashPartial: !isComplete,
+      isInvoicePartial: !isRevenueComplete,
+      isCashPartial: !isExpenseComplete,
       hasSalesInStats: sales.length > 0 || totals.totalRevenue > 0,
-      hasCostInStats: isComplete,
+      hasCostInStats: isCostComplete,
       hasExpenseInStats: totals.totalExpense > 0,
       hasIncomeInStats: totals.totalIncome > 0
     };
-  }, [dailyStats, dailyStatsReady, periodInvoices, periodCash, rawScope, reportDataReady, hasMoreInvoices, dateFilter, filterType, todayVietnam, currentUser?.storeId, sourceMismatch, hasAnyIncompleteInvoice, missingCostItems.length, totalRecomputedCost]);
+  }, [dailyStats, dailyStatsReady, statsPeriodKey, periodKey, periodInvoices, sourceCoverage, rawReport, reportDataReady, hasMoreInvoices, dateFilter, filterType, todayVietnam, currentUser?.storeId, sourceMismatch, hasAnyIncompleteInvoice, missingCostItems.length, totalRecomputedCost, activeTab]);
 
-  // Cash Book Stats - Tính toán chuẩn xác: Tổng thu = salesReceipts + nonSaleIncome
-  const cashStats = useMemo(() => {
-    const filterDate = parseISO(dateFilter);
-    // 1. Thu ngoài bán hàng (Non-sale income)
-    const nonSaleCashIncomeFromList = filteredCash
-      .filter(t => t.type === 'income' && !isSalesCategory(t.category) && (t.paymentMethod === 'cash' || !t.paymentMethod))
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    const nonSaleBankIncomeFromList = filteredCash
-      .filter(t => t.type === 'income' && !isSalesCategory(t.category) && !isCashPayment(t.paymentMethod))
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    const nonSaleCashIncome = (statsAggregates && typeof statsAggregates.cashIncome === 'number')
-      ? statsAggregates.cashIncome
-      : nonSaleCashIncomeFromList;
-
-    const nonSaleBankIncome = (statsAggregates && typeof statsAggregates.transferIncome === 'number')
-      ? statsAggregates.transferIncome
-      : nonSaleBankIncomeFromList;
-
-    const nonSaleIncome = (statsAggregates && typeof statsAggregates.totalIncome === 'number')
-      ? statsAggregates.totalIncome
-      : (nonSaleCashIncome + nonSaleBankIncome);
-
-    // 2. Thu từ bán hàng (Sales receipts)
-    const filteredCashSalesInTx = filteredCash
-      .filter(t => t.type === 'income' && isSalesCategory(t.category) && (t.paymentMethod === 'cash' || !t.paymentMethod))
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    const filteredBankSalesInTx = filteredCash
-      .filter(t => t.type === 'income' && isSalesCategory(t.category) && !isCashPayment(t.paymentMethod))
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    // Ưu tiên nguồn bán hàng đầy đủ từ statsAggregates (toàn bộ kỳ, không bị giới hạn 30 bản ghi)
-    const cashSalesAmount = filteredCashSalesInTx;
-    const bankSalesAmount = filteredBankSalesInTx;
-    const salesReceipts = cashSalesAmount + bankSalesAmount;
-
-    // 3. Tiền vào theo phương thức: Bán hàng + Thu ngoài bán hàng tương ứng
-    const periodCashIncome = nonSaleCashIncome + cashSalesAmount;
-    const periodBankIncome = nonSaleBankIncome + bankSalesAmount;
-
-    // Tổng tiền vào = Thu bán hàng + Thu ngoài bán hàng (tuyệt đối không cộng đúp doanh thu bán hàng)
-    const totalIncome = periodCashIncome + periodBankIncome;
-
-    // 4. Chi phí (Expenses)
-    const cashExpensesFromList = filteredCash
-      .filter(t => t.type === 'expense' && (t.paymentMethod === 'cash' || !t.paymentMethod))
-      .reduce((sum, t) => sum + t.amount, 0);
-    const bankExpensesFromList = filteredCash
-      .filter(t => t.type === 'expense' && !isCashPayment(t.paymentMethod))
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    // Chi phí phân bổ theo phương thức từ statsAggregates nếu có số liệu toàn kỳ
-    const totalCashExpense = (statsAggregates && typeof statsAggregates.cashExpense === 'number')
-      ? statsAggregates.cashExpense
-      : cashExpensesFromList;
-
-    const totalTransferExpense = (statsAggregates && typeof statsAggregates.transferExpense === 'number')
-      ? statsAggregates.transferExpense
-      : bankExpensesFromList;
-
-    const totalExpense = totalCashExpense + totalTransferExpense;
-
-    // These are period movements. A real carried-forward balance requires a
-    // reconciled account ledger; summing successive shift floats double-counts cash.
-    const openingBalance=0;
-    const closingBalance=totalIncome-totalExpense;
-    const cashBalance=periodCashIncome-totalCashExpense;
-    const bankBalance=periodBankIncome-totalTransferExpense;
-
-    return {
-      openingBalance,
-      totalIncome,
-      totalExpense,
-      closingBalance,
-      cashBalance,
-      bankBalance,
-      salesReceipts,
-      nonSaleIncome,
-      periodCashIncome,
-      periodBankIncome,
-      totalCashExpense,
-      totalTransferExpense
-    };
-  }, [filteredCash, statsAggregates, dateFilter, filterType, shifts, activeShift]);
+  const cashStats = useMemo(() => cashBookTotals(filteredCash, statsAggregates), [filteredCash, statsAggregates]);
 
   const renderedCashTransactions = useMemo(() => {
     let result = filteredCash;
@@ -1909,77 +1566,77 @@ export const SummaryView = ({
     return result;
   }, [filteredCash, cashFilterType, cashMethodFilter]);
 
-  const exportToExcel = () => {
-    if (!reportDataReady || isLoadingHistorical || sourceMismatch) { alert('Chưa xác nhận đủ chứng từ từ server. Vui lòng đợi đồng bộ hoặc kết nối lại trước khi xuất.'); return; }
-    let dataToExport = [];
-    let fileName = '';
-
-    if (activeTab === 'sales') {
-      dataToExport = filteredInvoices.map(inv => ({
-        'Mã HĐ': inv.id.toUpperCase(),
-        'Thời gian': format(parseISO(inv.date), 'HH:mm dd/MM/yyyy'),
-        'Bàn': inv.tableName,
-        'Nhân viên': inv.staffName,
-        'Tổng tiền': inv.total,
-        'PTTT': paymentMethodMap[inv.paymentMethod as keyof typeof paymentMethodMap] || inv.paymentMethod || 'Tiền mặt',
-        'Ghi chú': inv.note || ''
-      }));
-      fileName = hasMoreInvoices
-        ? `Bao_cao_hoa_don_${dateFilter}_(da_tai_${filteredInvoices.length}_don).xlsx`
-        : `Bao_cao_hoa_don_${dateFilter}_(toan_ky).xlsx`;
-    } else if (activeTab === 'inventory') {
-      dataToExport = filteredLogs.map(log => ({
-        'Thời gian': format(parseISO(log.date), 'HH:mm dd/MM/yyyy'),
-        'Loại': log.type === 'import' ? 'Nhập hàng' : 'Trả hàng',
-        'PTTT': log.paymentMethod === 'transfer' ? 'Chuyển khoản' : 'Tiền mặt',
-        'Mặt hàng': log.itemName,
-        'Số lượng': log.quantity,
-        'Tổng tiền': log.totalPrice
-      }));
-      fileName = hasMoreLogs
-        ? `Bao_cao_kho_${dateFilter}_(da_tai_${filteredLogs.length}_phieu).xlsx`
-        : `Bao_cao_kho_${dateFilter}_(toan_ky).xlsx`;
-    } else if (activeTab === 'items') {
-      dataToExport = sortedItemSales.map(item => ({
-        'Tên món': item.name,
-        'Số lượng bán': item.quantity,
-        'Doanh thu': item.revenue
-      }));
-      fileName = hasMoreInvoices
-        ? `Bao_cao_mon_ban_chay_${dateFilter}_(da_tai_${filteredInvoices.length}_don).xlsx`
-        : `Bao_cao_mon_ban_chay_${dateFilter}_(toan_ky).xlsx`;
-    } else if (activeTab === 'cash') {
-      dataToExport = renderedCashTransactions.map(t => ({
-        'Thời gian': format(parseISO(t.date), 'HH:mm dd/MM/yyyy'),
-        'Loại': t.type === 'income' ? 'Thu' : 'Chi',
-        'Hạng mục': t.category,
-        'Số tiền': t.amount,
-        'PTTT': paymentMethodMap[t.paymentMethod as keyof typeof paymentMethodMap] || t.paymentMethod || 'Tiền mặt',
-        'Ghi chú': t.note || ''
-      }));
-      fileName = hasMoreCash
-        ? `So_quy_${dateFilter}_(da_tai_${renderedCashTransactions.length}_phieu).xlsx`
-        : `So_quy_${dateFilter}_(toan_ky).xlsx`;
-    }
-
-    if (dataToExport.length === 0) {
-      alert('Không có dữ liệu trong kỳ này để xuất Excel.');
-      return;
-    }
-
-    const ws = XLSX.utils.json_to_sheet(dataToExport);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Báo cáo");
-    
-    // Explicitly write to array buffer and create blob to ensure correct MIME type
-    const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-    const data = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const url = URL.createObjectURL(data);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    URL.revokeObjectURL(url);
+  const exportToExcel = async () => {
+    if (!currentUser?.storeId || exportLock.current) return;
+    const key = periodKey, requestId = activeRequestId.current;
+    const dates = getExpectedPeriodDates(dateFilter, filterType, todayVietnam).filter(day => day <= todayVietnam);
+    if (!dates.length) { alert('Vui lòng chọn kỳ hợp lệ.'); return; }
+    exportLock.current = true; setIsExporting(true);
+    try {
+      let dataToExport: Record<string, any>[] = [], fileName = '';
+      const current = () => key === currentPeriodRef.current && requestId === activeRequestId.current && activeTabRef.current === activeTab;
+      if (activeTab === 'inventory') {
+        const rows = await fetchDateRangeRows<InventoryTransaction>('inventory_logs', currentUser.storeId, dates[0], dates[dates.length - 1]);
+        if (!current()) throw new Error('Kỳ báo cáo đã thay đổi. Vui lòng xuất lại.');
+        dataToExport = rows.sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).map(row => ({
+          'Thời gian': safeFormatDate(row.date), 'Loại': row.type === 'import' ? 'Nhập hàng' : 'Trả hàng',
+          'PTTT': row.paymentMethod === 'transfer' ? 'Chuyển khoản' : 'Tiền mặt', 'Mặt hàng': row.itemName,
+          'Số lượng': row.quantity, 'Tổng tiền': row.totalPrice,
+        }));
+        fileName = `Bao_cao_kho_${dateFilter}_(toan_ky).xlsx`;
+      } else {
+        // Lấy mảng đầy đủ trực tiếp; không await setState rồi sử dụng mảng của lượt render cũ.
+        const sources = await fetchFinancialPeriodSources(currentUser.storeId, dates[0], dates[dates.length - 1]);
+        if (!current()) throw new Error('Kỳ báo cáo đã thay đổi. Vui lòng xuất lại.');
+        const invalidInvoice = sources.invoices.find(invoice => !validInvoiceAmount(invoice));
+        const invalidCash = sources.cash.find(receipt => !validCashAmount(receipt));
+        if (invalidInvoice) throw new Error(`Hóa đơn ${invalidInvoice.id} có số liệu không hợp lệ.`);
+        if (invalidCash) throw new Error(`Phiếu thu/chi ${invalidCash.id} có số liệu không hợp lệ.`);
+        const mismatch = receiptMismatch(sources.invoices, sources.cash);
+        if (mismatch) throw new Error(mismatch);
+        const invoices = [...sources.invoices].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+        if (activeTab === 'sales') {
+          const search = invoiceSearch.trim().toLowerCase();
+          dataToExport = invoices.filter(row => !search || [row.id, row.tableName, row.staffName].some(value => (value || '').toLowerCase().includes(search))).map(row => ({
+            'Mã HĐ': row.id.toUpperCase(), 'Thời gian': safeFormatDate(row.date),
+            'Bàn': row.tableName, 'Nhân viên': row.staffName, 'Tổng tiền': row.total,
+            'PTTT': paymentMethodMap[row.paymentMethod] || row.paymentMethod || 'Tiền mặt', 'Ghi chú': row.note || '',
+          }));
+          fileName = `Bao_cao_hoa_don_${dateFilter}_(toan_ky).xlsx`;
+        } else if (activeTab === 'cash') {
+          dataToExport = sources.cash.filter(row => {
+            const automatic = isSalesCategory(row.category) || row.category === 'Nhập hàng' || row.category === 'Trả hàng';
+            return (isAdminOrManager || (row.staffId === currentUser.id && !automatic))
+              && (cashFilterType === 'all' || row.type === cashFilterType)
+              && (cashMethodFilter === 'all' || (row.paymentMethod || 'cash') === cashMethodFilter);
+          }).sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).map(row => ({
+            'Thời gian': safeFormatDate(row.date), 'Loại': row.type === 'income' ? 'Thu' : 'Chi',
+            'Hạng mục': row.category, 'Số tiền': row.amount, 'PTTT': paymentMethodMap[row.paymentMethod] || row.paymentMethod || 'Tiền mặt', 'Ghi chú': row.note || '',
+          }));
+          fileName = `So_quy_${dateFilter}_(toan_ky).xlsx`;
+        } else if (activeTab === 'items') {
+          const totals = new Map<string, { name: string; quantity: number; revenue: number }>();
+          for (const invoice of invoices) {
+            if (invoice.total > 0 && !invoice.items?.length) throw new Error('Có hóa đơn thiếu chi tiết món. Cần đối soát trước khi xuất thống kê món.');
+            const revenues = allocatedItemRevenue(invoice);
+            (invoice.items || []).forEach((item, index) => {
+              const row = totals.get(item.id) || { name: item.name, quantity: 0, revenue: 0 };
+              row.quantity += item.quantity; row.revenue += revenues[index]; totals.set(item.id, row);
+            });
+          }
+          dataToExport = [...totals.values()].sort((a, b) => b.revenue - a.revenue).map(row => ({ 'Tên món': row.name, 'Số lượng bán': row.quantity, 'Doanh thu': row.revenue }));
+          fileName = `Bao_cao_mon_ban_chay_${dateFilter}_(toan_ky).xlsx`;
+        }
+      }
+      if (!dataToExport.length) { alert('Không có dữ liệu trong kỳ này để xuất Excel.'); return; }
+      const sheet = XLSX.utils.json_to_sheet(dataToExport), book = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(book, sheet, 'Báo cáo');
+      const bytes = XLSX.write(book, { bookType: 'xlsx', type: 'array' });
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = fileName; anchor.click(); URL.revokeObjectURL(url);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Không thể xác nhận đủ dữ liệu để xuất báo cáo.');
+    } finally { exportLock.current = false; setIsExporting(false); }
   };
 
   const invoicesSum = periodInvoices.reduce((sum, inv) => sum + inv.total, 0);
@@ -1995,26 +1652,34 @@ export const SummaryView = ({
   }, 0);
 
   // CỐ ĐỊNH GIÁ VỐN (COGS) VÀ LỢI NHUẬN: Ưu tiên dùng giá vốn thực tế đã tổng hợp từ daily_stats khi đầy đủ
+  const isPeriodFullyLoadedFromRaw = Boolean(reportDataReady && !hasMoreInvoices && periodInvoices.length > 0 && (statsAggregates?.daysUsingServerStats === 0));
   let finalCost = 0;
   let isCostEstimated = false;
   let isCostUnavailable = false;
   let costEstimateReason = '';
 
-  // 0. Chỉ dùng totalRecomputedCost khi toàn bộ kỳ được nạp đầy đủ 100% từ chứng từ gốc đã xác nhận từ server
-  const isPeriodFullyLoadedFromRaw = reportDataReady && !hasMoreInvoices && periodInvoices.length > 0 && (statsAggregates?.daysUsingServerStats === 0);
-  if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
+  // 0a. Khi đang xem hôm nay: Tính trực tiếp từ công thức định lượng và hóa đơn live thời gian thực
+  if (isViewingTodayOnly && totalRecomputedCost > 0) {
+    finalCost = totalRecomputedCost;
+    isCostEstimated = missingCostItems.length > 0 || hasAnyIncompleteInvoice;
+    costEstimateReason = isCostEstimated
+      ? (missingCostItems.length > 0 ? `Có ${missingCostItems.length} món chưa có giá vốn: ${missingCostItems.slice(0, 3).map(m => m.name).join(', ')}` : 'Một số món chưa chốt giá vốn')
+      : '';
+  }
+  // 0b. Chỉ dùng totalRecomputedCost khi toàn bộ kỳ được nạp đầy đủ 100% từ chứng từ gốc đã xác nhận từ server
+  else if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
     finalCost = totalRecomputedCost;
     isCostEstimated = false;
     costEstimateReason = '';
   }
-  // 1. Nếu daily_stats có giá vốn đầy đủ toàn bộ các ngày (costStatus === 'complete' và totalCost là số, kể cả 0đ)
-  else if (statsAggregates && statsAggregates.costStatus === 'complete' && typeof statsAggregates.totalCost === 'number') {
+  // 1. Nếu daily_stats có giá vốn đầy đủ toàn bộ các ngày (costStatus === 'complete' và totalCost là số không âm)
+  else if (statsAggregates && statsAggregates.costStatus === 'complete' && typeof statsAggregates.totalCost === 'number' && statsAggregates.totalCost >= 0) {
     finalCost = statsAggregates.totalCost;
     isCostEstimated = false;
     costEstimateReason = '';
   }
   // 2. Nếu daily_stats có giá vốn nhưng là ước tính (costStatus === 'estimated')
-  else if (statsAggregates && statsAggregates.costStatus === 'estimated' && typeof statsAggregates.totalCost === 'number') {
+  else if (statsAggregates && statsAggregates.costStatus === 'estimated' && typeof statsAggregates.totalCost === 'number' && statsAggregates.totalCost >= 0) {
     if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
       finalCost = totalRecomputedCost;
       isCostEstimated = false;
@@ -2028,7 +1693,7 @@ export const SummaryView = ({
     }
   }
   // 3. Nếu daily_stats có giá vốn một phần (costStatus === 'partial')
-  else if (statsAggregates && statsAggregates.costStatus === 'partial' && typeof statsAggregates.totalCost === 'number') {
+  else if (statsAggregates && statsAggregates.costStatus === 'partial' && typeof statsAggregates.totalCost === 'number' && statsAggregates.totalCost >= 0) {
     if (isPeriodFullyLoadedFromRaw && !hasAnyIncompleteInvoice && missingCostItems.length === 0) {
       finalCost = totalRecomputedCost;
       isCostEstimated = false;
@@ -2080,8 +1745,9 @@ export const SummaryView = ({
     isCostUnavailable = true;
     costEstimateReason = 'Chưa có dữ liệu giá vốn đủ để tính lợi nhuận';
   }
+  finalCost = Math.max(0, finalCost);
   const totalCost = finalCost;
-  const totalProfit = totalSales - totalCost;
+  const totalProfit = Math.round(totalSales - totalCost);
 
   // --- Financial Metrics ---
   const cogsPercentage = totalSales > 0 ? (totalCost / totalSales) * 100 : 0;
@@ -2179,12 +1845,23 @@ export const SummaryView = ({
     finally {setIsSavingCash(false);}
   };
 
-  const isSummaryDataReady = Boolean(statsAggregates?.isComplete || (reportDataReady && !hasMoreInvoices) || (statsAggregates?.coverageStatus === 'reconciled'));
+  const isSummaryDataReady = activeTab === 'inventory' ? inventoryDataReady
+    : activeTab === 'items' ? Boolean(statsAggregates?.isRevenueComplete && expectedReportDates.every(day => sourceCoverage.invoiceDays.has(day)))
+    : activeTab === 'financial' ? Boolean(statsAggregates?.isProfitComplete && (financialCostBasis !== 'payroll' || payrollDataReady))
+    : activeTab === 'cash' ? Boolean(statsAggregates?.isRevenueComplete && statsAggregates?.isExpenseComplete)
+    : Boolean(statsAggregates?.isRevenueComplete);
 
   return (
     <div className="p-8 space-y-6 h-full overflow-y-auto">
       {isAdmin && activeTab==='items'&&periodInvoices.some(i=>i.total>0&&!i.items?.length)&&<div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700">Có hóa đơn thiếu chi tiết món. Thống kê theo món chưa đầy đủ; cần đối soát hóa đơn gốc.</div>}
-      {isAdmin && sourceMismatch && <div role="alert" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{sourceMismatch}</div>}
+      {isAdminOrManager && (rawReport.issues.length > 0 || sourceMismatch) && (
+        <details className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300" open>
+          <summary>Chứng từ cần đối soát</summary>
+          <ul className="list-disc pl-5 max-h-48 overflow-auto">
+            {[...rawReport.issues, ...[...rawReport.receiptIssues].map(([day, issue]) => `${day} · ${issue}`)].map((issue, index) => <li key={index}>{issue}</li>)}
+          </ul>
+        </details>
+      )}
       {isAdmin && (!isSummaryDataReady || reportError) && <div role="status" className="p-3 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300">{reportError || 'Đang đồng bộ dữ liệu từ máy chủ. Số liệu dưới đây chưa được xác nhận đầy đủ; chưa thể xuất báo cáo.'}</div>}
       {isAdmin && activeTab === 'financial' && <div className="text-sm text-gray-500">Lợi nhuận dùng doanh thu gồm VAT theo hóa đơn; doanh thu món là trước VAT, sau giảm giá. Lương: {financialCostBasis==='payroll' ? 'tạm tính theo các bảng lương đã chốt; chưa bao gồm nhân viên chưa chốt, phân bổ theo ngày khi xem ngày' : 'theo phiếu chi lương thực tế trong kỳ'}. {financialCostBasis==='payroll'&&!payrollDataReady ? 'Bảng lương đang đồng bộ.' : ''}<select className="ml-2 rounded border bg-transparent p-1" value={financialCostBasis} onChange={event=>setFinancialCostBasis(event.target.value as 'cash'|'payroll')}><option value="cash">Chi lương thực tế</option><option value="payroll">Bảng lương đã chốt (tạm tính)</option></select></div>}
       <div className="flex justify-between items-center">
@@ -2204,6 +1881,7 @@ export const SummaryView = ({
           {isAdminOrManager && (
             <button 
               onClick={exportToExcel}
+              disabled={isExporting}
               className="flex items-center gap-2 px-4 py-2 bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl text-sm hover:bg-black/10 dark:hover:bg-white/10 transition-all cursor-pointer"
             >
               <Download className="w-4 h-4" /> Xuất Excel
@@ -2255,7 +1933,7 @@ export const SummaryView = ({
                 </span>
               )}
             </div>
-            <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-emerald-600 dark:text-emerald-500">{totalSales.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</p>
+            <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-emerald-600 dark:text-emerald-500">{Math.round(totalSales).toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ</p>
             <p className="text-xs text-gray-600 dark:text-gray-400">{totalInvoicesCount} hóa đơn {hasMoreInvoices && statsAggregates?.isInvoicePartial ? '(còn hóa đơn trên hệ thống)' : statsAggregates?.missingDaysCount ? `(thiếu ${statsAggregates.missingDaysCount} ngày)` : ''}</p>
           </div>
           )}
@@ -2294,7 +1972,7 @@ export const SummaryView = ({
                     </span>
                   )}
                 </div>
-                <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-blue-600 dark:text-blue-500">{isCostUnavailable ? '—' : `${totalProfit.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ`}</p>
+                <p className="text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold text-blue-600 dark:text-blue-500">{isCostUnavailable ? '—' : `${Math.round(totalProfit).toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ`}</p>
                 <p className="text-xs text-gray-600 dark:text-gray-400">Tỷ suất: {isCostUnavailable ? 'chưa đối soát giá vốn' : `${totalSales > 0 ? ((totalProfit / totalSales) * 100).toFixed(1) : 0}%`}</p>
               </div>
               <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
@@ -2316,11 +1994,11 @@ export const SummaryView = ({
                   "text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold",
                   storePaymentStats.cashNet >= 0 ? "text-emerald-600 dark:text-emerald-500" : "text-rose-600 dark:text-rose-500"
                 )}>
-                  {storePaymentStats.cashNet.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ
+                  {Math.round(storePaymentStats.cashNet).toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ
                 </p>
                 <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400 font-mono pt-1 border-t border-black/5 dark:border-white/5">
-                  <span className="text-emerald-600 dark:text-emerald-500 font-medium">Thu: +{storePaymentStats.cashIncome.toLocaleString('vi-VN')}đ</span>
-                  <span className="text-rose-600 dark:text-rose-500 font-medium">Chi: -{storePaymentStats.cashExpense.toLocaleString('vi-VN')}đ</span>
+                  <span className="text-emerald-600 dark:text-emerald-500 font-medium">Thu: +{Math.round(storePaymentStats.cashIncome).toLocaleString('vi-VN')}đ</span>
+                  <span className="text-rose-600 dark:text-rose-500 font-medium">Chi: -{Math.round(storePaymentStats.cashExpense).toLocaleString('vi-VN')}đ</span>
                 </div>
               </div>
               <div className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-4 md:p-6 space-y-2">
@@ -2337,11 +2015,11 @@ export const SummaryView = ({
                   "text-xl md:text-2xl lg:text-3xl font-mono truncate font-bold",
                   storePaymentStats.transferNet >= 0 ? "text-blue-600 dark:text-blue-500" : "text-rose-600 dark:text-rose-500"
                 )}>
-                  {storePaymentStats.transferNet.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ
+                  {Math.round(storePaymentStats.transferNet).toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ
                 </p>
                 <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400 font-mono pt-1 border-t border-black/5 dark:border-white/5">
-                  <span className="text-emerald-600 dark:text-emerald-500 font-medium">Thu: +{storePaymentStats.transferIncome.toLocaleString('vi-VN')}đ</span>
-                  <span className="text-rose-600 dark:text-rose-500 font-medium">Chi: -{storePaymentStats.transferExpense.toLocaleString('vi-VN')}đ</span>
+                  <span className="text-emerald-600 dark:text-emerald-500 font-medium">Thu: +{Math.round(storePaymentStats.transferIncome).toLocaleString('vi-VN')}đ</span>
+                  <span className="text-rose-600 dark:text-rose-500 font-medium">Chi: -{Math.round(storePaymentStats.transferExpense).toLocaleString('vi-VN')}đ</span>
                 </div>
               </div>
             </>
@@ -2411,21 +2089,36 @@ export const SummaryView = ({
               <strong>Dữ liệu chưa đối soát đủ:</strong> {
                 (statsAggregates?.missingDaysCount ?? 0) > 0 
                   ? <>Kỳ này còn <strong>{statsAggregates.missingDaysCount}</strong> ngày chưa có dữ liệu tổng hợp. Số liệu đang được kết hợp từ chứng từ đã tải.</>
-                  : <>Chứng từ kỳ này chưa tải hết ({statsAggregates?.isInvoicePartial && hasMoreInvoices ? 'còn hóa đơn' : ''}{statsAggregates?.isInvoicePartial && hasMoreInvoices && statsAggregates?.isCashPartial && hasMoreCash ? ', ' : ''}{statsAggregates?.isCashPartial && hasMoreCash ? 'còn sổ quỹ' : ''} trên hệ thống). Số liệu đang tính trên trang đầu tiên.</>
+                  : (hasMoreInvoices || hasMoreCash)
+                    ? <>Chứng từ kỳ này chưa tải hết ({statsAggregates?.isInvoicePartial && hasMoreInvoices ? 'còn hóa đơn' : ''}{statsAggregates?.isInvoicePartial && hasMoreInvoices && statsAggregates?.isCashPartial && hasMoreCash ? ', ' : ''}{statsAggregates?.isCashPartial && hasMoreCash ? 'còn sổ quỹ' : ''} trên hệ thống). Số liệu đang tính trên trang đầu tiên.</>
+                    : <>Một số chứng từ chưa được xác nhận đầy đủ từ máy chủ.</>
               }
             </span>
           </div>
-          {hasMoreInvoices && (
-            <button
-              type="button"
-              disabled={isLoadingMoreInvoices}
-              onClick={handleLoadAllInvoices}
-              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
-            >
-              {isLoadingMoreInvoices ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-              <span>Tải toàn bộ kỳ để đối soát</span>
-            </button>
-          )}
+          <div className="flex items-center gap-2 shrink-0">
+            {((statsAggregates?.missingDaysCount ?? 0) > 0) && (
+              <button
+                type="button"
+                disabled={isReconcilingMissingDays}
+                onClick={handleReconcileMissingDays}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
+              >
+                {isReconcilingMissingDays ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                <span>Chốt đối soát {statsAggregates?.missingDaysCount} ngày thiếu</span>
+              </button>
+            )}
+            {hasMoreInvoices && (
+              <button
+                type="button"
+                disabled={isLoadingMoreInvoices}
+                onClick={handleLoadAllInvoices}
+                className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
+              >
+                {isLoadingMoreInvoices ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                <span>Tải toàn bộ kỳ để đối soát</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -2433,7 +2126,7 @@ export const SummaryView = ({
         {isAdminOrManager && (
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex gap-1.5 p-1 bg-gray-100 dark:bg-black/20 rounded-xl">
-              {(['day', 'month', 'year'] as const).filter(t => t === 'day' || currentUser?.store?.packageFeatures?.invoiceHistory !== 'daily').map(t => (
+              {(['day', 'month', 'year'] as const).filter(t => t === 'day' || !isHistoryLimitedToDaily).map(t => (
                 <button
                   key={t}
                   type="button"
@@ -2533,16 +2226,21 @@ export const SummaryView = ({
             className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-2 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50 pr-32 font-medium"
             value={filterType === 'year' ? dateFilter.slice(0, 4) : filterType === 'month' ? dateFilter.slice(0, 7) : dateFilter.slice(0, 10)}
             onChange={(e) => {
-              const val = e.target.value;
+              let val = e.target.value;
               if (filterType === 'year') {
                 setDateFilter(val ? `${val}-01-01` : `${new Date().getFullYear()}-01-01`);
               } else {
+                if (filterType === 'day' && val > todayVietnam) {
+                  val = todayVietnam;
+                } else if (filterType === 'month' && val > todayVietnam.slice(0, 7)) {
+                  val = todayVietnam.slice(0, 7);
+                }
                 setDateFilter(val);
               }
               setCurrentPage(1);
             }}
             min={filterType === 'year' ? 2020 : undefined}
-            max={filterType === 'year' ? 2030 : undefined}
+            max={filterType === 'year' ? 2030 : filterType === 'month' ? todayVietnam.slice(0, 7) : todayVietnam}
             placeholder={filterType === 'year' ? 'Nhập năm (VD: 2026)' : ''}
           />
           {isLoadingHistorical && (
@@ -2597,7 +2295,7 @@ export const SummaryView = ({
           >
             Sổ quỹ
           </button>
-          {isAdminOrManager && currentUser?.store?.packageFeatures?.financialReports && (
+          {isAdminOrManager && isFinancialReportsUnlocked && (
           <button 
             onClick={() => { setActiveTab('financial'); setCurrentPage(1); }}
             className={cn(
@@ -2615,6 +2313,7 @@ export const SummaryView = ({
             {isAdminOrManager && (
             <button
               onClick={exportToExcel}
+              disabled={isExporting}
               className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500/20 text-emerald-600 dark:text-emerald-500 border border-emerald-500/30 rounded-lg hover:bg-emerald-500/30 transition-all font-bold"
             >
               Xuất Excel
@@ -2700,7 +2399,7 @@ export const SummaryView = ({
                     paginate(filteredInvoices).map(inv => (
                       <tr key={inv.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
                         <td className="px-6 py-4 font-mono text-xs text-gray-600 dark:text-gray-400 font-bold">{inv.id.substr(-6).toUpperCase()}</td>
-                        <td className="px-6 py-4 text-sm">{format(parseISO(inv.completedAt || inv.date), 'HH:mm dd/MM/yyyy')}</td>
+                        <td className="px-6 py-4 text-sm">{safeFormatDate(inv.completedAt || inv.date)}</td>
                         <td className="px-6 py-4 text-sm font-semibold text-gray-900 dark:text-white">
                           <div>{inv.tableName}</div>
                           {inv.note && (
@@ -2855,7 +2554,7 @@ export const SummaryView = ({
                   ) : (
                     paginate(filteredLogs).map(log => (
                       <tr key={log.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors group">
-                        <td className="px-6 py-4 text-sm">{format(parseISO(log.date), 'HH:mm dd/MM/yyyy')}</td>
+                        <td className="px-6 py-4 text-sm">{safeFormatDate(log.date)}</td>
                         <td className="px-6 py-4">
                           <span className={cn(
                             "px-2 py-1 rounded text-[10px] uppercase font-bold",
@@ -2879,7 +2578,7 @@ export const SummaryView = ({
                         </td>
                         <td className="px-6 py-4 text-sm font-medium text-gray-900 dark:text-white">{log.itemName}</td>
                         <td className="px-6 py-4 text-right font-mono">{log.quantity.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })}</td>
-                        <td className="px-6 py-4 text-right font-mono font-bold">{(log.totalPrice || 0).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</td>
+                        <td className="px-6 py-4 text-right font-mono font-bold">{Math.round(log.totalPrice || 0).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}đ</td>
                         <td className="px-6 py-4 text-right">
                           <button 
                             onClick={() => setViewingLog(log)}
@@ -3173,7 +2872,7 @@ export const SummaryView = ({
                             </div>
                           </td>
                           <td className="px-6 py-4 text-right font-mono">{item.quantity.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}</td>
-                          <td className="px-6 py-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-500">{item.revenue.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</td>
+                          <td className="px-6 py-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-500">{Math.round(item.revenue).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}đ</td>
                         </tr>
                       );
                     })
@@ -3252,7 +2951,7 @@ export const SummaryView = ({
                   ) : (
                     paginate(renderedCashTransactions).map(t => (
                       <tr key={t.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                        <td className="px-6 py-4 text-sm">{format(parseISO(t.date), 'HH:mm dd/MM/yyyy')}</td>
+                        <td className="px-6 py-4 text-sm">{safeFormatDate(t.date)}</td>
                         <td className="px-6 py-4 text-sm font-bold">{t.category}</td>
                         <td className="px-6 py-4">
                           {t.paymentMethod === 'transfer' ? (
@@ -3268,10 +2967,10 @@ export const SummaryView = ({
                           )}
                         </td>
                         <td className="px-6 py-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-500">
-                          {t.type === 'income' ? `+${t.amount.toLocaleString('vi-VN')}đ` : ''}
+                          {t.type === 'income' ? validCashAmount(t) ? `+${t.amount.toLocaleString('vi-VN')}đ` : 'Số tiền lỗi' : ''}
                         </td>
                         <td className="px-6 py-4 text-right font-mono font-bold text-rose-600 dark:text-rose-500">
-                          {t.type === 'expense' ? `-${t.amount.toLocaleString('vi-VN')}đ` : ''}
+                          {t.type === 'expense' ? validCashAmount(t) ? `-${t.amount.toLocaleString('vi-VN')}đ` : 'Số tiền lỗi' : ''}
                         </td>
                         <td className="px-6 py-4 text-xs text-gray-500 italic">{t.note}</td>
                       </tr>
@@ -3341,12 +3040,12 @@ export const SummaryView = ({
               {viewingInvoice.timeIn && (
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500">Giờ vào:</span>
-                  <span className="text-gray-900 dark:text-white">{format(parseISO(viewingInvoice.timeIn), 'HH:mm dd/MM/yyyy')}</span>
+                  <span className="text-gray-900 dark:text-white">{safeFormatDate(viewingInvoice.timeIn)}</span>
                 </div>
               )}
               <div className="flex justify-between text-sm">
                 <span className="text-gray-500">Giờ ra:</span>
-                <span className="text-gray-900 dark:text-white">{format(parseISO(viewingInvoice.date), 'HH:mm dd/MM/yyyy')}</span>
+                <span className="text-gray-900 dark:text-white">{safeFormatDate(viewingInvoice.date)}</span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-500">Bàn:</span>
@@ -3491,7 +3190,7 @@ export const SummaryView = ({
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Thời gian:</span>
-                <span className="text-gray-700 dark:text-gray-300">{format(parseISO(confirmDeleteInvoice.completedAt || confirmDeleteInvoice.date), 'HH:mm dd/MM/yyyy')}</span>
+                <span className="text-gray-700 dark:text-gray-300">{safeFormatDate(confirmDeleteInvoice.completedAt || confirmDeleteInvoice.date)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Nhân viên:</span>
@@ -3507,9 +3206,23 @@ export const SummaryView = ({
               </div>
             </div>
 
-            <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 leading-relaxed">
-              ⚠️ <strong>Lưu ý:</strong> Khi xóa hóa đơn này, hệ thống sẽ xóa vĩnh viễn và tự động tính toán lại toàn bộ doanh thu bán hàng, lợi nhuận gộp, số dư tiền mặt / chuyển khoản và sổ quỹ tương ứng.
-            </div>
+            <p className="text-sm text-amber-700 dark:text-amber-400">
+              Khi hủy, hệ thống lưu hóa đơn và phiếu thu vào lịch sử hủy, rồi cập nhật các số liệu liên quan.
+            </p>
+            {cancelError && <p role="alert" className="text-sm text-rose-600 dark:text-rose-400">{cancelError}</p>}
+            {receiptReview?.invoiceId === confirmDeleteInvoice.id && receiptReview.candidates.length > 0 && (
+              <label className="block text-sm space-y-2">
+                <span>Chọn phiếu thu sau khi kiểm tra chứng từ gốc</span>
+                <select value={receiptReview.selectedId} disabled={isDeletingInvoice}
+                  onChange={event => setReceiptReview({ ...receiptReview, selectedId: event.target.value })}
+                  className="w-full p-2 rounded-xl border border-black/10 bg-white dark:bg-[#1a1b1e] dark:border-white/10">
+                  <option value="">Chọn phiếu thu đã xác nhận</option>
+                  {receiptReview.candidates.map(row => <option key={row.id} value={row.id}>
+                    {safeFormatDate(row.date)} · {row.amount.toLocaleString('vi-VN')}đ · {row.note || row.category} · {row.id}
+                  </option>)}
+                </select>
+              </label>
+            )}
 
             <div className="flex gap-3">
               <button
@@ -3522,21 +3235,32 @@ export const SummaryView = ({
               </button>
               <button
                 type="button"
-                disabled={isDeletingInvoice}
+                disabled={isDeletingInvoice || (receiptReview?.invoiceId === confirmDeleteInvoice.id && !receiptReview.selectedId)}
                 onClick={async () => {
-                  if (!onDeleteInvoice || !confirmDeleteInvoice) return;
+                  if (!onDeleteInvoice || !confirmDeleteInvoice || !currentUser) return;
+                  const invoice = confirmDeleteInvoice;
+                  const review = receiptReview?.invoiceId === invoice.id ? receiptReview : null;
+                  if (review && !review.selectedId) return;
                   setIsDeletingInvoice(true);
+                  setCancelError('');
                   try {
-                    const deletedId = confirmDeleteInvoice.id;
-                    const invDateStr = confirmDeleteInvoice.businessDate || getVietnamBusinessDate(confirmDeleteInvoice.date);
-                    const deleted = await onDeleteInvoice(deletedId);
-                    if (deleted !== true) return;
-                    setHistoricalInvoices(prev => prev.filter(inv => inv.id !== deletedId));
-                    setHistoricalCash(prev => prev.filter(c => (c as any).invoiceId !== deletedId));
+                    const result = await onDeleteInvoice(invoice.id, review?.selectedId || undefined);
+                    if (!result.deleted) throw new Error('Hóa đơn đã thay đổi. Vui lòng tải lại báo cáo.');
+                    setHistoricalInvoices(prev => prev.filter(inv => inv.id !== invoice.id));
+                    setHistoricalCash(prev => prev.filter(row => row.invoiceId !== invoice.id && row.id !== result.receiptId));
                     summaryPeriodCache.clear();
                     setConfirmDeleteInvoice(null);
-                  } catch (err) {
-                    console.error(err);
+                  } catch (error) {
+                    setCancelError(error instanceof Error ? error.message : 'Không thể hủy hóa đơn.');
+                    if (error instanceof MissingInvoiceReceiptError) {
+                      try {
+                        const candidates = await legacyReceiptCandidates(currentUser, invoice);
+                        setReceiptReview({ invoiceId: invoice.id, candidates, selectedId: '' });
+                        if (!candidates.length) setCancelError('Chưa tìm thấy phiếu thu cũ cùng ngày, số tiền và phương thức. Vui lòng kiểm tra lại chứng từ gốc.');
+                      } catch (failure) {
+                        setCancelError(failure instanceof Error ? failure.message : 'Không thể tải phiếu thu để đối soát.');
+                      }
+                    }
                   } finally {
                     setIsDeletingInvoice(false);
                   }
@@ -3811,7 +3535,7 @@ export const SummaryView = ({
             <div className="space-y-4">
               <div className="flex justify-between text-sm">
                 <span className="text-gray-500">Thời gian:</span>
-                <span className="text-gray-900 dark:text-white">{format(parseISO(viewingLog.date), 'HH:mm dd/MM/yyyy')}</span>
+                <span className="text-gray-900 dark:text-white">{safeFormatDate(viewingLog.date)}</span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-500">Mặt hàng:</span>

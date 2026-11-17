@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Coffee, Lock, User as UserIcon, AlertCircle, Loader2, ExternalLink, Wifi, WifiOff, QrCode, Download, CheckCircle2, Server, Settings, X, Check, Globe, RefreshCw } from 'lucide-react';
+import { Coffee, Lock, User as UserIcon, AlertCircle, Loader2, ExternalLink, Wifi, WifiOff, QrCode, Download, CheckCircle2 } from 'lucide-react';
 import { User } from '../types';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { db, auth } from '../lib/firebase';
 import { signInWithCustomToken } from 'firebase/auth';
 import { collection, query, where, getDocs, limit, doc, getDoc, updateDoc } from 'firebase/firestore';
 import { Capacitor } from '@capacitor/core';
 
-import { apiUrl, getApiBaseUrl, setCustomApiUrl, getCustomApiUrl } from '../utils/apiConfig';
+import { apiUrl, safeApiRequest } from '../utils/apiConfig';
 import { computeSha256 } from '../utils/cryptoHelper';
 
 export const LoginView = ({ 
@@ -48,61 +48,6 @@ export const LoginView = ({
   const [connectionStatus, setConnectionStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   const [debugInfo, setDebugInfo] = useState<string>('');
 
-  const [showServerModal, setShowServerModal] = useState(false);
-  const [serverInputUrl, setServerInputUrl] = useState(() => getCustomApiUrl() || getApiBaseUrl());
-  const [testingServer, setTestingServer] = useState(false);
-  const [serverTestResult, setServerTestResult] = useState<{ success: boolean; message: string; superadmin?: boolean } | null>(null);
-
-  const handleTestServer = async (testUrl: string) => {
-    setTestingServer(true);
-    setServerTestResult(null);
-    try {
-      const cleanUrl = testUrl.trim().replace(/\/+$/, '');
-      const healthUrl = cleanUrl ? `${cleanUrl}/api/health` : '/api/health';
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-
-      const res = await fetch(healthUrl, { signal: controller.signal });
-      clearTimeout(timeoutId);
-
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        const isSuperAdminConfigured = Boolean(data?.checks?.superadminConfigured);
-        setServerTestResult({
-          success: true,
-          message: isSuperAdminConfigured
-            ? 'Kết nối máy chủ thành công! Biến SUPERADMIN_PASSWORD đã được kích hoạt.'
-            : 'Máy chủ phản hồi OK, nhưng bạn chưa đặt biến SUPERADMIN_PASSWORD trong phần Environment Variables trên Vercel!',
-          superadmin: isSuperAdminConfigured
-        });
-      } else {
-        setServerTestResult({
-          success: false,
-          message: `Máy chủ phản hồi mã lỗi HTTP ${res.status}. Vui lòng kiểm tra lại cấu hình.`
-        });
-      }
-    } catch (e: any) {
-      setServerTestResult({
-        success: false,
-        message: 'Không thể kết nối đến địa chỉ này. Hãy đảm bảo máy chủ Vercel đã deploy và nhập đúng URL (https://...).'
-      });
-    } finally {
-      setTestingServer(false);
-    }
-  };
-
-  const handleSaveServerUrl = () => {
-    setCustomApiUrl(serverInputUrl.trim());
-    setError('');
-    setShowServerModal(false);
-  };
-
-  const handleResetServerUrl = () => {
-    setCustomApiUrl('');
-    setServerInputUrl(getApiBaseUrl() || "https://fnb-master.vercel.app");
-    setServerTestResult(null);
-  };
-
   useEffect(() => {
     if (initialStoreCode) setStoreCode(initialStoreCode);
     if (initialUsername) setUsername(initialUsername);
@@ -124,7 +69,7 @@ export const LoginView = ({
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 4000);
-          const healthResp = await fetch(apiUrl('/api/health'), { signal: controller.signal });
+          const healthResp = await safeApiRequest('/api/health', { signal: controller.signal });
           clearTimeout(timer);
           if (healthResp.ok) {
             if (isMounted) {
@@ -157,54 +102,55 @@ export const LoginView = ({
     setError('');
 
     try {
-      if (!storeCode) {
+      if (!storeCode.trim()) {
         setError('Vui lòng nhập Mã Cửa Hàng');
         setLoading(false);
         return;
       }
+      if (!username.trim()) {
+        setError('Vui lòng nhập Tên đăng nhập');
+        setLoading(false);
+        return;
+      }
 
-      // 1. GỌI API ĐĂNG NHẬP BẢO MẬT PHÍA SERVER (sử dụng apiUrl tương thích cả Web và Native APK)
+      // 1. GỌI API ĐĂNG NHẬP BẢO MẬT PHÍA SERVER (Vercel / Local / Native)
       try {
-        const resp = await fetch(apiUrl('/api/login'), {
+        const response = await safeApiRequest('/api/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            storeCode: storeCode.trim(),
-            username: username.trim(),
-            password: password.trim()
-          })
+          body: { 
+            storeCode: storeCode.trim(), 
+            username: username.trim(), 
+            password: password.trim() 
+          },
         });
 
-        if (resp.ok) {
-          const result = await resp.json();
+        if (response.ok) {
+          const result = await response.json().catch(() => ({}));
           if (result.success && result.user) {
-            // Xác thực với Firebase Auth qua Custom Token do server Vercel cấp
-            if (result.customToken && !result.customToken.startsWith('dev_token_')) {
+            // Nếu máy chủ cấp Firebase Custom Token hợp lệ, xác thực với Firebase Auth
+            if (typeof result.customToken === 'string' && result.customToken && !result.customToken.startsWith('dev_token_')) {
               try {
                 await signInWithCustomToken(auth, result.customToken);
               } catch (authErr: any) {
-                console.error("signInWithCustomToken error:", authErr?.message || authErr);
-                setError('Không thể hoàn tất xác thực quyền truy cập dữ liệu với máy chủ. Vui lòng thử lại.');
-                setLoading(false);
-                return;
+                console.warn("[Login] signInWithCustomToken notice:", authErr?.message || authErr);
               }
             }
 
             onLogin(result.user);
             return;
           }
-        } else if (resp.status === 401 || resp.status === 403 || resp.status === 429) {
+        } else if (response.status === 401 || response.status === 403 || response.status === 429) {
           // Server từ chối danh tính (Sai mật khẩu, tài khoản bị khóa, hoặc bị rate-limit)
-          const errData = await resp.json().catch(() => ({}));
+          const errData = await response.json().catch(() => ({}));
           setError(errData.error || 'Tên đăng nhập hoặc mật khẩu không đúng');
           setLoading(false);
           return;
         } else {
-          // Trường hợp lỗi máy chủ bất ngờ (404, 500, 502, 503) hoặc redirect HTML: Cho phép fallback trực tiếp Firebase
-          console.warn(`[Login] Máy chủ trả về HTTP ${resp.status}, tiến hành fallback ngoại tuyến sang Firebase.`);
+          console.warn(`[Login] Máy chủ trả về HTTP ${response.status}, tiến hành fallback sang kiểm tra trực tiếp.`);
         }
       } catch (apiErr) {
-        console.warn("API login network unreachable, fallback sang kiểm tra trực tiếp:", apiErr);
+        console.warn("[Login] API network unreachable, fallback sang kiểm tra trực tiếp:", apiErr);
       }
 
       // 2. FALLBACK NGOẠI TUYẾN / MẤT KẾT NỐI SERVER (Chỉ áp dụng khi máy chủ không phản hồi)
@@ -251,7 +197,7 @@ export const LoginView = ({
           isAuthSuccess = true;
         }
 
-        // B. Nếu không có trường password (tài khoản đã nâng cấp bảo mật như luontv37):
+        // B. Nếu không có trường password:
         // Kiểm tra đối chiếu với system/user_secret_${userDoc.id}
         if (!isAuthSuccess) {
           try {
@@ -280,6 +226,8 @@ export const LoginView = ({
           onLogin({
             ...userData,
             id: userDoc.id,
+            storeId: storeId || userData.storeId,
+            tokenVersion: Number(userData.tokenVersion || 1),
             store: storeData
           } as any);
           return;
@@ -307,9 +255,8 @@ export const LoginView = ({
             <Coffee className="w-10 h-10 text-black" />
           </div>
           <h1 className="text-3xl font-bold text-gray-900 dark:text-white tracking-tighter">FNB MASTER</h1>
-          <p className="text-gray-500">Đăng nhập để bắt đầu ca làm việc</p>
           
-          <div className="flex items-center justify-center gap-2 pt-2">
+          <div className="flex items-center justify-center pt-2">
             {connectionStatus === 'checking' && (
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <Loader2 className="w-3 h-3 animate-spin" /> Đang kiểm tra kết nối...
@@ -332,19 +279,6 @@ export const LoginView = ({
                 )}
               </div>
             )}
-
-            <button
-              type="button"
-              onClick={() => {
-                setServerInputUrl(getCustomApiUrl() || getApiBaseUrl());
-                setServerTestResult(null);
-                setShowServerModal(true);
-              }}
-              className="p-1.5 text-gray-400 hover:text-emerald-500 hover:bg-black/5 dark:hover:bg-white/5 rounded-full transition-colors cursor-pointer"
-              title="Cấu hình máy chủ backend (Vercel / Cloud Run)"
-            >
-              <Settings className="w-3.5 h-3.5" />
-            </button>
           </div>
         </div>
 
@@ -412,21 +346,6 @@ export const LoginView = ({
                 <AlertCircle className="w-5 h-5 shrink-0" />
                 <span>{error}</span>
               </div>
-              
-              {/* Nút hỗ trợ khắc phục nhanh khi máy chủ không phản hồi */}
-              {(error.includes('máy chủ') || error.includes('kết nối mạng') || error.includes('không khả dụng')) && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setServerInputUrl(getCustomApiUrl() || getApiBaseUrl());
-                    setServerTestResult(null);
-                    setShowServerModal(true);
-                  }}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 px-3 bg-rose-500/20 hover:bg-rose-500/30 text-rose-700 dark:text-rose-300 rounded-xl text-xs font-semibold transition-colors cursor-pointer border border-rose-500/30 shadow-sm"
-                >
-                  <Server className="w-4 h-4 shrink-0" /> Cấu hình địa chỉ máy chủ backend (Vercel)
-                </button>
-              )}
 
               {connectionStatus === 'offline' && !isNative && (
                 <a 
@@ -483,104 +402,13 @@ export const LoginView = ({
               </a>
             </div>
 
-            <div className="pt-2 overflow-hidden w-full flex justify-center">
-              <p className="text-[10px] sm:text-xs text-gray-400 dark:text-gray-600 uppercase tracking-widest whitespace-nowrap overflow-hidden text-ellipsis text-center">HỆ THỐNG QUẢN LÝ NHÀ HÀNG CHUYÊN NGHIỆP</p>
+            <div className="pt-2 w-full flex justify-center">
+              <p className="text-xs text-gray-400 dark:text-gray-600 uppercase tracking-wider font-semibold text-center">
+                QUẢN LÝ NHÀ HÀNG CHUYÊN NGHIỆP
+              </p>
             </div>
           </div>
       </motion.div>
-
-      {/* MODAL CẤU HÌNH MÁY CHỦ CHO ANDROID / NATIVE */}
-      <AnimatePresence>
-        {showServerModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="w-full max-w-md bg-white dark:bg-[#18191c] border border-black/10 dark:border-white/10 rounded-2xl p-6 shadow-2xl space-y-5"
-            >
-              <div className="flex items-center justify-between border-b border-black/5 dark:border-white/5 pb-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-500">
-                    <Server className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-gray-900 dark:text-white text-base">Cấu hình máy chủ API</h3>
-                    <p className="text-xs text-gray-500">Kết nối ứng dụng tới backend Vercel</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowServerModal(false)}
-                  className="p-1.5 rounded-lg text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="space-y-3">
-                <label className="text-xs font-semibold text-gray-700 dark:text-gray-300">
-                  Địa chỉ máy chủ Backend (Server URL):
-                </label>
-                <div className="relative">
-                  <Globe className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                  <input
-                    type="url"
-                    placeholder="https://fnb-master.vercel.app"
-                    value={serverInputUrl}
-                    onChange={(e) => setServerInputUrl(e.target.value)}
-                    className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-2.5 pl-10 pr-3 text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <p className="text-[11px] text-gray-400 leading-relaxed">
-                  💡 Nhập link dự án Vercel của bạn (ví dụ <span className="font-mono text-emerald-400">https://fnb-master.vercel.app</span>). Khi lưu, ứng dụng Android sẽ gọi trực tiếp đến server này.
-                </p>
-
-                {serverTestResult && (
-                  <div className={`p-3 rounded-xl text-xs border ${
-                    serverTestResult.success 
-                      ? (serverTestResult.superadmin 
-                          ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400' 
-                          : 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400')
-                      : 'bg-rose-500/10 border-rose-500/20 text-rose-600 dark:text-rose-400'
-                  }`}>
-                    <p className="font-medium">{serverTestResult.message}</p>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => handleTestServer(serverInputUrl)}
-                  disabled={testingServer || !serverInputUrl.trim()}
-                  className="w-full py-2.5 px-4 bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-gray-800 dark:text-gray-200 text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                >
-                  {testingServer ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                  Kiểm tra kết nối máy chủ
-                </button>
-
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleResetServerUrl}
-                    className="flex-1 py-2.5 px-4 border border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 text-xs font-semibold rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
-                  >
-                    Khôi phục gốc
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSaveServerUrl}
-                    className="flex-1 py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-emerald-500/20"
-                  >
-                    <Check className="w-4 h-4" /> Lưu & Đăng nhập
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </div>
   );
 };

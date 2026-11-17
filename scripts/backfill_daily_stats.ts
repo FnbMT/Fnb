@@ -1,7 +1,7 @@
 import { adminDb } from "../api/_firebaseAdmin.js";
 import type { Invoice, CashTransaction, DailyStats } from "../src/types";
-import { aggregateDay, businessDateOf } from "../src/utils/dataIntegrity";
-import { getVietnamBusinessDate } from "../src/utils/firestoreDateHelper";
+import { reconcileDay, businessDateOf } from "../src/utils/dataIntegrity";
+import { getVietnamBusinessDate, getVietnamDayBoundariesIso } from "../src/utils/firestoreDateHelper";
 
 export interface BackfillOptions {
   startDate?: string;
@@ -18,6 +18,7 @@ export interface BackfillResult {
   daysWithCompleteCost: number;
   skippedTodayDate?: string;
   skippedChangedDays: string[];
+  skippedUnreconciledDays: { date: string; reason: string }[];
   dryRun?: boolean;
 }
 
@@ -29,21 +30,63 @@ export async function backfillStoreDailyStats(
   options: BackfillOptions = {}
 ): Promise<BackfillResult> {
   const today = getVietnamBusinessDate();
-  const baseline = await adminDb
+  // Tối ưu hóa Reads: Đưa khoảng ngày trực tiếp vào truy vấn Firestore
+  let baselineQuery: any = adminDb
     .collection("daily_stats")
-    .where("storeId", "==", storeId)
-    .get();
+    .where("storeId", "==", storeId);
+  if (options.startDate) {
+    baselineQuery = baselineQuery.where("date", ">=", options.startDate);
+  }
+  if (options.endDate) {
+    baselineQuery = baselineQuery.where("date", "<=", options.endDate);
+  }
+  let baseline;
+  try {
+    baseline = await baselineQuery.get();
+  } catch (err: any) {
+    if (err?.code === 9 || err?.message?.includes('FAILED_PRECONDITION') || err?.message?.includes('index')) {
+      console.warn('[Backfill Index Warning] Cần triển khai composite index (storeId, date) cho daily_stats. Tạm fallback quét theo storeId.');
+      const allDaily = await adminDb.collection("daily_stats").where("storeId", "==", storeId).get();
+      const filteredDocs = allDaily.docs.filter((d: any) => {
+        const dDate = d.data()?.date || '';
+        if (options.startDate && dDate < options.startDate) return false;
+        if (options.endDate && dDate > options.endDate) return false;
+        return true;
+      });
+      baseline = { docs: filteredDocs };
+    } else {
+      throw err;
+    }
+  }
   const baselineById = new Map<string, any>(
-    baseline.docs.map((d) => [d.id, d])
+    baseline.docs.map((d: any) => [d.id, d])
   );
-  const invoiceSnapshot = await adminDb
+
+  let invQuery: any = adminDb
     .collection("invoices")
-    .where("storeId", "==", storeId)
-    .get();
-  const cashSnapshot = await adminDb
+    .where("storeId", "==", storeId);
+  if (options.startDate) {
+    const { startIso } = getVietnamDayBoundariesIso(options.startDate);
+    invQuery = invQuery.where("date", ">=", startIso);
+  }
+  if (options.endDate) {
+    const { endExclusiveIso } = getVietnamDayBoundariesIso(options.endDate);
+    invQuery = invQuery.where("date", "<", endExclusiveIso);
+  }
+  const invoiceSnapshot = await invQuery.get();
+
+  let cashQuery: any = adminDb
     .collection("cash_transactions")
-    .where("storeId", "==", storeId)
-    .get();
+    .where("storeId", "==", storeId);
+  if (options.startDate) {
+    const { startIso } = getVietnamDayBoundariesIso(options.startDate);
+    cashQuery = cashQuery.where("date", ">=", startIso);
+  }
+  if (options.endDate) {
+    const { endExclusiveIso } = getVietnamDayBoundariesIso(options.endDate);
+    cashQuery = cashQuery.where("date", "<", endExclusiveIso);
+  }
+  const cashSnapshot = await cashQuery.get();
   const invoiceDays = new Map<string, Invoice[]>(),
     cashDays = new Map<string, CashTransaction[]>();
   const dates = new Set<string>();
@@ -84,18 +127,16 @@ export async function backfillStoreDailyStats(
       if (inRange(day)) dates.add(day);
     }
   }
-  // Validate every computed day before writing any aggregates.
-  const planned = [...dates]
-    .sort()
-    .map((date) =>
-      aggregateDay(
-        storeId,
-        date,
-        invoiceDays.get(date) || [],
-        cashDays.get(date) || [],
-        true
-      )
-    );
+  // Keep unmatched days available from their original documents for review.
+  const planned: DailyStats[] = [];
+  const skippedUnreconciledDays: BackfillResult['skippedUnreconciledDays'] = [];
+  for (const date of [...dates].sort()) {
+    try {
+      planned.push(reconcileDay(storeId, date, invoiceDays.get(date) || [], cashDays.get(date) || []));
+    } catch (error) {
+      skippedUnreconciledDays.push({ date, reason: error instanceof Error ? error.message : 'Chứng từ không hợp lệ.' });
+    }
+  }
   const skippedChangedDays: string[] = [];
   let written = 0;
   if (!options.dryRun)
@@ -135,6 +176,7 @@ export async function backfillStoreDailyStats(
       .length,
     skippedTodayDate: today,
     skippedChangedDays,
+    skippedUnreconciledDays,
     dryRun: options.dryRun,
   };
 }

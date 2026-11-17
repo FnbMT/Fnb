@@ -3,8 +3,11 @@ import crypto from 'node:crypto';
 import { adminDb, adminAuth, safeDeleteSentinel } from './_firebaseAdmin.js';
 import { hashPassword, encryptAes } from './_crypto.js';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
+import { handleCors } from './_cors.js';
 
 export default async function handler(req: any, res: any) {
+  if (handleCors(req, res)) return;
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -87,22 +90,17 @@ export default async function handler(req: any, res: any) {
     }
 
     try {
-      await adminDb.collection('user_secrets').doc(cleanUserId).set(secretPayload, { merge: true });
-    } catch (secErr) {
-      return res.status(500).json({
-        error: 'Lỗi hệ thống: Không thể lưu mật khẩu vào vùng bảo mật. Đổi mật khẩu thất bại.'
-      });
-    }
-
-    // 5. CẬP NHẬT USERS: ĐỒNG BỘ TOKEN_VERSION VÀ THỜI GIAN ĐỔI MẬT KHẨU
-    try {
-      await userDocRef.update({
+      const batch = adminDb.batch();
+      batch.set(adminDb.collection('user_secrets').doc(cleanUserId), secretPayload, { merge: true });
+      batch.update(userDocRef, {
         tokenVersion: nextTokenVersion,
-        password: cleanPassword,
-        passwordUpdatedAt: new Date().toISOString()
+        password: safeDeleteSentinel(),
+        isLegacy: safeDeleteSentinel(),
+        passwordUpdatedAt: new Date().toISOString(),
       });
-    } catch (e) {
-      console.warn("Could not update tokenVersion in users:", e);
+      await batch.commit();
+    } catch (error) {
+      return res.status(500).json({ error: 'Không thể lưu đồng thời mật khẩu và phiên bản tài khoản.' });
     }
 
     // 6. THU HỒI TỨC THÌ TRONG CACHE VÀ FIREBASE AUTH REFRESH TOKENS

@@ -1,8 +1,9 @@
 import React from 'react';
-import { Wallet, Clock, ArrowRight, Lock, Unlock, History, X, AlertTriangle, Eye, Check, QrCode, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, Banknote, CreditCard, Plus } from 'lucide-react';
+import { Wallet, Clock, ArrowRight, Lock, Unlock, History, X, AlertTriangle, Eye, Check, QrCode, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, Banknote, CreditCard, Plus, Sparkles } from 'lucide-react';
 import { Shift, VoidLog, User, Table, CashTransaction, SystemSettings } from '../types';
 import { format, isAfter, subDays } from 'date-fns';
 import { cn } from '../lib/utils';
+import { getVietnamBusinessDate } from '../utils/firestoreDateHelper';
 
 export const ShiftView = ({ 
   activeShift, 
@@ -17,7 +18,10 @@ export const ShiftView = ({
   onScanQR,
   isAttendanceAllowed = true,
   onAddCashTransaction,
-  settings
+  settings,
+  users = [],
+  onForceCloseShift,
+  onCleanStaleShifts
 }: { 
   activeShift: Shift | null, 
   allActiveShifts?: Shift[],
@@ -31,7 +35,10 @@ export const ShiftView = ({
   onScanQR?: () => void,
   isAttendanceAllowed?: boolean,
   onAddCashTransaction?: (transaction: Omit<CashTransaction, 'id' | 'storeId'>) => Promise<void>,
-  settings?: SystemSettings
+  settings?: SystemSettings,
+  users?: User[],
+  onForceCloseShift?: (shiftId: string, endCash?: number) => Promise<boolean>,
+  onCleanStaleShifts?: () => Promise<void>
 }) => {
   const [showOpenModal, setShowOpenModal] = React.useState(false);
   const [showCloseModal, setShowCloseModal] = React.useState(false);
@@ -140,17 +147,25 @@ export const ShiftView = ({
     }
   };
 
-  // Filter history to last 3 days and by user role
+  // Filter history to last 3 days and by user role (or shifts with unresolved discrepancy for admin)
   const recentHistory = history.filter(shift => {
     if (!shift.endTime) return false;
     
     // If not admin/manager, only show their own shifts
     if (!isAdminOrManager && shift.staffId !== currentUser?.id) return false;
 
+    // Luôn đưa ca có chênh lệch tiền chưa xử lý vào để Admin nhìn thấy và đối soát
+    const isUnresolvedDiscrepancy = isAdminOrManager && shift.discrepancy !== undefined && shift.discrepancy !== 0 && !shift.discrepancyProcessed;
+    if (isUnresolvedDiscrepancy) return true;
+
     const shiftDate = new Date(shift.endTime);
     const threeDaysAgo = subDays(new Date(), 3);
     return isAfter(shiftDate, threeDaysAgo);
   });
+
+  const unresolvedDiscrepancyShifts = isAdminOrManager 
+    ? history.filter(s => s.discrepancy !== undefined && s.discrepancy !== 0 && !s.discrepancyProcessed)
+    : [];
 
   // Other active shifts (for admin/manager)
   const otherActiveShifts = allActiveShifts.filter(s => s.id !== activeShift?.id);
@@ -163,6 +178,37 @@ export const ShiftView = ({
           Quản lý Ca làm việc
         </h3>
       </div>
+
+      {/* Banner Cảnh báo ca lệch tiền chưa xử lý (Nguyên nhân hiển thị chấm đỏ trên Sidebar) */}
+      {isAdminOrManager && unresolvedDiscrepancyShifts.length > 0 && (
+        <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-rose-500/20 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <h5 className="font-bold text-sm text-rose-600 dark:text-rose-400 flex items-center gap-2">
+                Phát hiện {unresolvedDiscrepancyShifts.length} ca làm việc có chênh lệch tiền chưa đối soát!
+              </h5>
+              <p className="text-xs text-gray-600 dark:text-gray-400 mt-0.5">
+                (Đây là lý do xuất hiện dấu chấm đỏ cảnh báo trên menu "Ca làm việc"). Bấm vào ca trong danh sách để xem chi tiết hoặc bấm xác nhận để xóa chấm đỏ.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              if (!window.confirm(`Xác nhận bạn đã đối soát toàn bộ ${unresolvedDiscrepancyShifts.length} ca làm việc này? Chấm đỏ cảnh báo trên menu sẽ được tắt.`)) return;
+              for (const s of unresolvedDiscrepancyShifts) {
+                if (onResolveDiscrepancy) await onResolveDiscrepancy(s.id);
+              }
+            }}
+            className="px-4 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-sm shadow-rose-500/20"
+          >
+            Xác nhận đã xử lý tất cả ({unresolvedDiscrepancyShifts.length})
+          </button>
+        </div>
+      )}
       
       {/* Attendance Check-in Section */}
       {!isAdminOrManager && currentUser?.requiresAttendance && isAttendanceAllowed && (
@@ -359,20 +405,80 @@ export const ShiftView = ({
           {/* Other Active Shifts for Admin/Manager */}
           {isAdminOrManager && otherActiveShifts.length > 0 && (
             <div className="mt-8 pt-8 border-t border-black/10 dark:border-white/10 relative z-10">
-              <h4 className="font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-                <Clock className="w-5 h-5 text-blue-600 dark:text-blue-400" /> Các ca đang hoạt động khác
-              </h4>
+              <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
+                <h4 className="font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-blue-600 dark:text-blue-400" /> Các ca đang hoạt động khác ({otherActiveShifts.length})
+                </h4>
+                {onCleanStaleShifts && (
+                  <button
+                    type="button"
+                    onClick={onCleanStaleShifts}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                    title="Tự động đóng tất cả các ca quá 24h và ca của nhân viên đã bị xóa"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Làm sạch ca & nhân viên đã hủy
+                  </button>
+                )}
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {otherActiveShifts.map(shift => (
-                  <div key={shift.id} onClick={() => setSelectedShift(shift)} className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl p-4 cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-all">
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="font-bold text-gray-900 dark:text-white">{shift.staffName || 'Nhân viên'}</span>
-                      <span className="text-xs px-2 py-1 bg-blue-500/20 text-blue-600 dark:text-blue-400 rounded-full">Đang mở</span>
+                {otherActiveShifts.map(shift => {
+                  const todayVn = getVietnamBusinessDate();
+                  const shiftDate = getVietnamBusinessDate(shift.startTime);
+                  const isPastDay = shiftDate < todayVn;
+                  const shiftAgeMs = Date.now() - new Date(shift.startTime).getTime();
+                  const isOlderThan24h = shiftAgeMs > 24 * 3600 * 1000;
+                  const isDeletedStaff = users && users.length > 0 && !users.some(u => u.id === shift.staffId);
+                  const isStale = isPastDay || isOlderThan24h || isDeletedStaff;
+                  return (
+                    <div 
+                      key={shift.id} 
+                      onClick={() => setSelectedShift(shift)} 
+                      className={cn(
+                        "rounded-xl p-4 cursor-pointer transition-all border",
+                        isStale
+                          ? "bg-amber-500/5 hover:bg-amber-500/10 border-amber-500/30"
+                          : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 hover:bg-black/10 dark:hover:bg-white/10"
+                      )}
+                    >
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="font-bold text-gray-900 dark:text-white">{shift.staffName || 'Nhân viên'}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                          {isDeletedStaff && (
+                            <span className="text-[10px] px-2 py-0.5 bg-rose-500/20 text-rose-600 dark:text-rose-400 font-bold rounded-full">Đã hủy NV</span>
+                          )}
+                          {isPastDay && (
+                            <span className="text-[10px] px-2 py-0.5 bg-rose-500/20 text-rose-600 dark:text-rose-400 font-bold rounded-full">Qua 24h đêm</span>
+                          )}
+                          {!isPastDay && isOlderThan24h && (
+                            <span className="text-[10px] px-2 py-0.5 bg-amber-500/20 text-amber-600 dark:text-amber-400 font-bold rounded-full">Quá 24h</span>
+                          )}
+                          <span className="text-xs px-2 py-1 bg-blue-500/20 text-blue-600 dark:text-blue-400 rounded-full">Đang mở</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">Bắt đầu: {format(new Date(shift.startTime), 'HH:mm, dd/MM')}</p>
+                      <div className="flex justify-between items-center">
+                        <p className="text-sm">Doanh thu: <span className="text-emerald-600 dark:text-emerald-400 font-mono font-bold">{(shift.totalRevenue || 0).toLocaleString()}đ</span></p>
+                        {isStale && onForceCloseShift ? (
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (window.confirm(`Xác nhận đóng ca làm việc của "${shift.staffName || 'Nhân viên'}"?`)) {
+                                await onForceCloseShift(shift.id);
+                              }
+                            }}
+                            className="px-2.5 py-1 bg-rose-500/20 hover:bg-rose-500 text-rose-600 hover:text-white rounded-lg text-xs font-bold transition-all cursor-pointer"
+                          >
+                            Đóng ca ngay
+                          </button>
+                        ) : (
+                          <span className="text-xs text-blue-600 dark:text-blue-400 font-bold hover:underline">Chi tiết / Đóng ca &rarr;</span>
+                        )}
+                      </div>
                     </div>
-                    <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">Bắt đầu: {format(new Date(shift.startTime), 'HH:mm, dd/MM')}</p>
-                    <p className="text-sm">Doanh thu: <span className="text-emerald-600 dark:text-emerald-400 font-mono font-bold">{(shift.totalRevenue || 0).toLocaleString()}đ</span></p>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -670,6 +776,30 @@ export const ShiftView = ({
                 )}
               </div>
             </div>
+
+            {selectedShift.status === 'open' && isAdminOrManager && onForceCloseShift && (
+              <div className="pt-4 border-t border-black/10 dark:border-white/10 space-y-3">
+                <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+                  <p className="text-xs text-amber-700 dark:text-amber-300">
+                    Ca làm việc này đang mở bởi <b>{selectedShift.staffName || 'Nhân viên'}</b>. Quản trị viên có thể kết thúc ca này trực tiếp ngay tại đây.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!window.confirm(`Xác nhận kết thúc ca làm việc của "${selectedShift.staffName || 'Nhân viên'}"?`)) return;
+                    const ok = await onForceCloseShift(selectedShift.id);
+                    if (ok) {
+                      setSelectedShift(null);
+                    }
+                  }}
+                  className="w-full py-3 bg-rose-500 hover:bg-rose-600 text-white rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg shadow-rose-500/25"
+                >
+                  <Lock className="w-4 h-4" />
+                  Kết thúc ca làm việc này (Admin)
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

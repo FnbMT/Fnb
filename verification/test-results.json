@@ -1,7 +1,7 @@
 {
-  "passed": 51,
-  "total": 51,
-  "failed": 0,
+  "passed": 83,
+  "total": 91,
+  "failed": 8,
   "method": "Actual source functions transpiled by the locked project TypeScript compiler. In-memory Firestore mock enforces all reads before writes, atomic commit, and optimistic contention retries. No production Firebase access.",
   "results": [
     {
@@ -182,7 +182,8 @@
     },
     {
       "name": "Explicit check-out closes an overnight open session without creating another day",
-      "status": "PASS"
+      "status": "FAIL",
+      "error": "ReferenceError: dates is not defined\n    at G:\\FNB IOS\\verification\\regression.cjs:281:203\n    at test (G:\\FNB IOS\\verification\\regression.cjs:142:45)\n    at G:\\FNB IOS\\verification\\regression.cjs:281:9"
     },
     {
       "name": "Explicit check-out without a check-in cannot invent a work session",
@@ -206,6 +207,173 @@
     },
     {
       "name": "Order cloning supports the existing iOS 15 target without structuredClone",
+      "status": "PASS"
+    },
+    {
+      "name": "Customer checkout succeeds with an empty customer list after atomic commit",
+      "status": "PASS"
+    },
+    {
+      "name": "Deleted or foreign customer cannot commit a checkout",
+      "status": "PASS"
+    },
+    {
+      "name": "A rendering failure after committed checkout never invites a second payment",
+      "status": "PASS"
+    },
+    {
+      "name": "Checkout cost snapshot clones the order and preserves exact recipe and topping quantities",
+      "status": "PASS"
+    },
+    {
+      "name": "Verified zero cost and configured topping cost retain their original meaning",
+      "status": "PASS"
+    },
+    {
+      "name": "Historical cost is never repriced from the current menu or upgraded from estimated",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at G:\\FNB IOS\\verification\\regression.cjs:319:76\n    at test (G:\\FNB IOS\\verification\\regression.cjs:142:45)\n    at G:\\FNB IOS\\verification\\regression.cjs:316:9"
+    },
+    {
+      "name": "Cash totals use the whole period and do not count sales receipts twice",
+      "status": "PASS"
+    },
+    {
+      "name": "Cash-only source merge preserves invoice cash, transfer, and historical estimated cost",
+      "status": "PASS"
+    },
+    {
+      "name": "Full raw invoices preserve estimated cost even when an old complete aggregate has the same total",
+      "status": "PASS"
+    },
+    {
+      "name": "Date-ordered pagination includes legacy and current invoices across all pages",
+      "status": "PASS"
+    },
+    {
+      "name": "Full source fetch retains 401 mixed-schema rows with Vietnam day boundaries",
+      "status": "PASS"
+    },
+    {
+      "name": "Subscription errors never certify an incomplete source and pending writes remain unconfirmed",
+      "status": "PASS"
+    },
+    {
+      "name": "Complete export source refuses pending writes and concurrent revision changes",
+      "status": "PASS"
+    },
+    {
+      "name": "Invoice Excel exports all 65 records directly instead of a partial render array",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 65\n\n    at G:\\FNB IOS\\verification\\regression.cjs:373:89\n    at async test (G:\\FNB IOS\\verification\\regression.cjs:142:39)\n    at async G:\\FNB IOS\\verification\\regression.cjs:372:3"
+    },
+    {
+      "name": "Cash Excel has a working full-period loader and treats a legacy empty method as cash",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 65\n\n    at G:\\FNB IOS\\verification\\regression.cjs:376:213\n    at async test (G:\\FNB IOS\\verification\\regression.cjs:142:39)\n    at async G:\\FNB IOS\\verification\\regression.cjs:375:3"
+    },
+    {
+      "name": "Export validates receipts after full fetch and preserves the invoice search",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 1\n\n    at G:\\FNB IOS\\verification\\regression.cjs:379:167\n    at async test (G:\\FNB IOS\\verification\\regression.cjs:142:39)\n    at async G:\\FNB IOS\\verification\\regression.cjs:378:3"
+    },
+    {
+      "name": "Switching report period disposes stale queries and keeps loading until the first page arrives",
+      "status": "PASS"
+    },
+    {
+      "name": "Attendance scan failure stops before creating a duplicate open session",
+      "status": "PASS"
+    },
+    {
+      "name": "Customer subscription clears a deleted profile, resets discount, and ignores late updates",
+      "status": "PASS"
+    },
+    {
+      "name": "Payment waits for the matching customer before saving drafts or calling checkout",
+      "status": "PASS"
+    },
+    {
+      "name": "Tax report fills missing days when some daily stats already exist and writes no data",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 1\n\n    at G:\\FNB IOS\\verification\\regression.cjs:406:12\n    at test (G:\\FNB IOS\\verification\\regression.cjs:142:45)\n    at G:\\FNB IOS\\verification\\regression.cjs:401:9"
+    },
+    {
+      "name": "Tax quarter completeness uses server-confirmed coverage rather than a cached status label",
+      "status": "PASS"
+    },
+    {
+      "name": "Menu ordering renders an occupied table without a temporal-dead-zone exception",
+      "status": "PASS"
+    },
+    {
+      "name": "Bad cash document leaves good invoice revenue and good receipts visible",
+      "status": "PASS"
+    },
+    {
+      "name": "Unpaid or missing receipt is not counted as collected cash",
+      "status": "PASS"
+    },
+    {
+      "name": "Receipt reconciliation checks each link, amount, payment method and business day",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert(f.pure.receiptMismatch(invoices, [{ ...first, id: 'legacy', invoiceId: undefined }, second]))\n\n    at G:\\FNB IOS\\verification\\regression.cjs:454:5\n    at test (G:\\FNB IOS\\verification\\regression.cjs:142:45)\n    at G:\\FNB IOS\\verification\\regression.cjs:448:9"
+    },
+    {
+      "name": "Backfill skips an unmatched day while saving the correctly paired day",
+      "status": "PASS"
+    },
+    {
+      "name": "A legacy cancellation requires a manually verified receipt and archives both documents",
+      "status": "PASS"
+    },
+    {
+      "name": "A changed or differently linked receipt cannot be deleted with a legacy invoice",
+      "status": "PASS"
+    },
+    {
+      "name": "Opening a shift cannot fall through after an unreadable server query",
+      "status": "PASS"
+    },
+    {
+      "name": "Legacy shift beyond ten other shifts is adopted by the guard",
+      "status": "PASS"
+    },
+    {
+      "name": "Cached or pending shift results cannot authorize a new shift",
+      "status": "PASS"
+    },
+    {
+      "name": "Login requires Firebase token and verifies the session claims",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 1\n\n    at G:\\FNB IOS\\verification\\regression.cjs:536:12\n    at async test (G:\\FNB IOS\\verification\\regression.cjs:142:39)\n    at async G:\\FNB IOS\\verification\\regression.cjs:524:3"
+    },
+    {
+      "name": "Strong credentials take precedence over stale legacy hashes",
+      "status": "PASS"
+    },
+    {
+      "name": "Legacy credential migration denies old keys and keeps dry runs read-only",
+      "status": "PASS"
+    },
+    {
+      "name": "Credential migration preserves conflicting sources and does not certify the store",
+      "status": "PASS"
+    },
+    {
+      "name": "Payroll finalization rejects stale attendance count (1 day on client vs 2 days on server) and requires recalculation",
+      "status": "PASS"
+    },
+    {
+      "name": "Payroll finalization rejects changed server salary configuration and requires recalculation",
+      "status": "PASS"
+    },
+    {
+      "name": "Overnight attendance check-in at 22:00 and check-out at 09:00 next day is accepted and not treated as stale",
+      "status": "PASS"
+    },
+    {
+      "name": "Payroll unfinalize atomic operation allows store admin to unlock payroll and recalculate/refinalize",
       "status": "PASS"
     }
   ]

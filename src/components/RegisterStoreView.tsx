@@ -18,7 +18,7 @@ import { motion } from 'motion/react';
 import { db } from '../lib/firebase';
 import { collection, addDoc, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { INITIAL_MENU, INITIAL_TABLES, CATEGORIES } from '../types';
-import { apiUrl } from '../utils/apiConfig';
+import { apiUrl, safeApiRequest } from '../utils/apiConfig';
 
 export interface RegisteredStoreInfo {
   storeName: string;
@@ -71,15 +71,15 @@ export const RegisterStoreView = ({
       const cleanCode = storeCode.toLowerCase().trim();
       const cleanPhone = phone.trim();
 
-      const resp = await fetch(apiUrl('/api/register-store'), {
+      const resp = await safeApiRequest('/api/register-store', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: {
           storeName: cleanName,
           storeCode: cleanCode,
           phone: cleanPhone,
           password: password.trim()
-        })
+        }
       });
 
       const result = await resp.json().catch(() => ({}));

@@ -1,3 +1,5 @@
+import { handleCors } from './_cors.js';
+import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { adminDb } from './_firebaseAdmin.js';
 import { hashPassword, encryptAes } from './_crypto.js';
@@ -26,6 +28,7 @@ const INITIAL_TABLES = [
 const CATEGORIES = ['Tất cả', 'Cà phê', 'Trà', 'Nước ép', 'Sinh tố', 'Đồ ăn vặt', 'Khác'];
 
 export default async function handler(req: any, res: any) {
+  if (handleCors(req, res)) return;
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -97,6 +100,7 @@ export default async function handler(req: any, res: any) {
           trialEndDate: trialEndDate.toISOString(),
           packageId: 'trial'
         },
+        credentialStorageVersion: 1,
         createdAt: new Date().toISOString()
       });
       storeId = storeRef.id;
@@ -109,7 +113,6 @@ export default async function handler(req: any, res: any) {
         storeId: storeId,
         phone: cleanPhone,
         tokenVersion: 1,
-        password: cleanPassword,
         createdAt: new Date().toISOString()
       });
       adminUserId = adminUserRef.id;

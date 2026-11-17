@@ -7,7 +7,8 @@ import { CurrencyInput } from './CurrencyInput';
 import { collection, getDocs, getDoc, updateDoc, doc, deleteDoc, setDoc, query, where } from 'firebase/firestore';
 import { cn } from '../lib/utils';
 import { StorePackage, StorePackageFeatures, StorePackagePricing } from '../types';
-import { apiUrl } from '../utils/apiConfig';
+import { isTabAllowedInPackage } from '../utils/packagePermissions';
+import { apiUrl, safeApiRequest } from '../utils/apiConfig';
 
 export const PACKAGE_TABS = [
   { 
@@ -129,13 +130,13 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
     setRevealLoadingId(store.id);
     try {
       const token = getSuperAdminToken();
-      const resp = await fetch(apiUrl('/api/reveal-password'), {
+      const resp = await safeApiRequest('/api/reveal-password', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
           ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({ storeId: store.id })
+        body: { storeId: store.id }
       });
       const data = await resp.json();
       if (resp.ok && data.success) {
@@ -171,16 +172,16 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
       }
       const adminId = snap.docs[0].id;
       const token = getSuperAdminToken();
-      const resp = await fetch(apiUrl('/api/reset-password'), {
+      const resp = await safeApiRequest('/api/reset-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({
+        body: {
           userId: adminId,
           newPassword: newPass.trim()
-        })
+        }
       });
       const data = await resp.json();
       if (resp.ok && data.success) {
@@ -553,13 +554,13 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
       });
       if (editingStoreAdmin) {
         const token = getSuperAdminToken();
-        const saveResp = await fetch(apiUrl('/api/save-user'), {
+        const saveResp = await safeApiRequest('/api/save-user', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(token ? { 'Authorization': `Bearer ${token}` } : {})
           },
-          body: JSON.stringify({
+          body: {
             user: {
               id: editingStoreAdmin.id,
               username: editingStoreAdmin.username,
@@ -570,7 +571,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                 ? { password: editingStoreAdmin.password.trim() }
                 : {})
             }
-          })
+          }
         });
         if (!saveResp.ok) {
           const errData = await saveResp.json().catch(() => ({}));
@@ -589,13 +590,13 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
     if (!confirm('Bạn có chắc chắn muốn xóa dữ liệu cửa hàng này? Hành động này không thể hoàn tác!')) return;
     try {
       const token = getSuperAdminToken();
-      const resp = await fetch(apiUrl('/api/delete-store'), {
+      const resp = await safeApiRequest('/api/delete-store', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({ storeId })
+        body: { storeId }
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -742,7 +743,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
         const newId = Math.random().toString(36).substr(2, 9);
         await setDoc(doc(db, 'packages', newId), { ...packageToSave, id: newId });
       } else {
-        await updateDoc(doc(db, 'packages', editingPackage.id), packageToSave as any);
+        await setDoc(doc(db, 'packages', editingPackage.id), packageToSave as any, { merge: true });
       }
       setEditingPackage(null);
       fetchData();
@@ -1216,12 +1217,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                         </div>
                         <div className="grid grid-cols-2 gap-1.5">
                           {PACKAGE_TABS.map(tab => {
-                            const isAllowed = !!(pkg.features?.[tab.id as keyof StorePackageFeatures] ?? (
-                              tab.id === 'reports' ? pkg.features?.financialReports :
-                              tab.id === 'tax_report' ? (pkg.features?.taxReport || pkg.features?.tax_report) :
-                              tab.id === 'attendance' ? (pkg.features?.attendance !== undefined ? pkg.features?.attendance : (pkg.id !== 'basic')) :
-                              true
-                            ));
+                            const isAllowed = isTabAllowedInPackage(tab.id, pkg);
                             return (
                               <div 
                                 key={tab.id}
@@ -1403,12 +1399,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {PACKAGE_TABS.map(tab => {
-                      const isSelected = !!(editingPackage.features?.[tab.id as keyof StorePackageFeatures] ?? (
-                        tab.id === 'reports' ? editingPackage.features?.financialReports :
-                        tab.id === 'tax_report' ? (editingPackage.features?.taxReport || editingPackage.features?.tax_report) :
-                        tab.id === 'attendance' ? (editingPackage.features?.attendance !== undefined ? editingPackage.features?.attendance : (editingPackage.id !== 'basic')) :
-                        true
-                      ));
+                      const isSelected = isTabAllowedInPackage(tab.id, editingPackage);
                       const Icon = tab.icon;
                       return (
                         <button

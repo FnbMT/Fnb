@@ -67,6 +67,17 @@ export const getVietnamEndOfTodayIso = (): string => {
   return new Date(`${todayVn}T23:59:59.999+07:00`).toISOString();
 };
 
+export const getVietnamEndOfDayIso = (businessDateStr?: string): string => {
+  let cleanDateStr = (businessDateStr || '').trim();
+  if (cleanDateStr.length > 10) {
+    cleanDateStr = cleanDateStr.slice(0, 10);
+  }
+  if (!cleanDateStr || cleanDateStr.length !== 10) {
+    cleanDateStr = getVietnamBusinessDate();
+  }
+  return new Date(`${cleanDateStr}T23:59:59.999+07:00`).toISOString();
+};
+
 export const getDateRangeIso = (dateStr: string, type: 'day' | 'month' | 'year') => {
   const todayVn = getVietnamBusinessDate();
 

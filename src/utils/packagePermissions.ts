@@ -88,7 +88,7 @@ export const checkStoreTabPermission = (
   packagesList: StorePackage[] = []
 ): boolean => {
   // Always allowed base operational views
-  if (['tables', 'menu_mgmt', 'shifts', 'settings', 'user_mgmt', 'my_payroll'].includes(tabId)) {
+  if (['tables', 'menu_mgmt', 'shifts', 'settings', 'user_mgmt'].includes(tabId)) {
     return true;
   }
 
@@ -105,6 +105,11 @@ export const checkStoreTabPermission = (
   let currentPkg = list.find(p => p?.id === packageId);
   if (!currentPkg && (packageId === 'trial' || store?.subscription?.status === 'trial')) {
     currentPkg = list.find(p => p?.id === 'trial');
+  }
+
+  // Tab chấm công cá nhân của nhân viên phụ thuộc vào tính năng attendance của gói
+  if (tabId === 'my_payroll') {
+    return isTabAllowedInPackage('attendance', currentPkg);
   }
 
   return isTabAllowedInPackage(tabId, currentPkg);

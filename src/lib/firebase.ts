@@ -1,12 +1,16 @@
 import { initializeApp } from 'firebase/app';
 import { 
   initializeFirestore, 
+  getFirestore,
   persistentLocalCache, 
-  persistentMultipleTabManager, 
+  persistentMultipleTabManager,
+  persistentSingleTabManager,
+  memoryLocalCache,
   setLogLevel 
 } from 'firebase/firestore';
 import { getAuth, initializeAuth, indexedDBLocalPersistence } from 'firebase/auth';
 import { getStorage } from 'firebase/storage';
+import { Capacitor } from '@capacitor/core';
 
 // Tắt log nội bộ của Firestore để tránh gRPC stream lifecycle warning bị ghi nhận như lỗi
 try {
@@ -35,15 +39,45 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-export const db = initializeFirestore(app, {
-  localCache: persistentLocalCache({
-    tabManager: persistentMultipleTabManager()
-  }),
-  ignoreUndefinedProperties: true,
-});
+// Khởi tạo Firestore: Trên thiết bị di động Native (Capacitor WebView đơn tiến trình),
+// sử dụng persistentSingleTabManager để tránh lỗi Web Locks API của multi-tab.
+// Nếu thiết bị không hỗ trợ IndexedDB hoặc bộ nhớ hạn chế, tự động fallback an toàn.
+const initDb = () => {
+  try {
+    const tabManager = Capacitor.isNativePlatform()
+      ? persistentSingleTabManager({})
+      : persistentMultipleTabManager();
 
-export const auth = initializeAuth(app, {
-  persistence: indexedDBLocalPersistence
-});
+    return initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager }),
+      ignoreUndefinedProperties: true,
+    });
+  } catch (err) {
+    console.warn('[Firebase] Khởi tạo persistent cache thất bại, fallback sang bộ nhớ tạm:', err);
+    try {
+      return initializeFirestore(app, {
+        localCache: memoryLocalCache(),
+        ignoreUndefinedProperties: true,
+      });
+    } catch {
+      return getFirestore(app);
+    }
+  }
+};
+
+export const db = initDb();
+
+const initAuth = () => {
+  try {
+    return initializeAuth(app, {
+      persistence: indexedDBLocalPersistence
+    });
+  } catch (err) {
+    console.warn('[Firebase] Khởi tạo auth persistence thất bại, fallback getAuth:', err);
+    return getAuth(app);
+  }
+};
+
+export const auth = initAuth();
 
 export const storage = getStorage(app);

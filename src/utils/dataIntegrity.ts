@@ -116,34 +116,37 @@ export function invoiceCostIsComplete(invoice: Invoice): boolean {
 }
 export function allocatedItemRevenue(invoice: Invoice): number[] {
   const items = invoice.items || [];
+  if (!items.length) return [];
   const weights = items.map(
     (item) =>
-      (item.price +
-        (item.selectedAddOns || []).reduce((sum, a) => sum + a.price, 0)) *
-      item.quantity
+      ((Number.isFinite(item.price) ? item.price : 0) +
+        (item.selectedAddOns || []).reduce((sum, a) => sum + (Number.isFinite(a.price) ? a.price : 0), 0)) *
+      (Number.isFinite(item.quantity) && item.quantity > 0 ? item.quantity : 1)
   );
-  const gross = weights.reduce((sum, n) => sum + n, 0),
-    net = Math.max(0, Math.round(invoice.subtotal - (invoice.discount || 0)));
-  if (gross <= 0) return weights.map(() => 0);
+  const gross = weights.reduce((sum, n) => sum + n, 0);
+  const subtotal = Number.isFinite(invoice.subtotal) ? invoice.subtotal : (Number.isFinite(invoice.total) ? invoice.total : gross);
+  const discount = Number.isFinite(invoice.discount) ? (invoice.discount || 0) : 0;
+  const net = Math.max(0, Math.round(subtotal - discount));
+  if (gross <= 0 || !Number.isFinite(net)) return weights.map(() => 0);
   const raw = weights.map((n) => (n / gross) * net),
     allocated = raw.map(Math.floor);
   let remaining = net - allocated.reduce((sum, n) => sum + n, 0);
   const priority = raw
     .map((n, i) => ({ i, fraction: n - allocated[i] }))
     .sort((a, b) => b.fraction - a.fraction || a.i - b.i);
-  for (let index = 0; remaining > 0; index++, remaining--)
+  for (let index = 0; remaining > 0 && priority.length > 0; index++, remaining--)
     allocated[priority[index % priority.length].i]++;
   return allocated;
 }
 export function isSalesCategory(category = ""): boolean {
   return (
-    category.normalize("NFC").trim().toLocaleLowerCase("vi-VN") === "bán hàng"
+    typeof category === "string" && category.normalize("NFC").trim().toLocaleLowerCase("vi-VN") === "bán hàng"
   );
 }
 export function expenseGroup(
   category = ""
 ): "Inventory" | "Rent" | "Salary" | "Other" {
-  const c = category.toLowerCase().trim();
+  const c = typeof category === "string" ? category.toLowerCase().trim() : "";
   if (
     c.includes("nhập hàng") ||
     c.includes("mua hàng") ||
@@ -160,6 +163,36 @@ export function expenseGroup(
     return "Salary";
   return "Other";
 }
+export const RECEIPT_RECONCILIATION_VERSION = 1;
+
+export function validInvoiceAmount(invoice: Invoice): boolean {
+  return Number.isFinite(invoice.total) && invoice.total >= 0
+    && (invoice.discount == null || (Number.isFinite(invoice.discount) && invoice.discount >= 0));
+}
+
+export function validCashAmount(receipt: CashTransaction): boolean {
+  return Number.isFinite(receipt.amount) && receipt.amount >= 0
+    && (receipt.type === 'income' || receipt.type === 'expense');
+}
+
+export function isCashMethod(method?: string): boolean {
+  return !method || method === 'cash';
+}
+
+export function salesReceiptInvoiceId(receipt: CashTransaction): string | undefined {
+  if (receipt.invoiceId) return receipt.invoiceId;
+  return receipt.id.startsWith('cash_') ? receipt.id.slice(5) || undefined : undefined;
+}
+
+export function matchesSalesReceipt(invoice: Invoice, receipt: CashTransaction): boolean {
+  return receipt.storeId === invoice.storeId
+    && receipt.type === 'income' && isSalesCategory(receipt.category)
+    && validInvoiceAmount(invoice) && validCashAmount(receipt)
+    && invoice.total === receipt.amount
+    && isCashMethod(invoice.paymentMethod) === isCashMethod(receipt.paymentMethod)
+    && businessDateOf(invoice) === businessDateOf(receipt);
+}
+
 export function aggregateDay(
   storeId: string,
   date: string,
@@ -191,6 +224,8 @@ export function aggregateDay(
     expenseSalary: 0,
     expenseOther: 0,
     cashCount: cash.length,
+    salesCashIncome: 0,
+    salesTransferIncome: 0,
     costStatus: sales.every(invoiceCostIsComplete) ? "complete" : "estimated",
     coverageStatus: complete
       ? sales.length || cash.length
@@ -200,8 +235,8 @@ export function aggregateDay(
     hasData: Boolean(sales.length || cash.length),
   };
   for (const inv of sales) {
-    if (!Number.isFinite(inv.total) || inv.total < 0)
-      throw new Error("Hóa đơn có tổng tiền không hợp lệ.");
+    if (!validInvoiceAmount(inv))
+      throw new Error(`Hóa đơn ${inv.id} có tổng tiền hoặc giảm giá không hợp lệ.`);
     stat.totalRevenue += inv.total;
     stat[
       !inv.paymentMethod || inv.paymentMethod === "cash"
@@ -209,20 +244,24 @@ export function aggregateDay(
         : "totalTransfer"
     ] += inv.total;
     stat.totalDiscount += inv.discount || 0;
-    stat.totalCost! += Number.isFinite(inv.totalCost)
+    const invCost = Number.isFinite(inv.totalCost) && inv.totalCost! >= 0
       ? inv.totalCost!
-      : calculateInvoiceCost(inv.items || []);
+      : Math.max(0, calculateInvoiceCost(inv.items || []));
+    stat.totalCost! += Math.max(0, invCost);
   }
+  stat.totalCost = Math.max(0, stat.totalCost || 0);
   for (const tx of cash) {
-    if (!Number.isFinite(tx.amount) || tx.amount < 0)
-      throw new Error("Phiếu thu/chi có số tiền không hợp lệ.");
+    if (!validCashAmount(tx))
+      throw new Error(`Phiếu thu/chi ${tx.id} có số tiền hoặc loại giao dịch không hợp lệ.`);
     const method =
       !tx.paymentMethod || tx.paymentMethod === "cash" ? "cash" : "transfer";
     if (tx.type === "expense") {
       stat.totalExpense! += tx.amount;
       stat[`${method}Expense`]! += tx.amount;
       stat[`expense${expenseGroup(tx.category)}`]! += tx.amount;
-    } else if (tx.type === "income" && !isSalesCategory(tx.category)) {
+    } else if (isSalesCategory(tx.category)) {
+      stat[method === "cash" ? "salesCashIncome" : "salesTransferIncome"]! += tx.amount;
+    } else {
       stat.totalIncome! += tx.amount;
       stat[`${method}Income`]! += tx.amount;
     }
@@ -242,11 +281,15 @@ export function dailyStatsFromSources(
   const cashDays = new Map<string, CashTransaction[]>();
   for (const invoice of invoices) {
     const day = businessDateOf(invoice);
-    invoiceDays.set(day, [...(invoiceDays.get(day) || []), invoice]);
+    const rows = invoiceDays.get(day);
+    if (rows) rows.push(invoice);
+    else invoiceDays.set(day, [invoice]);
   }
   for (const tx of cash) {
     const day = businessDateOf(tx);
-    cashDays.set(day, [...(cashDays.get(day) || []), tx]);
+    const rows = cashDays.get(day);
+    if (rows) rows.push(tx);
+    else cashDays.set(day, [tx]);
   }
   return dates.map((day) =>
     aggregateDay(
@@ -258,40 +301,102 @@ export function dailyStatsFromSources(
     )
   );
 }
-export function receiptMismatch(
-  invoices: Invoice[],
-  cash: CashTransaction[]
-): string {
-  const sales = invoices.filter((i) => i.status !== "cancelled");
-  const receipts = cash.filter(
-    (c) => c.type === "income" && isSalesCategory(c.category)
-  );
-  const invoiceIds = new Set(sales.map((i) => i.id));
-  const linked = new Map<string, number>();
-  for (const receipt of receipts) {
-    const id = (receipt as any).invoiceId as string | undefined;
-    if (id) {
-      if (!invoiceIds.has(id))
-        return "Có phiếu thu bán hàng không còn hóa đơn tương ứng. Cần đối soát chứng từ gốc.";
-      linked.set(id, (linked.get(id) || 0) + 1);
+export function receiptMismatch(invoices: Invoice[], cash: CashTransaction[]): string {
+  const sales = invoices.filter(invoice => invoice.status !== 'cancelled');
+  const salesMap = new Map(sales.map(invoice => [invoice.id, invoice]));
+  const matchedInvoiceIds = new Set<string>();
+  const unmatchedReceipts: CashTransaction[] = [];
+
+  // 1. Khớp các phiếu thu bán hàng có sẵn liên kết invoiceId
+  for (const receipt of cash) {
+    if (receipt.type !== 'income' || !isSalesCategory(receipt.category)) continue;
+    const invoiceId = salesReceiptInvoiceId(receipt);
+    if (invoiceId && salesMap.has(invoiceId)) {
+      const invoice = salesMap.get(invoiceId)!;
+      if (matchedInvoiceIds.has(invoiceId)) {
+        return `Hóa đơn ${invoiceId} có nhiều phiếu thu bán hàng.`;
+      }
+      try {
+        if (!matchesSalesReceipt(invoice, receipt))
+          return `Phiếu thu ${receipt.id} lệch số tiền, phương thức hoặc ngày so với hóa đơn ${invoiceId}.`;
+      } catch (error) {
+        return `Không thể xác nhận ngày của phiếu thu ${receipt.id} và hóa đơn ${invoiceId}.`;
+      }
+      matchedInvoiceIds.add(invoiceId);
+    } else {
+      unmatchedReceipts.push(receipt);
     }
   }
-  if ([...linked.values()].some((count) => count > 1))
-    return "Có nhiều phiếu thu bán hàng liên kết cùng một hóa đơn. Cần kiểm tra giao dịch trùng.";
-  for (const cashMethod of [true, false]) {
-    const matches = (method?: string) =>
-      (!method || method === "cash") === cashMethod;
-    const expected = sales
-      .filter((i) => matches(i.paymentMethod))
-      .reduce((sum, i) => sum + i.total, 0);
-    const actual = receipts
-      .filter((c) => matches(c.paymentMethod))
-      .reduce((sum, c) => sum + c.amount, 0);
-    if (Math.abs(expected - actual) > 0.5)
-      return "Tổng hóa đơn và phiếu thu bán hàng chưa khớp theo phương thức thanh toán. Số liệu chưa được chốt đối soát.";
+
+  // 2. Đối soát dữ liệu cũ (legacy): Tự động khớp 1-1 theo (storeId, ngày kinh doanh, số tiền, PTTT, bàn)
+  const availableInvoices = sales.filter(inv => !matchedInvoiceIds.has(inv.id));
+  for (const receipt of unmatchedReceipts) {
+    let receiptDay = '';
+    try { receiptDay = businessDateOf(receipt); }
+    catch { return `Phiếu thu ${receipt.id} thiếu ngày hợp lệ.`; }
+
+    // Tìm hóa đơn phù hợp nhất: cùng quán, cùng ngày, cùng số tiền, cùng hình thức thanh toán
+    let candidateIdx = -1;
+
+    // Ưu tiên 1: Khớp thêm cả tên bàn ghi trong note (ví dụ "Thanh toán bàn Bàn 1")
+    if (receipt.note) {
+      candidateIdx = availableInvoices.findIndex(inv => {
+        let invDay = '';
+        try { invDay = businessDateOf(inv); } catch { return false; }
+        return inv.storeId === receipt.storeId &&
+          invDay === receiptDay &&
+          inv.total === receipt.amount &&
+          isCashMethod(inv.paymentMethod) === isCashMethod(receipt.paymentMethod) &&
+          Boolean(inv.tableName && receipt.note && receipt.note.includes(inv.tableName));
+      });
+    }
+
+    // Ưu tiên 2: Khớp 1-1 theo ngày, số tiền và PTTT
+    if (candidateIdx < 0) {
+      candidateIdx = availableInvoices.findIndex(inv => {
+        let invDay = '';
+        try { invDay = businessDateOf(inv); } catch { return false; }
+        return inv.storeId === receipt.storeId &&
+          invDay === receiptDay &&
+          inv.total === receipt.amount &&
+          isCashMethod(inv.paymentMethod) === isCashMethod(receipt.paymentMethod);
+      });
+    }
+
+    if (candidateIdx >= 0) {
+      const matched = availableInvoices.splice(candidateIdx, 1)[0];
+      matchedInvoiceIds.add(matched.id);
+    } else {
+      const invoiceId = salesReceiptInvoiceId(receipt);
+      if (invoiceId) {
+        return `Phiếu thu ${receipt.id} không có hóa đơn ${invoiceId} tương ứng trong kỳ.`;
+      }
+      return `Phiếu thu ${receipt.id} (${receipt.amount.toLocaleString('vi-VN')}đ) chưa khớp hóa đơn tương ứng trong kỳ. Cần xác nhận chứng từ gốc.`;
+    }
   }
-  return "";
+
+  for (const invoice of sales) {
+    if (!matchedInvoiceIds.has(invoice.id)) {
+      return `Hóa đơn ${invoice.id} (${invoice.total.toLocaleString('vi-VN')}đ) thiếu phiếu thu bán hàng đã xác nhận.`;
+    }
+  }
+  return '';
 }
+
+export function reconcileDay(storeId: string, day: string, invoices: Invoice[], cash: CashTransaction[]): DailyStats {
+  for (const row of [...invoices, ...cash]) {
+    if (row.storeId !== storeId || businessDateOf(row) !== day) {
+      throw new Error(`Chứng từ ${row.id} có ngày hoặc cửa hàng không khớp.`);
+    }
+  }
+  const mismatch = receiptMismatch(invoices, cash);
+  if (mismatch) throw new Error(mismatch);
+  return {
+    ...aggregateDay(storeId, day, invoices, cash, true),
+    receiptReconciliationVersion: RECEIPT_RECONCILIATION_VERSION,
+  };
+}
+
 export function attendanceTotals(records: AttendanceRecord[]) {
   const dayWeights = new Map<string, number>();
   const intervals = new Map<string, [number, number][]>();
@@ -331,3 +436,11 @@ export function attendanceTotals(records: AttendanceRecord[]) {
     hasOpenSession,
   };
 }
+
+export function computeAttendanceFingerprint(records: AttendanceRecord[]): string {
+  const sorted = [...records].sort((a, b) => (a.id || '').localeCompare(b.id || ''));
+  return sorted
+    .map(r => `${r.id}:${r.date}:${r.checkInTime || ''}:${r.checkOutTime || ''}:${r.status || ''}`)
+    .join('|');
+}
+

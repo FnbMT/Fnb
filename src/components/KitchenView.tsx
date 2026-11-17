@@ -18,6 +18,7 @@ import {
   Power
 } from 'lucide-react';
 import { Table, OrderSession, OrderItem, User } from '../types';
+import { cn } from '../lib/utils';
 
 interface KitchenViewProps {
   tables: Table[];
@@ -116,6 +117,7 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     return localStorage.getItem('kitchen_sound_enabled') !== 'false';
   });
+  const [printingOrderId, setPrintingOrderId] = useState<string | null>(null);
 
   // Track known order IDs to sound alarm on new incoming orders
   const knownOrderIdsRef = useRef<Set<string>>(new Set());
@@ -335,18 +337,25 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
   };
 
   // Handler: Re-print Kitchen Ticket
-  const handlePrintKitchenTicket = (table: Table, order: OrderSession) => {
+  const handlePrintKitchenTicket = (table: Table, order: OrderSession, orderIndex?: number) => {
     if (!onPrint) {
       alert('Chức năng in chưa được thiết lập');
       return;
     }
-    onPrint({
-      type: 'kitchen',
-      tableName: table.name,
-      items: order.items,
-      staffName: currentUser?.name || 'Nhà bếp',
-      note: table.note || order.note
-    });
+    setPrintingOrderId(order.id);
+    const orderNumText = orderIndex !== undefined ? `ĐƠN #${orderIndex}` : 'ĐƠN';
+    const noteText = order.note ? ` - ${order.note}` : (table.note ? ` - ${table.note}` : '');
+    try {
+      onPrint({
+        type: 'kitchen',
+        tableName: table.name,
+        items: order.items,
+        staffName: currentUser?.name || 'Nhà bếp',
+        note: `IN LẠI ${orderNumText}${noteText}`
+      });
+    } finally {
+      setTimeout(() => setPrintingOrderId(null), 1200);
+    }
   };
 
   return (
@@ -677,11 +686,12 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
                         {/* Print Kitchen Ticket */}
                         <button
                           type="button"
-                          onClick={() => handlePrintKitchenTicket(table, order)}
+                          disabled={printingOrderId === order.id}
+                          onClick={() => handlePrintKitchenTicket(table, order, orderIndex)}
                           title="In lại phiếu bếp"
-                          className="p-2 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-gray-600 dark:text-gray-300 transition-all cursor-pointer"
+                          className="p-2 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-gray-600 dark:text-gray-300 transition-all cursor-pointer disabled:opacity-50"
                         >
-                          <Printer className="w-4 h-4" />
+                          <Printer className={cn("w-4 h-4", printingOrderId === order.id && "animate-spin text-emerald-500")} />
                         </button>
 
                         {/* State Transitions */}

@@ -1,8 +1,11 @@
 import type { Request, Response } from 'express';
 import { adminDb } from './_firebaseAdmin.js';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
+import { handleCors } from './_cors.js';
 
 export default async function handler(req: any, res: any) {
+  if (handleCors(req, res)) return;
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }

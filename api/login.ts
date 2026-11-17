@@ -1,7 +1,6 @@
 import type { Request, Response } from 'express';
-import crypto from 'node:crypto';
-import { adminDb, adminAuth, safeDeleteSentinel } from './_firebaseAdmin.js';
-import { hashPassword, verifyPassword, encryptAes, decryptAes } from './_crypto.js';
+import { adminDb, adminAuth } from './_firebaseAdmin.js';
+import { hasStoredCredential, verifyStoredCredential, verifyLegacyUserPassword } from './_legacyCredentials.js';
 import { generateAuthToken } from './_token.js';
 
 // Bộ nhớ đệm tạm thời cho Rate Limit đăng nhập sai (chống brute-force)
@@ -104,10 +103,13 @@ export default async function handler(req: any, res: any) {
           console.warn("[Auth Security] createCustomToken error for superadmin:", tokenErr);
         }
 
+        if (process.env.REQUIRE_ADMIN_AUTH === 'true' && !customToken) {
+          return res.status(503).json({ error: 'Máy chủ chưa cấp được quyền truy cập dữ liệu. Vui lòng thử lại.' });
+        }
         return res.status(200).json({
           success: true,
           token: sessionToken,
-          customToken,
+          customToken: customToken || '',
           user: {
             id: 'superadmin',
             username: cleanUsername,
@@ -197,79 +199,24 @@ export default async function handler(req: any, res: any) {
       return res.status(403).json({ error: 'Định danh không hợp lệ đối với tài khoản cửa hàng' });
     }
 
-    if (userData.isDeleted || userData.status === 'deleted' || userData.isActive === false) {
+    if (userData.isDeleted || (userData.status && userData.status !== 'active') || userData.isActive === false) {
       recordFailedAttempt(rateLimitKey);
       return res.status(401).json({ error: 'Tài khoản người dùng này đã bị vô hiệu hóa hoặc không còn hoạt động' });
     }
 
-    // 4. Xác thực mật khẩu đa tầng:
-    let isPasswordValid = false;
-    let tokenVersion = 1;
-    let secretData: any = null;
-
-    // 4a. Đọc vùng bảo mật user_secrets
-    try {
-      const secretRef = adminDb.collection('user_secrets').doc(userId);
-      const secretDoc = await secretRef.get();
-      if (secretDoc && secretDoc.exists) {
-        secretData = secretDoc.data() || {};
-        tokenVersion = secretData.tokenVersion ? Number(secretData.tokenVersion) : 1;
-      }
-    } catch (readErr: any) {
-      console.warn("[Login Auth Warning] Lỗi đọc user_secrets:", userId, readErr?.message || readErr);
+    const secretDoc = await adminDb.collection('user_secrets').doc(userId).get();
+    const primary = secretDoc.data();
+    let stored = primary;
+    if (!hasStoredCredential(stored)) {
+      stored = (await adminDb.collection('system').doc(`user_secret_${userId}`).get()).data();
     }
-
-    // 4b. Kiểm tra vùng lưu trữ legacy system/user_secret_${userId} nếu user_secrets chưa có
-    if (!secretData || (!secretData.passwordHash && !secretData.clientHash && !secretData.encryptedPassword)) {
-      try {
-        const sysSnap = await adminDb.collection('system').doc(`user_secret_${userId}`).get();
-        if (sysSnap && sysSnap.exists) {
-          const sysData = sysSnap.data() || {};
-          secretData = { ...sysData, ...(secretData || {}) };
-          if (!secretData.passwordHash && sysData.passwordHash) secretData.passwordHash = sysData.passwordHash;
-          if (!secretData.clientHash && sysData.clientHash) secretData.clientHash = sysData.clientHash;
-          if (!secretData.encryptedPassword && sysData.encryptedPassword) secretData.encryptedPassword = sysData.encryptedPassword;
-        }
-      } catch (_) {}
-    }
-
-    // 4c. Đối chiếu với các bản băm trong secretData (scrypt, sha256, aes-256)
-    if (secretData) {
-      if (secretData.passwordHash) {
-        if (typeof secretData.passwordHash === 'string' && secretData.passwordHash.includes(':')) {
-          isPasswordValid = verifyPassword(cleanPassword, secretData.passwordHash);
-        } else {
-          const sha256 = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-          isPasswordValid = (sha256 === secretData.passwordHash || cleanPassword === secretData.passwordHash);
-        }
-      }
-
-      if (!isPasswordValid && secretData.clientHash) {
-        const clientSha256 = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-        if (clientSha256 === secretData.clientHash) {
-          isPasswordValid = true;
-        }
-      }
-
-      if (!isPasswordValid && secretData.encryptedPassword) {
-        try {
-          const decrypted = decryptAes(secretData.encryptedPassword);
-          isPasswordValid = (decrypted === cleanPassword);
-        } catch (_) {}
-      }
-    }
-
-    // 4d. Đối chiếu với userData.password (nếu bản băm chưa có hoặc tài khoản legacy được tạo trực tiếp)
-    if (!isPasswordValid && userData.password) {
-      const rawUserPass = String(userData.password).trim();
-      if (rawUserPass === cleanPassword) {
-        isPasswordValid = true;
-      } else {
-        const sha256 = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-        if (rawUserPass === sha256) {
-          isPasswordValid = true;
-        }
-      }
+    const isPasswordValid = hasStoredCredential(stored)
+      ? verifyStoredCredential(cleanPassword, stored!)
+      : verifyLegacyUserPassword(cleanPassword, userData.password);
+    const tokenVersion = Number(userData.tokenVersion ?? primary?.tokenVersion ?? stored?.tokenVersion ?? 1);
+    if (!Number.isSafeInteger(tokenVersion) || tokenVersion < 1
+      || (primary?.tokenVersion != null && Number(primary.tokenVersion) !== tokenVersion)) {
+      return res.status(409).json({ error: 'Thông tin xác thực đang cần đồng bộ. Vui lòng liên hệ quản trị viên.' });
     }
 
     if (!isPasswordValid) {
@@ -279,47 +226,6 @@ export default async function handler(req: any, res: any) {
 
     // Đăng nhập thành công: Xóa bộ đếm sai
     loginFailAttempts.delete(rateLimitKey);
-
-    // 4e. TỰ ĐỘNG ĐỒNG BỘ VÀ NÂNG CẤP BẢO MẬT: Lưu hash chuẩn scrypt vào user_secrets và cập nhật lastLogin
-    try {
-      const passwordHash = hashPassword(cleanPassword);
-      const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-      const secretPayload: Record<string, any> = {
-        userId,
-        storeId,
-        role: userData.role,
-        passwordHash,
-        clientHash,
-        tokenVersion: tokenVersion || 1,
-        updatedAt: new Date().toISOString()
-      };
-      if (userData.role === 'admin') {
-        secretPayload.encryptedPassword = encryptAes(cleanPassword);
-      }
-      await adminDb.collection('user_secrets').doc(userId).set(secretPayload, { merge: true });
-
-      // Đồng thời cập nhật system/user_secret_${userId} cho tương thích fallback hai tầng
-      try {
-        await adminDb.collection('system').doc(`user_secret_${userId}`).set({
-          userId,
-          storeId,
-          role: userData.role,
-          clientHash,
-          updatedAt: new Date().toISOString()
-        }, { merge: true });
-      } catch (sysErr) {
-        console.warn("[Auth Warning] Không thể cập nhật system secret:", sysErr);
-      }
-
-      // Luôn bảo lưu password trong users để đảm bảo 100% tương thích cho các thiết bị cũ (iOS TestFlight/App Store)
-      const updatePayload: Record<string, any> = {
-        lastLogin: new Date().toISOString(),
-        password: cleanPassword
-      };
-      await adminDb.collection('users').doc(userId).update(updatePayload);
-    } catch (migErr) {
-      console.warn("[Auth Upgrade Notice]:", migErr);
-    }
 
     // 5. Cấp Session Token có chữ ký số bí mật HMAC-SHA256 kèm tokenVersion
     const sessionToken = generateAuthToken({
@@ -332,14 +238,18 @@ export default async function handler(req: any, res: any) {
     });
 
     // 6. Cấp Firebase Custom Token mang Custom Claims (storeId, role, tokenVersion)
-    const customToken = await adminAuth.createCustomToken(userId, {
-      storeId,
-      role: userData.role,
-      isSuperAdmin: false,
-      tokenVersion
-    });
+    let customToken: string | null = null;
+    try {
+      customToken = await adminAuth.createCustomToken(userId, {
+        storeId,
+        role: userData.role,
+        isSuperAdmin: false,
+        tokenVersion
+      });
+    } catch (tokenErr) {
+      console.warn("[Login Security] createCustomToken error:", tokenErr);
+    }
 
-    // Chỉ chặn nếu môi trường yêu cầu bắt buộc Firebase Auth token (REQUIRE_ADMIN_AUTH === 'true')
     if (process.env.REQUIRE_ADMIN_AUTH === 'true' && !customToken) {
       console.error("[Login Security] Firebase Admin SDK chưa được cấu hình Service Account để tạo customToken.");
       return res.status(503).json({
@@ -347,6 +257,7 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    await adminDb.collection('users').doc(userId).update({ lastLogin: new Date().toISOString() }).catch(() => {});
     const sanitizedUserData = { ...userData };
     delete sanitizedUserData.password;
     delete sanitizedUserData.pinCode;
@@ -355,12 +266,13 @@ export default async function handler(req: any, res: any) {
     return res.status(200).json({
       success: true,
       token: sessionToken,
-      customToken,
+      customToken: customToken || '',
       hasAdminAuth: Boolean(customToken),
       user: {
-        id: userId,
-        token: sessionToken,
         ...sanitizedUserData,
+        id: userId,
+        tokenVersion,
+        token: sessionToken,
         store: storeData
       }
     });

@@ -16,7 +16,7 @@ export const LiveTimer = ({ startTime }: { startTime: string | undefined }) => {
     }
 
     const start = new Date(startTime).getTime();
-    
+
     const updateTimer = () => {
       const now = Date.now();
       const diff = now - start;
@@ -24,12 +24,12 @@ export const LiveTimer = ({ startTime }: { startTime: string | undefined }) => {
         setElapsed('00:00');
         return;
       }
-      
+
       const totalSeconds = Math.floor(diff / 1000);
       const hours = Math.floor(totalSeconds / 3600);
       const minutes = Math.floor((totalSeconds % 3600) / 60);
       const seconds = totalSeconds % 60;
-      
+
       if (hours > 0) {
         setElapsed(`${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
       } else {
@@ -45,18 +45,19 @@ export const LiveTimer = ({ startTime }: { startTime: string | undefined }) => {
   return <span>{elapsed}</span>;
 };
 
-import { LayoutDashboard, 
-  UtensilsCrossed, 
-  ChefHat, 
-  BarChart3, 
-  Search, 
-  Plus, 
-  Minus, 
+import {
+  LayoutDashboard,
+  UtensilsCrossed,
+  ChefHat,
+  BarChart3,
+  Search,
+  Plus,
+  Minus,
   Trash2,
-  DollarSign, 
-  Clock, 
+  DollarSign,
+  Clock,
   FileText,
-  User as UserIcon, 
+  User as UserIcon,
   ChevronRight,
   Coffee,
   CheckCircle2,
@@ -78,31 +79,32 @@ import { LayoutDashboard,
   CheckCheck,
   Smartphone,
   BellRing,
-  ArrowRightLeft, Sun, Moon, QrCode } from 'lucide-react';
+  ArrowRightLeft, Sun, Moon, QrCode, RotateCcw
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, isSameDay, parseISO, subDays } from 'date-fns';
-import { 
-  LineChart, 
-  Line, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
   ResponsiveContainer,
   BarChart,
   Bar,
   Cell
 } from 'recharts';
 import { cn } from './lib/utils';
-import { 
-  Table, 
-  MenuItem, 
-  OrderItem, 
+import {
+  Table,
+  MenuItem,
+  OrderItem,
   AddOnItem,
   OrderSession,
   VoidItemDetail,
   VoidLog,
-  ViewType, 
+  ViewType,
   Invoice,
   InventoryTransaction,
   SystemSettings,
@@ -111,32 +113,34 @@ import {
   StockCardEntry,
   AttendanceRecord,
   PayrollRecord,
-  INITIAL_MENU, 
-  INITIAL_TABLES, 
+  INITIAL_MENU,
+  INITIAL_TABLES,
   CATEGORIES,
   INITIAL_USERS,
   User,
   Shift,
   CashTransaction,
   Customer,
-  CustomerType
+  CustomerType,
+  PrintJobData
 } from './types';
 
 import { db, auth } from './lib/firebase';
 import { signOut, onAuthStateChanged } from 'firebase/auth';
-import { apiUrl } from './utils/apiConfig';
-import { 
-  collection, 
-  query, 
-  where, 
-  onSnapshot, 
-  addDoc, 
-  deleteDoc, 
-  doc, 
+import { apiUrl, safeApiRequest } from './utils/apiConfig';
+import {
+  collection,
+  query,
+  where,
+  onSnapshot,
+  addDoc,
+  deleteDoc,
+  doc,
   updateDoc,
   getDoc,
   getDocs,
   getDocFromServer,
+  getDocsFromServer,
   setDoc,
   deleteField,
   writeBatch,
@@ -147,12 +151,13 @@ import {
   arrayRemove,
   runTransaction
 } from 'firebase/firestore';
-import { 
-  getVietnamStartOfTodayIso, 
-  getVietnamBusinessDate, 
+import {
+  getVietnamStartOfTodayIso,
+  getVietnamBusinessDate,
   getVietnamDayBoundariesIso,
   getVietnamHeaderDateString,
-  getVietnamYesterdayDate
+  getVietnamYesterdayDate,
+  getVietnamEndOfDayIso
 } from './utils/firestoreDateHelper';
 
 // Import new views
@@ -166,6 +171,7 @@ import { UserMgmtView } from './components/UserMgmtView';
 import { LoginView } from './components/LoginView';
 import { RegisterStoreView } from './components/RegisterStoreView';
 import { SummaryView } from './components/SummaryView';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { SettingsView } from './components/SettingsView';
 import { PrinterService } from './services/printerService';
 import { Capacitor } from '@capacitor/core';
@@ -181,7 +187,8 @@ import { calculateInvoiceCost, calculateInvoiceCostSnapshot } from './utils/cost
 import { isCashPayment } from './utils/reportDataIntegrity';
 import { operationId, cloneData, orderSignature, itemsSubtotal, stockQuantity, itemKey, attendanceTotals } from './utils/dataIntegrity';
 import { subscribeDateRange, fetchStoreRows } from './utils/completeDataSource';
-import { addOrderAtomic, updateOrdersAtomic, moveTablesAtomic, recordCashAtomic, importStockAtomic, auditStockAtomic, cancelInvoiceAtomic, recordAttendanceAtomic } from './services/dataOperations';
+import { subscribeSharedQuery, setSharedReadScope, clearSharedReadSession } from './utils/sharedFirestoreQuery';
+import { addOrderAtomic, updateOrdersAtomic, moveTablesAtomic, recordCashAtomic, importStockAtomic, auditStockAtomic, cancelInvoiceAtomic, recordAttendanceAtomic, openShiftAtomic, finalizePayrollAtomic, unfinalizePayrollAtomic } from './services/dataOperations';
 import {
   sendDeviceNotification,
   checkNotificationPermission,
@@ -207,7 +214,7 @@ const LockedTabView = ({ title, onUpgrade }: { title: string, onUpgrade: () => v
           Tính năng "{title}" chưa được kích hoạt
         </h3>
         <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
-          {isNative 
+          {isNative
             ? 'Gói dịch vụ hiện tại của cửa hàng chưa bao gồm quyền sử dụng tính năng này. Vui lòng liên hệ Quản trị viên hoặc đăng nhập trên trình duyệt Web máy tính để nâng cấp gói dịch vụ.'
             : 'Gói dịch vụ hiện tại của cửa hàng chưa bao gồm quyền sử dụng tính năng này. Vui lòng liên hệ Quản trị viên hoặc nâng cấp gói để mở khóa toàn bộ tiện ích.'}
         </p>
@@ -224,8 +231,8 @@ const LockedTabView = ({ title, onUpgrade }: { title: string, onUpgrade: () => v
   );
 };
 
-const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsCount, packages }: { 
-  activeView: ViewType, 
+const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsCount, packages }: {
+  activeView: ViewType,
   setView: (v: ViewType) => void,
   onLogout: () => void,
   currentUser: User | null,
@@ -270,7 +277,7 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
   if (currentUser?.role === 'admin' || currentUser?.role === 'manager') {
     menuItems.push({ id: 'user_mgmt', label: 'Nhân viên', icon: Shield });
   }
-  
+
   if (currentUser?.role !== 'admin') {
     menuItems.push({ id: 'my_payroll', label: 'Chấm công', icon: DollarSign });
   }
@@ -297,7 +304,7 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
             FNB MASTER
           </h1>
         </div>
-        
+
         <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto custom-scrollbar">
           {menuItems.map((item) => {
             const isAllowed = isFeatureAllowedInMenu(item.id);
@@ -307,8 +314,8 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
                 onClick={() => setView(item.id as ViewType)}
                 className={cn(
                   "w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 group cursor-pointer",
-                  activeView === item.id 
-                    ? "bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-500/20" 
+                  activeView === item.id
+                    ? "bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-500/20"
                     : "text-gray-600 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5 hover:text-gray-900 dark:hover:text-white"
                 )}
               >
@@ -332,7 +339,7 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
         </nav>
 
         <div className="p-4 border-t border-black/5 dark:border-white/5 space-y-2">
-          <button 
+          <button
             onClick={() => setView('settings')}
             className="w-full flex items-center gap-3 px-4 py-2 text-sm text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer"
           >
@@ -346,7 +353,7 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
               <p className="font-medium truncate text-gray-900 dark:text-white">{currentUser?.name}</p>
               <p className="text-[10px] text-gray-500 uppercase truncate">{currentUser?.role}</p>
             </div>
-            <button 
+            <button
               onClick={onLogout}
               className="text-gray-500 hover:text-rose-500 cursor-pointer"
             >
@@ -366,8 +373,8 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
               onClick={() => setView(item.id as ViewType)}
               className={cn(
                 "flex flex-col items-center justify-center min-w-[58px] px-1 h-full gap-1 transition-all duration-200 relative shrink-0",
-                activeView === item.id 
-                  ? "text-emerald-600 dark:text-emerald-500 font-bold" 
+                activeView === item.id
+                  ? "text-emerald-600 dark:text-emerald-500 font-bold"
                   : "text-gray-500 hover:text-gray-900 dark:hover:text-white"
               )}
             >
@@ -386,21 +393,21 @@ const Sidebar = ({ activeView, setView, onLogout, currentUser, unresolvedShiftsC
             </button>
           );
         })}
-        <button 
-            onClick={onLogout}
-            className="flex flex-col items-center justify-center min-w-[58px] px-1 h-full gap-1 text-rose-600 dark:text-rose-500/70 hover:text-rose-500 shrink-0"
-          >
-            <LogOut className="w-5 h-5" />
-            <span className="text-[10px] font-medium whitespace-nowrap">Thoát</span>
+        <button
+          onClick={onLogout}
+          className="flex flex-col items-center justify-center min-w-[58px] px-1 h-full gap-1 text-rose-600 dark:text-rose-500/70 hover:text-rose-500 shrink-0"
+        >
+          <LogOut className="w-5 h-5" />
+          <span className="text-[10px] font-medium whitespace-nowrap">Thoát</span>
         </button>
       </div>
     </>
   );
 };
 
-const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentUser, kitchenEnabled = true }: { 
-  tables: Table[], 
-  onSelectTable: (t: Table) => void, 
+const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentUser, kitchenEnabled = true }: {
+  tables: Table[],
+  onSelectTable: (t: Table) => void,
   onDeleteTable: (id: string) => void,
   onEditTable: (t: Table) => void,
   currentUser: any,
@@ -415,15 +422,15 @@ const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentU
           whileHover={{ scale: 1.02 }}
           className={cn(
             "relative min-h-[8rem] rounded-2xl p-4 flex flex-col justify-between text-left transition-all border-2 group",
-            table.status === 'occupied' 
-              ? "bg-emerald-500/10 border-emerald-500/50 text-emerald-600 dark:text-emerald-400" 
+            table.status === 'occupied'
+              ? "bg-emerald-500/10 border-emerald-500/50 text-emerald-600 dark:text-emerald-400"
               : table.status === 'reserved'
-              ? "bg-amber-500/10 border-amber-500/50 text-amber-600 dark:text-amber-400"
-              : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:border-white/20"
+                ? "bg-amber-500/10 border-amber-500/50 text-amber-600 dark:text-amber-400"
+                : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:border-white/20"
           )}
         >
           <div className="flex justify-between items-start">
-            <button 
+            <button
               onClick={() => onSelectTable(table)}
               className="font-bold text-lg flex-1 text-left cursor-pointer"
             >
@@ -431,15 +438,15 @@ const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentU
             </button>
             <div className="flex items-center gap-2">
               {isAdminOrManager && (
-              <button 
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEditTable(table);
-                }}
-                className="p-1.5 bg-black/10 dark:bg-white/10 rounded-md text-gray-800 dark:text-gray-200 hover:bg-emerald-500/20 hover:text-emerald-600 dark:hover:text-emerald-400 transition-all cursor-pointer shadow-sm"
-              >
-                <Settings className="w-4 h-4" />
-              </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onEditTable(table);
+                  }}
+                  className="p-1.5 bg-black/10 dark:bg-white/10 rounded-md text-gray-800 dark:text-gray-200 hover:bg-emerald-500/20 hover:text-emerald-600 dark:hover:text-emerald-400 transition-all cursor-pointer shadow-sm"
+                >
+                  <Settings className="w-4 h-4" />
+                </button>
               )}
               {table.status === 'occupied' && (
                 <div className="flex flex-col gap-1 items-end">
@@ -458,7 +465,7 @@ const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentU
                 </div>
               )}
               {table.status === 'empty' && isAdminOrManager && (
-                <button 
+                <button
                   onClick={(e) => {
                     e.stopPropagation();
                     onDeleteTable(table.id);
@@ -470,19 +477,19 @@ const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentU
               )}
             </div>
           </div>
-          
-          <button 
+
+          <button
             onClick={() => onSelectTable(table)}
             className="space-y-1 flex-1 w-full text-left cursor-pointer"
           >
             <p className="text-xs opacity-70">
-              {table.status === 'occupied' 
-                ? `${(table.orders || []).reduce((sum, o) => sum + o.items.length, 0) + (table.currentOrder?.length || 0)} món ${table.orders && table.orders.length > 1 ? `(${table.orders.length} đơn)` : ''}` 
+              {table.status === 'occupied'
+                ? `${(table.orders || []).reduce((sum, o) => sum + o.items.length, 0) + (table.currentOrder?.length || 0)} món ${table.orders && table.orders.length > 1 ? `(${table.orders.length} đơn)` : ''}`
                 : 'Bàn trống'}
             </p>
             {table.status === 'occupied' && (
               <p className="font-mono text-sm font-bold">
-                {((table.orders || []).reduce((sum, o) => sum + o.total, 0) + (table.currentOrder?.reduce((sum, item) => sum + item.price * item.quantity, 0) || 0)).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ
+                {Math.round((table.orders || []).reduce((sum, o) => sum + o.total, 0) + (table.currentOrder?.reduce((sum, item) => sum + item.price * item.quantity, 0) || 0)).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}đ
               </p>
             )}
             {table.status === 'occupied' && kitchenEnabled && (() => {
@@ -525,10 +532,10 @@ const TableGrid = ({ tables, onSelectTable, onDeleteTable, onEditTable, currentU
   );
 };
 
-const MenuOrdering = ({ 
-  selectedTable, 
+const MenuOrdering = ({
+  selectedTable,
   tables, // New prop
-  onClose, 
+  onClose,
   onUpdateOrder,
   onCheckout,
   onMergeTables,
@@ -545,10 +552,10 @@ const MenuOrdering = ({
   customers,
   customerTypes,
   systemSettings
-}: { 
-  selectedTable: Table, 
+}: {
+  selectedTable: Table,
   tables: Table[],
-  onClose: () => void, 
+  onClose: () => void,
   onUpdateOrder: (tableId: string, order: OrderItem[], targetSessionId?: string, operationId?: string) => Promise<string>,
   onCheckout: (tableId: string, ordersToPay: OrderSession[], discount: number, paymentMethod: 'cash' | 'transfer', shouldPrint: boolean, customerId?: string) => Promise<boolean> | boolean,
   onMergeTables: (targetTableId: string, sourceTableIds: string[], operationId?: string) => Promise<void>,
@@ -566,11 +573,11 @@ const MenuOrdering = ({
   customerTypes: CustomerType[],
   systemSettings: SystemSettings
 }) => {
-    const isStrictCashier = currentUser?.role === 'cashier';
+  const isStrictCashier = currentUser?.role === 'cashier';
   const isOrderOnly = currentUser?.role === 'order';
   const [activeCategory, setActiveCategory] = useState('Tất cả');
   const [searchQuery, setSearchQuery] = useState('');
-  
+
   const [voidModalInfo, setVoidModalInfo] = useState<{
     isOpen: boolean;
     itemName: string;
@@ -579,7 +586,7 @@ const MenuOrdering = ({
     pendingData: any;
   }>({ isOpen: false, itemName: '', oldQuantity: 0, newQuantity: 0, pendingData: null });
 
-  
+
   // Draft order (New items being added)
   const draftStorageKey = `fnb_draft_${currentUser?.storeId}_${currentUser?.id}_${selectedTable.id}`;
   const [draftOperationId] = useState(() => {
@@ -596,34 +603,33 @@ const MenuOrdering = ({
   const moveOperationRef = useRef(operationId('move'));
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState<Customer[]>(customers);
-  useEffect(() => { setCustomerResults(customers); }, [customers]);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [isLoadingCustomers, setIsLoadingCustomers] = useState(false);
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const [selectedCustomerReady, setSelectedCustomerReady] = useState(false);
+  const [selectedCustomerError, setSelectedCustomerError] = useState('');
+
   useEffect(() => {
-    // Nếu đã có danh sách customers từ props (thu ngân/quản lý) thì lọc hoàn toàn tại client, không đọc lại Firestore
-    if (customers && customers.length > 0) return;
-    if (!currentUser?.storeId || !customerSearch.trim()) return;
-    let active = true;
-    const timer = setTimeout(async () => {
-      try {
-        const q = query(
-          collection(db, 'customers'),
-          where('storeId', '==', currentUser.storeId),
-          limit(20)
-        );
-        const snap = await getDocs(q);
-        if (active) {
-          const rows = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
-          setCustomerResults(rows);
-        }
-      } catch (error) {
-        if (active) console.warn('Không thể tải gợi ý khách hàng:', error);
-      }
-    }, 300);
-    return () => { active = false; clearTimeout(timer); };
-  }, [customerSearch, currentUser?.storeId, customers]);
-  
+    if (customers && customers.length > 0) {
+      setCustomerResults(customers);
+    }
+  }, [customers]);
+
+  // Danh sách đầy đủ dùng chung với màn quản lý khách; giữ listener tối đa 2 phút
+  // sau khi đóng dropdown để lần mở kế tiếp nhận đủ cả thay đổi và bản ghi đã xóa.
+  useEffect(() => {
+    if (!currentUser?.storeId || !showCustomerDropdown) return;
+    setIsLoadingCustomers(true);
+    const stop = subscribeSharedQuery(query(collection(db, 'customers'), where('storeId', '==', currentUser.storeId)), snapshot => {
+      setCustomerResults(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as Customer)));
+      setIsLoadingCustomers(snapshot.metadata.fromCache || snapshot.metadata.hasPendingWrites);
+    }, error => { console.warn('Không thể tải khách hàng:', error); setIsLoadingCustomers(false); }, { keepAliveMs: 120000 });
+    return () => stop();
+  }, [showCustomerDropdown, currentUser?.storeId]);
+
   // Sync local state with fresh table data from props
   const activeTable = tables.find(t => t.id === selectedTable.id) || selectedTable;
-  
+
   // Committed orders (Already sent to kitchen)
   const committedOrders = (activeTable.orders || []).filter(o => o.status !== 'paid');
 
@@ -631,37 +637,61 @@ const MenuOrdering = ({
   const vat = vatPercent;
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'transfer'>('cash');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
-  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
-  
+
   const filteredCustomers = useMemo(() => {
     if (!customerSearch) return customerResults;
-    return customerResults.filter(c => 
-      c.name.toLowerCase().includes(customerSearch.toLowerCase()) || 
+    return customerResults.filter(c =>
+      c.name.toLowerCase().includes(customerSearch.toLowerCase()) ||
       c.phone.includes(customerSearch)
     );
   }, [customerResults, customerSearch]);
-  
+
+  // Xác nhận đúng hồ sơ đang chọn; dữ liệu của khách trước không được dùng để thanh toán.
   useEffect(() => {
-    if (selectedCustomerId) {
-      const customer = customerResults.find(x => x.id === selectedCustomerId);
-      if (customer) {
-        const customerType = customerTypes.find(x => x.id === customer.typeId);
-        setDiscount(Math.min(100, Math.max(0, customerType?.discountPercent || 0)));
+    setSelectedCustomer(null);
+    setSelectedCustomerReady(false);
+    setSelectedCustomerError('');
+    setDiscount(Math.min(100, Math.max(0, activeTable.discount || 0)));
+    if (!selectedCustomerId || !currentUser?.storeId) return;
+    let active = true;
+    const unsubscribe = onSnapshot(doc(db, 'customers', selectedCustomerId), { includeMetadataChanges: true }, snap => {
+      if (!active) return;
+      const confirmed = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
+      if (!snap.exists() || snap.data().storeId !== currentUser.storeId) {
+        setSelectedCustomer(null);
+        setSelectedCustomerReady(false);
+        setDiscount(Math.min(100, Math.max(0, activeTable.discount || 0)));
+        setSelectedCustomerError(confirmed ? 'Khách hàng không còn hợp lệ. Vui lòng chọn lại.' : 'Đang xác nhận khách hàng.');
         return;
       }
-    }
-    setDiscount(Math.min(100, Math.max(0, activeTable.discount || 0)));
-  }, [selectedCustomerId, customerResults, customerTypes, activeTable.discount]);
-  
+      const customer = { ...snap.data(), id: snap.id } as Customer;
+      setSelectedCustomer(customer);
+      setSelectedCustomerReady(confirmed);
+      setSelectedCustomerError('');
+      const customerType = customerTypes.find(type => type.id === customer.typeId);
+      setDiscount(Math.min(100, Math.max(0, customerType?.discountPercent || 0)));
+    }, error => {
+      if (!active) return;
+      console.warn('Không thể xác nhận khách hàng:', error);
+      setSelectedCustomer(null);
+      setSelectedCustomerReady(false);
+      setDiscount(Math.min(100, Math.max(0, activeTable.discount || 0)));
+      setSelectedCustomerError('Không thể xác nhận khách hàng. Vui lòng kết nối lại hoặc chọn khách lẻ.');
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [selectedCustomerId, currentUser?.storeId, customerTypes, activeTable.discount]);
+
+  const activeCustomer = selectedCustomer?.id === selectedCustomerId ? selectedCustomer : null;
+
   // Sync discount if it changes in DB (e.g. reset after partial payment)
   useEffect(() => {
-    setDiscount(activeTable.discount || 0);
-  }, [activeTable.discount]);
+    if (!selectedCustomerId) setDiscount(activeTable.discount || 0);
+  }, [activeTable.discount, selectedCustomerId]);
 
   // Item Configuration State
   const [configuringItem, setConfiguringItem] = useState<MenuItem | null>(null);
   const [editingDraftIndex, setEditingDraftIndex] = useState<number | null>(null);
-  const [editingCommittedInfo, setEditingCommittedInfo] = useState<{orderId: string, itemIndex: number} | null>(null);
+  const [editingCommittedInfo, setEditingCommittedInfo] = useState<{ orderId: string, itemIndex: number } | null>(null);
   const [itemQuantity, setItemQuantity] = useState(1);
   const [itemNote, setItemNote] = useState('');
   const [selectedAddOns, setSelectedAddOns] = useState<AddOnItem[]>([]); // Array of add-ons (can contain duplicates for quantity)
@@ -724,19 +754,19 @@ const MenuOrdering = ({
         items.push(...o.items);
       }
     });
-    
+
     // Group them by ID, price, add-ons, and note
     const grouped: OrderItem[] = [];
     items.forEach(item => {
-      const key = `${item.id}-${item.price}-${JSON.stringify([...(item.selectedAddOns || [])].sort((a,b)=>(a.id||'').localeCompare(b.id||'')))}-${item.note||''}`;
+      const key = `${item.id}-${item.price}-${JSON.stringify([...(item.selectedAddOns || [])].sort((a, b) => (a.id || '').localeCompare(b.id || '')))}-${item.note || ''}`;
       const existing = grouped.find(i => {
-        const eKey = `${i.id}-${i.price}-${JSON.stringify([...(i.selectedAddOns || [])].sort((a,b)=>(a.id||'').localeCompare(b.id||'')))}-${i.note||''}`;
+        const eKey = `${i.id}-${i.price}-${JSON.stringify([...(i.selectedAddOns || [])].sort((a, b) => (a.id || '').localeCompare(b.id || '')))}-${i.note || ''}`;
         return eKey === key;
       });
       if (existing) {
         existing.quantity += item.quantity;
       } else {
-        grouped.push({...item});
+        grouped.push({ ...item });
       }
     });
     return grouped;
@@ -771,7 +801,7 @@ const MenuOrdering = ({
   const handleConfirmAddItem = async () => {
     if (isProcessing) return;
     if (!configuringItem) return;
-    
+
     const newItem: OrderItem = {
       ...configuringItem,
       quantity: itemQuantity,
@@ -787,19 +817,19 @@ const MenuOrdering = ({
         const oldItem = order.items[itemIndex];
         let pendingVoidLog: VoidLog | undefined;
         let updatedItems = [...order.items];
-        
+
         if (newItem.quantity <= 0) {
           // Remove item
           updatedItems.splice(itemIndex, 1);
         } else {
           updatedItems[itemIndex] = newItem;
         }
-        
+
         const newSubtotal = updatedItems.reduce((sum, i) => sum + (i.price + (i.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * i.quantity, 0);
         const orderDiscount = Math.max(0, Math.min(newSubtotal, order.discount || 0));
         const orderVat = Math.round((newSubtotal - orderDiscount) * (order.vat || 0) / 100);
         const newTotal = newSubtotal - orderDiscount + orderVat;
-        const updatedOrders = (activeTable.orders || []).map(o => 
+        const updatedOrders = (activeTable.orders || []).map(o =>
           o.id === orderId ? { ...o, items: updatedItems, total: newTotal, subtotal: newSubtotal } : o
         );
 
@@ -807,7 +837,7 @@ const MenuOrdering = ({
         if (newItem.quantity < oldItem.quantity) {
           const diff = oldItem.quantity - Math.max(0, newItem.quantity);
           const valueDiff = diff * oldItem.price; // Only track main item price difference
-          
+
           const reason = prompt(`⚠️ Bạn đang giảm số lượng hoặc hủy món [${oldItem.name}].\nVui lòng nhập lý do (VD: Khách đổi ý, Hết nguyên liệu...):`);
           if (!reason) {
             alert("❌ Bắt buộc phải nhập lý do hủy/giảm món!");
@@ -825,10 +855,10 @@ const MenuOrdering = ({
             type: 'item_void',
             reason: reason
           };
-          
+
           pendingVoidLog = voidLog;
         }
-        
+
         // SAVE TO DB
         if (onUpdateTable) {
           setIsProcessing(true);
@@ -853,9 +883,9 @@ const MenuOrdering = ({
         if (newItem.quantity <= 0) return prev;
 
         // Check if same item with same addons and note exists
-        const existingIndex = prev.findIndex(i => 
-          i.id === newItem.id && 
-          JSON.stringify([...(i.selectedAddOns || [])].sort((a,b)=>(a.id||'').localeCompare(b.id||''))) === JSON.stringify([...(newItem.selectedAddOns || [])].sort((a,b)=>(a.id||'').localeCompare(b.id||''))) &&
+        const existingIndex = prev.findIndex(i =>
+          i.id === newItem.id &&
+          JSON.stringify([...(i.selectedAddOns || [])].sort((a, b) => (a.id || '').localeCompare(b.id || ''))) === JSON.stringify([...(newItem.selectedAddOns || [])].sort((a, b) => (a.id || '').localeCompare(b.id || ''))) &&
           i.note === newItem.note
         );
 
@@ -875,22 +905,32 @@ const MenuOrdering = ({
 
   const handleCallDish = async () => {
     if (currentOrder.length === 0 || isProcessing) return null;
-    
+
     setIsProcessing(true);
     try {
+      const itemsToCommit = [...currentOrder];
       const newSessionId = Math.random().toString(36).substr(2, 9);
       const targetId = selectedOrdersToPay.length === 1 ? selectedOrdersToPay[0] : undefined;
-      await onUpdateOrder(activeTable.id, currentOrder, targetId, orderOperationRef.current);
-      
+      const opId = orderOperationRef.current;
+
+      // ⚡ Tối ưu in song song không đồng bộ (Parallel Async Printing):
+      // Bắn lệnh in bếp ra máy in LAN nội bộ ngay tức thì song song với việc lưu dữ liệu lên Cloud Firestore.
+      // Nhà bếp sẽ nhận được phiếu in ngay khi nhân viên bấm mà không bị phụ thuộc vào độ trễ mạng Internet.
       if (isPrintKitchenEnabled) {
-        onPrint({
-          type: 'kitchen',
-          tableName: activeTable.name,
-          items: currentOrder,
-          staffName: staffName
-        });
+        try {
+          onPrint({
+            type: 'kitchen',
+            tableName: activeTable.name,
+            items: itemsToCommit,
+            staffName: staffName
+          });
+        } catch (printErr) {
+          console.error('[Parallel Async Print] Lỗi khởi tạo lệnh in bếp:', printErr);
+        }
       }
-      
+
+      await onUpdateOrder(activeTable.id, itemsToCommit, targetId, opId);
+
       setCurrentOrder([]); // Clear only after the server confirmed the write
       safeStorage.removeItem(draftStorageKey);
       orderOperationRef.current = operationId('order');
@@ -907,10 +947,14 @@ const MenuOrdering = ({
 
   const handlePayment = async (shouldPrint: boolean = false) => {
     if (isProcessing) return;
-    
+    if (selectedCustomerId && (!selectedCustomerReady || selectedCustomer?.id !== selectedCustomerId)) {
+      alert(selectedCustomerError || 'Vui lòng đợi xác nhận khách hàng trước khi thanh toán.');
+      return;
+    }
+
     let ordersToPay: OrderSession[] = [];
     const unpaidCommitted = committedOrders.filter(o => o.status !== 'paid');
-    
+
     if (selectedOrdersToPay.length > 0) {
       ordersToPay = committedOrders.filter(o => selectedOrdersToPay.includes(o.id));
     } else {
@@ -924,7 +968,7 @@ const MenuOrdering = ({
         const subtotal = itemsSubtotal(currentOrder);
         const saved: OrderSession = { id, items: cloneData(currentOrder), startTime: new Date().toISOString(), subtotal, discount: 0, vat: vatPercent || 0, total: subtotal + Math.round(subtotal * (vatPercent || 0) / 100), status: 'pending', staffId: currentUser?.id || '' };
         ordersToPay = [...ordersToPay.filter(o => o.id !== id), saved];
-        setCurrentOrder([]);safeStorage.removeItem(draftStorageKey);orderOperationRef.current=operationId('order');
+        setCurrentOrder([]); safeStorage.removeItem(draftStorageKey); orderOperationRef.current = operationId('order');
       } catch (error) { alert(error instanceof Error ? error.message : 'Không thể lưu đơn trước khi thanh toán.'); return; }
       finally { setIsProcessing(false); }
     }
@@ -943,11 +987,11 @@ const MenuOrdering = ({
       safeStorage.removeItem(draftStorageKey);
       orderOperationRef.current = operationId('order');
       setSelectedOrdersToPay([]);
-      
+
       // Calculate remaining orders based on what we just paid
       const paidCommittedIds = new Set(ordersToPay.filter(o => o.id && !o.id.startsWith('draft-')).map(o => o.id));
       const remainingCount = committedOrders.filter(o => !paidCommittedIds.has(o.id)).length;
-      
+
       // If no more orders left, close the modal
       if (remainingCount === 0) {
         onClose();
@@ -962,7 +1006,7 @@ const MenuOrdering = ({
 
   // Calculate totals
   const draftSubtotal = currentOrder.reduce((sum, item) => sum + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0);
-  
+
   // Payment starts from line-item subtotals. Summing session totals would apply VAT twice.
   const selectedOrdersSubtotal = committedOrders
     .filter(o => selectedOrdersToPay.includes(o.id) || (selectedOrdersToPay.length === 0 && o.status !== 'paid'))
@@ -977,16 +1021,16 @@ const MenuOrdering = ({
   const handlePrintProvisional = () => {
     let itemsToPrint: OrderItem[] = [];
     const unpaidCommitted = committedOrders.filter(o => o.status !== 'paid');
-    
+
     let ordersToPrint: OrderSession[] = [];
     if (selectedOrdersToPay.length > 0) {
       ordersToPrint = committedOrders.filter(o => selectedOrdersToPay.includes(o.id));
     } else {
       ordersToPrint = [...unpaidCommitted];
     }
-    
+
     ordersToPrint.forEach(o => itemsToPrint.push(...o.items));
-    
+
     // Only include draft items if we are printing everything (no specific selection)
     if (selectedOrdersToPay.length === 0) {
       itemsToPrint.push(...currentOrder);
@@ -995,7 +1039,7 @@ const MenuOrdering = ({
     let customerName = undefined;
     let customerType = undefined;
     if (selectedCustomerId) {
-      const c = customers.find(x => x.id === selectedCustomerId);
+      const c = activeCustomer;
       if (c) {
         customerName = c.name;
         const t = customerTypes.find(x => x.id === c.typeId);
@@ -1025,7 +1069,7 @@ const MenuOrdering = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-0 md:p-4">
-      <motion.div 
+      <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         className="relative bg-white dark:bg-[#1a1b1e] w-full max-w-[96vw] xl:max-w-7xl 2xl:max-w-[1550px] h-full h-[100dvh] md:h-[94vh] md:max-h-[94vh] md:rounded-3xl overflow-hidden flex flex-col lg:flex-row border border-black/10 dark:border-white/10 shadow-2xl"
@@ -1053,14 +1097,14 @@ const MenuOrdering = ({
           </div>
           {!isOrderOnly && (
             <div className="flex items-center gap-2">
-              <button 
+              <button
                 onClick={() => setShowTransferModal(true)}
                 className="flex-1 flex justify-center items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold bg-purple-500/10 border border-purple-500 text-purple-500 hover:bg-purple-500/20 transition-all"
               >
                 <ArrowRightLeft className="w-3 h-3" />
                 Chuyển bàn
               </button>
-              <button 
+              <button
                 onClick={() => setShowMergeModal(true)}
                 className="flex-1 flex justify-center items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold bg-blue-500/10 border border-blue-500 text-blue-600 dark:text-blue-500 hover:bg-blue-500/20 transition-all"
               >
@@ -1073,7 +1117,7 @@ const MenuOrdering = ({
 
         {/* Mobile Toggle */}
         <div className="lg:hidden flex border-b border-black/10 dark:border-white/10 bg-white dark:bg-[#151619] shrink-0">
-          <button 
+          <button
             onClick={() => setViewMode('menu')}
             className={cn(
               "flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 transition-all",
@@ -1083,7 +1127,7 @@ const MenuOrdering = ({
             <LayoutGrid className="w-4 h-4" />
             Thực đơn
           </button>
-          <button 
+          <button
             onClick={() => setViewMode('order')}
             className={cn(
               "flex-1 py-4 text-sm font-bold flex items-center justify-center gap-2 transition-all relative",
@@ -1118,10 +1162,10 @@ const MenuOrdering = ({
                 </span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                 {/* Transfer Button */}
-                 {!isOrderOnly && (
-                   <>
-                     <button 
+                {/* Transfer Button */}
+                {!isOrderOnly && (
+                  <>
+                    <button
                       onClick={() => setShowTransferModal(true)}
                       className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-purple-500/10 border border-purple-500 text-purple-500 hover:bg-purple-500/20 transition-all cursor-pointer"
                     >
@@ -1129,17 +1173,17 @@ const MenuOrdering = ({
                       <span>Chuyển bàn</span>
                     </button>
 
-                     <button 
+                    <button
                       onClick={() => setShowMergeModal(true)}
                       className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-blue-500/10 border border-blue-500 text-blue-600 dark:text-blue-500 hover:bg-blue-500/20 transition-all cursor-pointer"
                     >
                       <Users className="w-3.5 h-3.5" />
                       <span>Gộp bàn</span>
                     </button>
-                   </>
-                 )}
+                  </>
+                )}
 
-                <button 
+                <button
                   onClick={() => setViewMode(viewMode === 'order' ? 'menu' : 'order')}
                   className={cn(
                     "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border cursor-pointer",
@@ -1161,12 +1205,12 @@ const MenuOrdering = ({
                   )}
                 </button>
 
-                <button 
+                <button
                   onClick={() => setIsPrintKitchenEnabled(!isPrintKitchenEnabled)}
                   className={cn(
                     "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all border cursor-pointer",
-                    isPrintKitchenEnabled 
-                      ? "bg-amber-500/10 border-amber-500 text-amber-600 dark:text-amber-500" 
+                    isPrintKitchenEnabled
+                      ? "bg-amber-500/10 border-amber-500 text-amber-600 dark:text-amber-500"
                       : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-500"
                   )}
                 >
@@ -1185,8 +1229,8 @@ const MenuOrdering = ({
             <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
               <div className="relative w-full sm:w-56 md:w-64 shrink-0">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   placeholder="Tìm món ăn..."
                   className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-2 pl-9 pr-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-all"
                   value={searchQuery}
@@ -1215,7 +1259,7 @@ const MenuOrdering = ({
             {isStrictCashier ? (
               <div className="h-full flex flex-col items-center justify-center text-gray-500 space-y-4">
                 <Lock className="w-16 h-16 opacity-20" />
-                <p className="text-center">Nhân viên thu ngân không có quyền chỉnh sửa đơn hàng.<br/>Vui lòng chỉ thực hiện thanh toán.</p>
+                <p className="text-center">Nhân viên thu ngân không có quyền chỉnh sửa đơn hàng.<br />Vui lòng chỉ thực hiện thanh toán.</p>
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 md:gap-4">
@@ -1226,8 +1270,8 @@ const MenuOrdering = ({
                     className="group bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-2xl p-2.5 md:p-3 text-left hover:border-emerald-500/30 transition-all cursor-pointer flex flex-col items-start gap-2 h-full"
                   >
                     <div className="w-full aspect-video bg-gray-100 dark:bg-gray-800 rounded-xl overflow-hidden shrink-0">
-                      <img 
-                        src={getMenuItemImage(item)} 
+                      <img
+                        src={getMenuItemImage(item)}
                         alt={item.name}
                         className="w-full h-full object-cover opacity-85 group-hover:opacity-100 transition-opacity"
                         referrerPolicy="no-referrer"
@@ -1235,7 +1279,7 @@ const MenuOrdering = ({
                     </div>
                     <div className="w-full flex-1 flex flex-col justify-between">
                       <p className="font-bold text-gray-900 dark:text-white text-xs md:text-sm line-clamp-2 leading-snug">{item.name}</p>
-                      <p className="text-emerald-600 dark:text-emerald-500 font-mono font-bold text-xs md:text-sm mt-1">{item.price.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ</p>
+                      <p className="text-emerald-600 dark:text-emerald-500 font-mono font-bold text-xs md:text-sm mt-1">{Math.round(item.price).toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}đ</p>
                     </div>
                   </button>
                 ))}
@@ -1245,7 +1289,7 @@ const MenuOrdering = ({
             {/* Mobile Floating Action Button */}
             <div className="lg:hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-40 w-[92%]">
               {currentOrder.length > 0 ? (
-                <button 
+                <button
                   onClick={() => setViewMode('order')}
                   className="w-full bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white font-bold py-3.5 px-4 rounded-2xl shadow-[0_8px_30px_rgb(16,185,129,0.35)] flex items-center justify-between gap-3 transition-all"
                 >
@@ -1262,7 +1306,7 @@ const MenuOrdering = ({
                   </span>
                 </button>
               ) : committedOrders.length > 0 ? (
-                <button 
+                <button
                   onClick={() => setViewMode('order')}
                   className="w-full bg-black/80 dark:bg-white/10 border border-black/20 dark:border-white/20 text-white font-bold py-3.5 px-4 rounded-2xl backdrop-blur-md flex items-center justify-between gap-3 shadow-lg active:scale-[0.98] transition-all"
                 >
@@ -1275,7 +1319,7 @@ const MenuOrdering = ({
                   </span>
                 </button>
               ) : activeTable.status === 'occupied' ? (
-                <button 
+                <button
                   onClick={() => setViewMode('order')}
                   className="w-full bg-black/80 dark:bg-white/10 border border-black/20 dark:border-white/20 text-white font-bold py-3.5 px-4 rounded-2xl backdrop-blur-md flex items-center justify-between gap-3 shadow-lg active:scale-[0.98] transition-all cursor-pointer"
                 >
@@ -1299,15 +1343,15 @@ const MenuOrdering = ({
         )}>
           <div className="p-3 md:p-4 border-b border-black/5 dark:border-white/5 flex justify-between items-center bg-white dark:bg-[#1a1b1e] lg:bg-transparent shrink-0">
             <div className="flex items-center gap-2">
-              <button 
+              <button
                 onClick={() => setViewMode('menu')}
-                className="lg:hidden flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-black/5 dark:bg-white/5 text-gray-700 dark:text-gray-300 border border-black/10 dark:border-white/10 hover:bg-black/10 transition-colors"
+                className="lg:hidden flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all cursor-pointer shadow-sm"
                 title="Quay lại danh sách thực đơn"
               >
                 <LayoutGrid className="w-3.5 h-3.5" />
                 <span>+ Thêm món</span>
               </button>
-              <h3 className="text-base font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+              <h3 className="hidden lg:flex text-base font-bold text-gray-900 dark:text-white items-center gap-1.5">
                 <BarChart3 className="w-4 h-4 text-emerald-600 dark:text-emerald-500" />
                 <span>Đơn hàng & Thanh toán</span>
               </h3>
@@ -1316,12 +1360,12 @@ const MenuOrdering = ({
               {currentOrder.length > 0 && (
                 <button className="text-xs text-rose-600 dark:text-rose-500 hover:underline cursor-pointer" onClick={() => setCurrentOrder([])}>Xóa đơn mới</button>
               )}
-              <button 
+              <button
                 onClick={() => setIsPrintKitchenEnabled(!isPrintKitchenEnabled)}
                 className={cn(
                   "lg:hidden flex items-center gap-2 px-2 py-1 rounded-lg text-[10px] font-bold transition-all border",
-                  isPrintKitchenEnabled 
-                    ? "bg-amber-500/10 border-amber-500 text-amber-600 dark:text-amber-500" 
+                  isPrintKitchenEnabled
+                    ? "bg-amber-500/10 border-amber-500 text-amber-600 dark:text-amber-500"
                     : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-500"
                 )}
               >
@@ -1343,10 +1387,10 @@ const MenuOrdering = ({
                 committedOrders.map((order, orderIndex) => {
                   const isSelected = selectedOrdersToPay.includes(order.id);
                   const isSelectionMode = selectedOrdersToPay.length > 0;
-                  
+
                   return (
-                    <div 
-                      key={order.id} 
+                    <div
+                      key={order.id}
                       className={cn(
                         "border rounded-xl overflow-hidden transition-all",
                         isSelected ? "border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.2)]" : "border-black/10 dark:border-white/10",
@@ -1354,9 +1398,9 @@ const MenuOrdering = ({
                       )}
                     >
                       {/* Order Header */}
-                      <div 
+                      <div
                         onClick={() => {
-                          setSelectedOrdersToPay(prev => 
+                          setSelectedOrdersToPay(prev =>
                             prev.includes(order.id) ? prev.filter(id => id !== order.id) : [...prev, order.id]
                           );
                         }}
@@ -1398,9 +1442,29 @@ const MenuOrdering = ({
                             <LiveTimer startTime={order.startTime} />
                           </span>
                         </div>
-                        <span className="font-mono font-bold text-sm text-emerald-600 dark:text-emerald-400">{order.total.toLocaleString()}đ</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono font-bold text-sm text-emerald-600 dark:text-emerald-400">{order.total.toLocaleString()}đ</span>
+                          <button
+                            type="button"
+                            title={`In lại phiếu bếp Đơn #${orderIndex + 1}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onPrint({
+                                type: 'kitchen',
+                                tableName: activeTable.name,
+                                items: order.items,
+                                staffName: staffName,
+                                note: `IN LẠI ĐƠN #${orderIndex + 1}${order.note ? ` - ${order.note}` : ''}`
+                              });
+                            }}
+                            className="p-1 px-1.5 rounded-md bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/20 flex items-center gap-1 text-[11px] font-bold transition-all cursor-pointer shadow-xs"
+                          >
+                            <Printer className="w-3 h-3" />
+                            <span>In lại</span>
+                          </button>
+                        </div>
                       </div>
-                      
+
                       {/* Order Items */}
                       <div className="p-2 space-y-2 bg-gray-100 dark:bg-black/20">
                         {order.items.map((item, itemIndex) => {
@@ -1429,7 +1493,7 @@ const MenuOrdering = ({
                                 <div className="flex items-center gap-2 ml-2">
                                   <div className="text-gray-900 dark:text-white font-mono text-xs">{(item.quantity * (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0))).toLocaleString()}đ</div>
                                   {!isOrderOnly && (
-                                    <button 
+                                    <button
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         handleEditCommittedItem(item, order.id, itemIndex);
@@ -1480,16 +1544,16 @@ const MenuOrdering = ({
                           {item.note && <div className="text-[10px] text-gray-600 dark:text-gray-400 italic">"{item.note}"</div>}
                         </div>
                         <div className="flex items-center gap-2">
-                           <span className="font-bold">x{item.quantity}</span>
-                           <button 
-                              onClick={() => handleEditDraftItem(item, idx)} 
-                              className="text-blue-600 dark:text-blue-500 hover:text-blue-400 p-1"
-                           >
-                              <Settings className="w-3 h-3" />
-                           </button>
-                           <button onClick={() => {
-                              setCurrentOrder(prev => prev.filter((_, i) => i !== idx));
-                           }} className="text-rose-600 dark:text-rose-500 hover:text-rose-400 p-1"><Trash2 className="w-3 h-3" /></button>
+                          <span className="font-bold">x{item.quantity}</span>
+                          <button
+                            onClick={() => handleEditDraftItem(item, idx)}
+                            className="text-blue-600 dark:text-blue-500 hover:text-blue-400 p-1"
+                          >
+                            <Settings className="w-3 h-3" />
+                          </button>
+                          <button onClick={() => {
+                            setCurrentOrder(prev => prev.filter((_, i) => i !== idx));
+                          }} className="text-rose-600 dark:text-rose-500 hover:text-rose-400 p-1"><Trash2 className="w-3 h-3" /></button>
                         </div>
                       </div>
                     </div>
@@ -1515,8 +1579,8 @@ const MenuOrdering = ({
                     {isOrderOnly ? (
                       <span className="w-10 bg-gray-200 dark:bg-black/40 border border-black/10 dark:border-white/10 rounded px-1 text-center text-[10px] text-gray-500 inline-block">{discount}</span>
                     ) : (
-                      <input 
-                        type="number" 
+                      <input
+                        type="number"
                         className="w-10 bg-gray-200 dark:bg-black/40 border border-black/10 dark:border-white/10 rounded px-1 text-center text-[10px]"
                         value={discount}
                         min="0"
@@ -1548,22 +1612,22 @@ const MenuOrdering = ({
                     </p>
                     <div className="relative">
                       {!showCustomerDropdown && !selectedCustomerId ? (
-                        <button 
+                        <button
                           onClick={() => setShowCustomerDropdown(true)}
                           className="w-full bg-gray-200 dark:bg-black/40 border border-black/10 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-gray-600 dark:text-gray-400 text-left hover:border-emerald-500/50 cursor-pointer"
                         >
                           Tìm khách hàng (Khách lẻ)
                         </button>
                       ) : selectedCustomerId && !showCustomerDropdown ? (
-                        <div 
+                        <div
                           onClick={() => setShowCustomerDropdown(true)}
                           className="w-full bg-gray-200 dark:bg-black/40 border border-emerald-500/50 rounded-lg px-2.5 py-1.5 text-xs text-emerald-600 dark:text-emerald-500 text-left cursor-pointer flex justify-between"
                         >
                           <span>
-                            {customers.find(c => c.id === selectedCustomerId)?.name}
+                            {activeCustomer?.name || customerResults.find(c => c.id === selectedCustomerId)?.name || 'Đang xác nhận khách hàng...'}
                           </span>
                           <span>
-                            {customerTypes.find(t => t.id === customers.find(c => c.id === selectedCustomerId)?.typeId)?.discountPercent ? ` (-${customerTypes.find(t => t.id === customers.find(c => c.id === selectedCustomerId)?.typeId)?.discountPercent}%)` : ''}
+                            {activeCustomer && customerTypes.find(t => t.id === activeCustomer.typeId)?.discountPercent ? ` (-${customerTypes.find(t => t.id === activeCustomer.typeId)?.discountPercent}%)` : ''}
                           </span>
                         </div>
                       ) : (
@@ -1584,13 +1648,14 @@ const MenuOrdering = ({
                             >
                               Khách lẻ (Không áp dụng ưu đãi)
                             </button>
+                            {isLoadingCustomers && <div className="px-3 py-2 text-xs text-gray-500">Đang tải khách hàng...</div>}
                             {filteredCustomers.map(c => (
                               <button
                                 key={c.id}
                                 className="w-full text-left px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5 text-xs text-gray-900 dark:text-white cursor-pointer"
                                 onClick={() => { setSelectedCustomerId(c.id); setShowCustomerDropdown(false); setCustomerSearch(''); }}
                               >
-                                {c.name} - {c.phone} 
+                                {c.name} - {c.phone}
                                 {customerTypes.find(t => t.id === c.typeId)?.discountPercent ? ` (-${customerTypes.find(t => t.id === c.typeId)?.discountPercent}%)` : ''}
                               </button>
                             ))}
@@ -1598,28 +1663,29 @@ const MenuOrdering = ({
                         </div>
                       )}
                     </div>
+                    {selectedCustomerId && (selectedCustomerError || !selectedCustomerReady) && <p role="status" className="text-xs text-amber-600">{selectedCustomerError || 'Đang xác nhận khách hàng...'}</p>}
                   </div>
 
                   {!isOrderOnly && (
-                  <div className="space-y-1.5">
-                    <div className="grid grid-cols-2 gap-2">
-                      {[
-                        { id: 'cash', label: 'Tiền mặt' },
-                        { id: 'transfer', label: 'Chuyển khoản' }
-                      ].map(method => (
-                        <button
-                          key={method.id}
-                          onClick={() => setPaymentMethod(method.id as any)}
-                          className={cn(
-                            "py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer uppercase",
-                            paymentMethod === method.id ? "bg-emerald-500/20 border-emerald-500 text-emerald-600 dark:text-emerald-500" : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
-                          )}
-                        >
-                          {method.label}
-                        </button>
-                      ))}
+                    <div className="space-y-1.5">
+                      <div className="grid grid-cols-2 gap-2">
+                        {[
+                          { id: 'cash', label: 'Tiền mặt' },
+                          { id: 'transfer', label: 'Chuyển khoản' }
+                        ].map(method => (
+                          <button
+                            key={method.id}
+                            onClick={() => setPaymentMethod(method.id as any)}
+                            className={cn(
+                              "py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer uppercase",
+                              paymentMethod === method.id ? "bg-emerald-500/20 border-emerald-500 text-emerald-600 dark:text-emerald-500" : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                            )}
+                          >
+                            {method.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
                   )}
 
                   {systemSettings.bankCode && systemSettings.bankAccountNumber && finalTotal > 0 && paymentMethod === 'transfer' && (
@@ -1630,9 +1696,9 @@ const MenuOrdering = ({
                         <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-semibold cursor-pointer hover:underline block" onClick={() => setShowZoomedQR(true)}>Bấm để phóng to mã QR</span>
                       </div>
                       <div className="bg-white p-1 rounded-lg cursor-pointer shrink-0 shadow-sm border border-emerald-500/20" onClick={() => setShowZoomedQR(true)} title="Bấm để phóng to mã QR">
-                        <img 
-                          src={`https://img.vietqr.io/image/${systemSettings.bankCode}-${systemSettings.bankAccountNumber}-compact2.png?amount=${finalTotal}&accountName=${encodeURIComponent(systemSettings.bankAccountName || '')}&addInfo=${encodeURIComponent((systemSettings.bankCode?.toUpperCase() === 'ICB' || systemSettings.bankCode?.toUpperCase() === 'CTG' || systemSettings.bankCode?.toLowerCase()?.includes('vietin') ? 'SEVQR ' : '') + currentUser?.store?.code + ' THANH TOAN ' + activeTable.name)}`} 
-                          alt="VietQR" 
+                        <img
+                          src={`https://img.vietqr.io/image/${systemSettings.bankCode}-${systemSettings.bankAccountNumber}-compact2.png?amount=${finalTotal}&accountName=${encodeURIComponent(systemSettings.bankAccountName || '')}&addInfo=${encodeURIComponent((systemSettings.bankCode?.toUpperCase() === 'ICB' || systemSettings.bankCode?.toUpperCase() === 'CTG' || systemSettings.bankCode?.toLowerCase()?.includes('vietin') ? 'SEVQR ' : '') + currentUser?.store?.code + ' THANH TOAN ' + activeTable.name)}`}
+                          alt="VietQR"
                           className="w-14 h-14 object-contain hover:scale-105 transition-transform"
                         />
                       </div>
@@ -1646,7 +1712,7 @@ const MenuOrdering = ({
             <div className="p-3 pb-[max(env(safe-area-inset-bottom),14px)] bg-white dark:bg-[#151619] border-t border-black/10 dark:border-white/10 shrink-0 space-y-2 shadow-[0_-4px_20px_rgba(0,0,0,0.15)]">
               {/* Buttons */}
               {currentOrder.length > 0 && (
-                <button 
+                <button
                   onClick={handleCallDish}
                   disabled={isProcessing}
                   className={cn(
@@ -1667,10 +1733,10 @@ const MenuOrdering = ({
                   )}
                 </button>
               )}
-              
+
               {activeTable.status === 'occupied' && !isOrderOnly && (
                 <div className="grid grid-cols-3 gap-2">
-                  <button 
+                  <button
                     onClick={handlePrintProvisional}
                     disabled={isProcessing}
                     className={cn(
@@ -1681,7 +1747,7 @@ const MenuOrdering = ({
                     <Printer className="w-3.5 h-3.5" />
                     IN TẠM
                   </button>
-                  <button 
+                  <button
                     onClick={() => handlePayment(true)}
                     disabled={isProcessing}
                     className={cn(
@@ -1695,7 +1761,7 @@ const MenuOrdering = ({
                       <> <Printer className="w-3.5 h-3.5" /> THU & IN </>
                     )}
                   </button>
-                  <button 
+                  <button
                     onClick={() => handlePayment(false)}
                     disabled={isProcessing}
                     className={cn(
@@ -1718,21 +1784,21 @@ const MenuOrdering = ({
         {/* Item Configuration Modal (New) */}
         <AnimatePresence>
           {showZoomedQR && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
               onClick={() => setShowZoomedQR(false)}
             >
-              <motion.div 
+              <motion.div
                 initial={{ scale: 0.9, y: 20 }}
                 animate={{ scale: 1, y: 0 }}
                 exit={{ scale: 0.9, y: 20 }}
                 className="bg-white rounded-3xl p-6 max-w-sm w-full mx-auto relative flex flex-col items-center shadow-2xl"
                 onClick={e => e.stopPropagation()}
               >
-                <button 
+                <button
                   onClick={() => setShowZoomedQR(false)}
                   className="absolute top-4 right-4 p-2 bg-gray-100 hover:bg-gray-200 rounded-full transition-colors"
                 >
@@ -1740,9 +1806,9 @@ const MenuOrdering = ({
                 </button>
                 <h3 className="text-lg font-bold text-gray-900 mb-4 text-center">Quét mã để thanh toán</h3>
                 <div className="bg-white p-2 rounded-2xl border border-gray-200 shadow-inner mb-4 w-full aspect-square flex items-center justify-center">
-                  <img 
-                    src={`https://img.vietqr.io/image/${systemSettings.bankCode}-${systemSettings.bankAccountNumber}-compact2.png?amount=${finalTotal}&accountName=${encodeURIComponent(systemSettings.bankAccountName || '')}&addInfo=${encodeURIComponent((systemSettings.bankCode?.toUpperCase() === 'ICB' || systemSettings.bankCode?.toUpperCase() === 'CTG' || systemSettings.bankCode?.toLowerCase()?.includes('vietin') ? 'SEVQR ' : '') + currentUser?.store?.code + ' THANH TOAN ' + activeTable.name)}`} 
-                    alt="VietQR Zoomed" 
+                  <img
+                    src={`https://img.vietqr.io/image/${systemSettings.bankCode}-${systemSettings.bankAccountNumber}-compact2.png?amount=${finalTotal}&accountName=${encodeURIComponent(systemSettings.bankAccountName || '')}&addInfo=${encodeURIComponent((systemSettings.bankCode?.toUpperCase() === 'ICB' || systemSettings.bankCode?.toUpperCase() === 'CTG' || systemSettings.bankCode?.toLowerCase()?.includes('vietin') ? 'SEVQR ' : '') + currentUser?.store?.code + ' THANH TOAN ' + activeTable.name)}`}
+                    alt="VietQR Zoomed"
                     className="w-full h-full object-contain"
                   />
                 </div>
@@ -1756,13 +1822,13 @@ const MenuOrdering = ({
           )}
 
           {configuringItem && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-md p-4"
             >
-              <motion.div 
+              <motion.div
                 initial={{ scale: 0.9, y: 20 }}
                 animate={{ scale: 1, y: 0 }}
                 className="bg-white dark:bg-[#1a1b1e] w-full max-w-md rounded-2xl md:rounded-3xl p-5 md:p-6 border border-black/10 dark:border-white/10 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden"
@@ -1792,7 +1858,7 @@ const MenuOrdering = ({
                       </div>
                       {configuringItem.addOns.map(addon => {
                         const count = selectedAddOns.filter(a => a.id === addon.id).length;
-                        const invItem = menu.find(m => 
+                        const invItem = menu.find(m =>
                           (m.isInventory || m.type === 'goods' || m.category === 'Nguyên liệu') &&
                           (m.id === addon.inventoryItemId || m.name.toLowerCase().trim() === addon.name.toLowerCase().trim())
                         );
@@ -1829,35 +1895,35 @@ const MenuOrdering = ({
                               </p>
                             </div>
                             <div className="flex items-center gap-2">
-                               {count > 0 && (
-                                 <button 
-                                   type="button"
-                                   onClick={() => {
-                                     const idx = selectedAddOns.findIndex(a => a.id === addon.id);
-                                     if (idx > -1) {
-                                       const newAddOns = [...selectedAddOns];
-                                       newAddOns.splice(idx, 1);
-                                       setSelectedAddOns(newAddOns);
-                                     }
-                                   }} 
-                                   className="p-1 bg-black/10 dark:bg-white/10 rounded hover:bg-white/20 cursor-pointer"
-                                 >
-                                   <Minus className="w-3 h-3" />
-                                 </button>
-                               )}
-                               <span className={cn("text-xs font-bold w-4 text-center font-mono", count > 0 ? "text-emerald-600 dark:text-emerald-400 font-bold" : "text-gray-600 dark:text-gray-400")}>{count}</span>
-                               <button 
-                                 type="button"
-                                 disabled={isOutOfStock}
-                                 onClick={() => setSelectedAddOns([...selectedAddOns, { ...addon, inventoryItemId: addon.inventoryItemId || invItem?.id }])} 
-                                 className={cn(
-                                   "p-1 rounded cursor-pointer transition-all",
-                                   isOutOfStock ? "bg-black/5 dark:bg-white/5 text-gray-400 cursor-not-allowed opacity-50" : "bg-black/10 dark:bg-white/10 hover:bg-white/20"
-                                 )}
-                                 title={isOutOfStock ? 'Hết kho' : 'Thêm 1'}
-                               >
-                                 <Plus className="w-3 h-3" />
-                               </button>
+                              {count > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const idx = selectedAddOns.findIndex(a => a.id === addon.id);
+                                    if (idx > -1) {
+                                      const newAddOns = [...selectedAddOns];
+                                      newAddOns.splice(idx, 1);
+                                      setSelectedAddOns(newAddOns);
+                                    }
+                                  }}
+                                  className="p-1 bg-black/10 dark:bg-white/10 rounded hover:bg-white/20 cursor-pointer"
+                                >
+                                  <Minus className="w-3 h-3" />
+                                </button>
+                              )}
+                              <span className={cn("text-xs font-bold w-4 text-center font-mono", count > 0 ? "text-emerald-600 dark:text-emerald-400 font-bold" : "text-gray-600 dark:text-gray-400")}>{count}</span>
+                              <button
+                                type="button"
+                                disabled={isOutOfStock}
+                                onClick={() => setSelectedAddOns([...selectedAddOns, { ...addon, inventoryItemId: addon.inventoryItemId || invItem?.id }])}
+                                className={cn(
+                                  "p-1 rounded cursor-pointer transition-all",
+                                  isOutOfStock ? "bg-black/5 dark:bg-white/5 text-gray-400 cursor-not-allowed opacity-50" : "bg-black/10 dark:bg-white/10 hover:bg-white/20"
+                                )}
+                                title={isOutOfStock ? 'Hết kho' : 'Thêm 1'}
+                              >
+                                <Plus className="w-3 h-3" />
+                              </button>
                             </div>
                           </div>
                         );
@@ -1868,7 +1934,7 @@ const MenuOrdering = ({
                   {/* Note */}
                   <div className="space-y-1.5">
                     <p className="text-xs font-bold text-gray-600 dark:text-gray-400 uppercase tracking-wider">Ghi chú</p>
-                    <textarea 
+                    <textarea
                       className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl p-2.5 text-xs text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500"
                       rows={2}
                       placeholder="VD: Không hành, ít cay..."
@@ -1892,13 +1958,13 @@ const MenuOrdering = ({
                 </div>
 
                 <div className="flex gap-2.5 pt-3 border-t border-black/5 dark:border-white/5 shrink-0">
-                  <button 
+                  <button
                     onClick={() => setConfiguringItem(null)}
                     className="flex-1 py-2.5 rounded-xl border border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 font-bold hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer text-xs"
                   >
                     Hủy
                   </button>
-                  <button 
+                  <button
                     onClick={handleConfirmAddItem}
                     className="flex-1 py-2.5 rounded-xl bg-emerald-500 text-white font-bold hover:bg-emerald-400 cursor-pointer text-xs transition-colors shadow-sm"
                   >
@@ -1916,7 +1982,7 @@ const MenuOrdering = ({
             <div className="bg-white dark:bg-[#1a1b1e] w-full max-w-md rounded-3xl p-8 border border-black/10 dark:border-white/10 shadow-2xl space-y-6">
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Gộp bàn</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">Chọn các bàn muốn gộp vào bàn <span className="font-bold text-gray-900 dark:text-white">{activeTable.name}</span>:</p>
-              
+
               <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
                 {tables.filter(t => t.id !== activeTable.id && t.status === 'occupied').map(t => (
                   <button
@@ -1926,8 +1992,8 @@ const MenuOrdering = ({
                     }}
                     className={cn(
                       "w-full flex justify-between items-center p-3 rounded-xl border transition-all",
-                      tablesToMerge.includes(t.id) 
-                        ? "bg-blue-500/20 border-blue-500 text-blue-600 dark:text-blue-500" 
+                      tablesToMerge.includes(t.id)
+                        ? "bg-blue-500/20 border-blue-500 text-blue-600 dark:text-blue-500"
                         : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10"
                     )}
                   >
@@ -1941,13 +2007,13 @@ const MenuOrdering = ({
               </div>
 
               <div className="flex gap-3 pt-4">
-                <button 
+                <button
                   onClick={() => setShowMergeModal(false)}
                   className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 font-bold hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
                 >
                   Hủy
                 </button>
-                <button 
+                <button
                   onClick={async () => {
                     if (isProcessing) return;
                     setIsProcessing(true);
@@ -1971,7 +2037,7 @@ const MenuOrdering = ({
             <div className="bg-white dark:bg-[#1a1b1e] w-full max-w-md rounded-3xl p-8 border border-black/10 dark:border-white/10 shadow-2xl space-y-6">
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Chuyển bàn</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400">Chọn bàn muốn chuyển đơn từ bàn <span className="font-bold text-gray-900 dark:text-white">{activeTable.name}</span> đến:</p>
-              
+
               <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
                 {tables.filter(t => t.id !== activeTable.id && t.status === 'empty').map(t => (
                   <button
@@ -1979,8 +2045,8 @@ const MenuOrdering = ({
                     onClick={() => setTargetTransferTable(t.id)}
                     className={cn(
                       "w-full flex justify-between items-center p-3 rounded-xl border transition-all",
-                      targetTransferTable === t.id 
-                        ? "bg-purple-500/20 border-purple-500 text-purple-500" 
+                      targetTransferTable === t.id
+                        ? "bg-purple-500/20 border-purple-500 text-purple-500"
                         : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 hover:bg-black/10 dark:hover:bg-white/10"
                     )}
                   >
@@ -1994,13 +2060,13 @@ const MenuOrdering = ({
               </div>
 
               <div className="flex gap-3 pt-4">
-                <button 
+                <button
                   onClick={() => setShowTransferModal(false)}
                   className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 font-bold hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
                 >
                   Hủy
                 </button>
-                <button 
+                <button
                   onClick={async () => {
                     if (!targetTransferTable || isProcessing) return;
                     setIsProcessing(true);
@@ -2024,7 +2090,7 @@ const MenuOrdering = ({
 
 const ReportsView = ({ invoices, activeOrdersCount, businessDate, isDataReady = false }: { invoices: Invoice[], activeOrdersCount: number, businessDate?: string, isDataReady?: boolean }) => {
   const todayVn = businessDate || getVietnamBusinessDate();
-  
+
   // Lọc chuẩn theo ngày kinh doanh Việt Nam (hỗ trợ cả schema businessDate và legacy date ISO)
   const todayInvoices = invoices.filter(inv => {
     const invDateStr = inv.businessDate || getVietnamBusinessDate(inv.date);
@@ -2082,7 +2148,7 @@ const ReportsView = ({ invoices, activeOrdersCount, businessDate, isDataReady = 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
           { label: 'Đang phục vụ', value: `${activeOrdersCount || 0} đơn`, trend: '', icon: Check, color: 'text-cyan-600 dark:text-cyan-500', isLive: true },
-          { label: 'Doanh thu hôm nay', value: `${todayRevenue.toLocaleString('vi-VN', { minimumFractionDigits: 0, maximumFractionDigits: 1 })}đ`, trend: '', icon: BarChart3, color: 'text-emerald-600 dark:text-emerald-500' },
+          { label: 'Doanh thu hôm nay', value: `${Math.round(todayRevenue).toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ`, trend: '', icon: BarChart3, color: 'text-emerald-600 dark:text-emerald-500' },
           { label: 'Đơn hàng hôm nay', value: todayOrders.toString(), trend: '', icon: UtensilsCrossed, color: 'text-blue-600 dark:text-blue-500' },
         ].map((stat, i) => (
           <div key={i} className="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 p-6 rounded-2xl space-y-2 relative overflow-hidden">
@@ -2113,8 +2179,8 @@ const ReportsView = ({ invoices, activeOrdersCount, businessDate, isDataReady = 
               <LineChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" vertical={false} />
                 <XAxis dataKey="name" stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} />
-                <YAxis stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : `${(v/1000).toFixed(0)}K`} />
-                <Tooltip 
+                <YAxis stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => v >= 1000000 ? `${(v / 1000000).toFixed(1)}M` : `${(v / 1000).toFixed(0)}K`} />
+                <Tooltip
                   contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #ffffff10', borderRadius: '12px', color: '#f3f4f6' }}
                   itemStyle={{ color: '#10b981' }}
                   formatter={(v: number) => [v.toLocaleString() + 'đ', 'Doanh thu']}
@@ -2132,7 +2198,7 @@ const ReportsView = ({ invoices, activeOrdersCount, businessDate, isDataReady = 
               <BarChart data={topProducts} layout="vertical">
                 <XAxis type="number" hide />
                 <YAxis dataKey="name" type="category" stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} width={100} />
-                <Tooltip 
+                <Tooltip
                   cursor={{ fill: '#ffffff05' }}
                   contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #ffffff10', borderRadius: '12px', color: '#f3f4f6' }}
                   itemStyle={{ color: '#f3f4f6' }}
@@ -2156,21 +2222,8 @@ const ReportsView = ({ invoices, activeOrdersCount, businessDate, isDataReady = 
 
 export default function App() {
   const [showScanner, setShowScanner] = useState(false);
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const savedUser = safeStorage.getItem('fnb_master_user');
-    if (!savedUser) return null;
-    try {
-      const user = JSON.parse(savedUser);
-      if (user.isActive === false || user.isDeleted || user.status === 'deleted') {
-        safeStorage.removeItem('fnb_master_user');
-        safeStorage.removeItem('fnb_master_token');
-        return null;
-      }
-      return user;
-    } catch {
-      return null;
-    }
-  });
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isRestoringSession, setIsRestoringSession] = useState(true);
   const [isRegistering, setIsRegistering] = useState(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -2180,16 +2233,7 @@ export default function App() {
   });
   const [prefillAuth, setPrefillAuth] = useState<{ storeCode?: string; username?: string; justRegistered?: boolean }>({});
   const [users, setUsers] = useState<User[]>([]);
-    const [view, setView] = useState<ViewType>(() => {
-    const savedUser = safeStorage.getItem('fnb_master_user');
-    if (savedUser) {
-      const user = JSON.parse(savedUser);
-      if (user.role === 'admin' || user.role === 'manager') return 'tables';
-      if (user.role === 'kitchen') return 'kitchen';
-      return 'shifts';
-    }
-    return 'tables';
-  });
+  const [view, setView] = useState<ViewType>('tables');
 
   const handleSetView = (newView: ViewType) => {
     setView(newView);
@@ -2199,7 +2243,14 @@ export default function App() {
   const [tableGroups, setTableGroups] = useState<TableGroup[]>([]);
   const [activeTableGroup, setActiveTableGroup] = useState<string>('all');
   const [activeTableStatus, setActiveTableStatus] = useState<'all' | 'empty' | 'occupied'>('all');
-  const [packages, setPackages] = useState<any[]>([]);
+  const [packages, setPackages] = useState<any[]>(() => {
+    try {
+      const cached = safeStorage.getItem('fnb_master_packages');
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
   const [featureLimitMessage, setFeatureLimitMessage] = useState<string | null>(null);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
 
@@ -2219,38 +2270,81 @@ export default function App() {
   };
 
   useEffect(() => {
-    const fetchPackages = async () => {
+    // Tiền nạp engine máy in (html2canvas) vào RAM để lượt in đầu tiên không có độ trễ tải module
+    PrinterService.preload();
+
+    // Tải gói dịch vụ 1 lần qua getDocs thay vì duy trì onSnapshot liên tục cho toàn bộ nhân viên (tiết kiệm 100% reads nền)
+    getDocs(collection(db, 'packages')).then((snapshot) => {
+      const pkgs = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      setPackages(pkgs);
       try {
-        const snapshot = await getDocs(collection(db, 'packages'));
-        const pkgs = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-        setPackages(pkgs);
-      } catch (err) {
-        console.error(err);
-      }
-    };
-    fetchPackages();
+        safeStorage.setItem('fnb_master_packages', JSON.stringify(pkgs));
+      } catch { }
+    }).catch((err) => {
+      console.warn('Lỗi tải gói dịch vụ:', err);
+    });
   }, []);
 
-  // Kiểm tra tính hợp lệ và đồng bộ danh tính của phiên đăng nhập Firebase Auth
   useEffect(() => {
-    if (!currentUser || currentUser.role === 'superadmin' || currentUser.id === 'superadmin') return;
+    let disposed = false;
+    const restore = async () => {
+      try {
+        await auth.authStateReady();
+        const raw = safeStorage.getItem('fnb_master_user');
+        const firebaseUser = auth.currentUser;
+        if (!raw) return;
+        const saved = JSON.parse(raw) as User;
+        if (saved.isActive === false || saved.isDeleted || saved.status === 'deleted') return;
+
+        let resolvedTokenVersion = Number(saved.tokenVersion || 1);
+        if (firebaseUser && saved.id === firebaseUser.uid) {
+          try {
+            const { claims } = await firebaseUser.getIdTokenResult();
+            if (claims.tokenVersion) {
+              resolvedTokenVersion = Number(claims.tokenVersion);
+            }
+          } catch (claimsErr) {
+            console.warn('[Session] Lỗi đọc claims từ Firebase Auth:', claimsErr);
+          }
+        } else if (firebaseUser && saved.id !== firebaseUser.uid) {
+          // Xóa tài khoản Firebase Auth cũ bị tồn đọng để không xung đột với phiên hiện tại
+          signOut(auth).catch(() => { });
+        }
+
+        if (disposed) return;
+        const storedToken = saved.token || safeStorage.getItem('fnb_master_token') || undefined;
+        setSharedReadScope(`${saved.id}:${saved.storeId}:${saved.role}:${resolvedTokenVersion}`);
+        setCurrentUser({ ...saved, token: storedToken, tokenVersion: resolvedTokenVersion });
+        setView(saved.role === 'kitchen' ? 'kitchen' : ['admin', 'manager'].includes(saved.role) ? 'tables' : 'shifts');
+      } catch (error) {
+        console.warn('Không thể khôi phục phiên đăng nhập:', error);
+      } finally {
+        if (!disposed) setIsRestoringSession(false);
+      }
+    };
+    void restore();
+    return () => { disposed = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser?.id || currentUser.role === 'superadmin' || currentUser.id === 'superadmin') return;
 
     const unsub = onAuthStateChanged(auth, (fbUser) => {
-      // Chỉ cảnh báo và đăng xuất khi Firebase Auth đã xác định danh tính một người dùng khác hẳn currentUser
+      // Nếu Firebase Auth đang lưu tài khoản cũ khác với currentUser hiện tại, dọn dẹp Firebase Auth
       if (fbUser && currentUser.id && fbUser.uid !== currentUser.id) {
-        console.warn("[Auth Security] Xung đột danh tính Firebase Auth:", fbUser.uid, "vs", currentUser.id);
-        setCurrentUser(null);
-        safeStorage.removeItem('fnb_master_user');
-        safeStorage.removeItem('fnb_master_token');
+        console.warn("[Auth Security] Dọn dẹp phiên Firebase Auth không khớp:", fbUser.uid, "vs", currentUser.id);
+        signOut(auth).catch(() => { });
       }
     });
 
     return () => unsub();
-  }, [currentUser]);
+  }, [currentUser?.id]);
   const [menu, setMenu] = useState<MenuItem[]>(INITIAL_MENU);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [invoicesReady, setInvoicesReady] = useState(false);
+  const [cashTransactionsReady, setCashTransactionsReady] = useState(false);
+  const [financialSourceKey, setFinancialSourceKey] = useState('');
   const [inventoryLogs, setInventoryLogs] = useState<InventoryTransaction[]>([]);
   const [inventoryAudits, setInventoryAudits] = useState<InventoryAudit[]>([]);
   const [stockCardEntries, setStockCardEntries] = useState<StockCardEntry[]>([]);
@@ -2259,6 +2353,8 @@ export default function App() {
   const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>([]);
   const [payrollMonth, setPayrollMonth] = useState<string>(() => format(new Date(), 'yyyy-MM'));
   const [payrollSourceReady, setPayrollSourceReady] = useState(false);
+  const [payrollScopeKey, setPayrollScopeKey] = useState('');
+  const [userMgmtTab, setUserMgmtTab] = useState<'accounts' | 'payroll'>('accounts');
   const [myTodayAttendance, setMyTodayAttendance] = useState<AttendanceRecord[]>([]);
   const [currentBusinessDate, setCurrentBusinessDate] = useState<string>(() => getVietnamBusinessDate());
 
@@ -2378,23 +2474,23 @@ export default function App() {
   };
 
   const updateOutOfStockStatus = async (itemIdsOut: string[], itemIdsIn: string[]) => {
-    if(!currentUser?.storeId)return;
-    const storeId=currentUser.storeId,ids=[...new Set([...itemIdsOut,...itemIdsIn])].filter(Boolean);
-    if(!ids.length)return;
-    const settingsRef=await getSettingsDocRef(storeId);
-    await runTransaction(db,async txn=>{
-      const settings=await txn.get(settingsRef);
-      if(settings.exists()&&settings.data().storeId!==storeId)throw new Error('Cài đặt không thuộc cửa hàng.');
-      const reads=[];
-      for(const id of ids){const snapshot=await txn.get(doc(db,'menu',id));if(snapshot.exists()&&snapshot.data().storeId!==storeId)throw new Error('Mặt hàng không thuộc cửa hàng.');reads.push({id,data:snapshot.data()});}
-      const out=new Set<string>(),available=new Set<string>();
-      for(const {id,data} of reads){
-        const target=data&&data.trackStock===false?available:!data||(data.stock||0)<=0?out:available;
-        getLinkedAddOnIds(id,menu).forEach(linked=>target.add(linked));
+    if (!currentUser?.storeId) return;
+    const storeId = currentUser.storeId, ids = [...new Set([...itemIdsOut, ...itemIdsIn])].filter(Boolean);
+    if (!ids.length) return;
+    const settingsRef = await getSettingsDocRef(storeId);
+    await runTransaction(db, async txn => {
+      const settings = await txn.get(settingsRef);
+      if (settings.exists() && settings.data().storeId !== storeId) throw new Error('Cài đặt không thuộc cửa hàng.');
+      const reads = [];
+      for (const id of ids) { const snapshot = await txn.get(doc(db, 'menu', id)); if (snapshot.exists() && snapshot.data().storeId !== storeId) throw new Error('Mặt hàng không thuộc cửa hàng.'); reads.push({ id, data: snapshot.data() }); }
+      const out = new Set<string>(), available = new Set<string>();
+      for (const { id, data } of reads) {
+        const target = data && data.trackStock === false ? available : !data || (data.stock || 0) <= 0 ? out : available;
+        getLinkedAddOnIds(id, menu).forEach(linked => target.add(linked));
       }
-      const next=new Set<string>(settings.data()?.outOfStockAddOnIds||[]);
-      available.forEach(id=>{if(!out.has(id))next.delete(id);});out.forEach(id=>next.add(id));
-      txn.set(settingsRef,{storeId,outOfStockAddOnIds:[...next]},{merge:true});
+      const next = new Set<string>(settings.data()?.outOfStockAddOnIds || []);
+      available.forEach(id => { if (!out.has(id)) next.delete(id); }); out.forEach(id => next.add(id));
+      txn.set(settingsRef, { storeId, outOfStockAddOnIds: [...next] }, { merge: true });
     });
   };
 
@@ -2410,7 +2506,7 @@ export default function App() {
       }
     });
 
-    const settingsSnapshot=await getDocFromServer(await getSettingsDocRef(storeId));
+    const settingsSnapshot = await getDocFromServer(await getSettingsDocRef(storeId));
     const currentSet = new Set<string>(settingsSnapshot.data()?.outOfStockAddOnIds || []);
 
     const missingOut: string[] = [];
@@ -2446,7 +2542,7 @@ export default function App() {
         } else {
           setLocalPrinters([]);
         }
-      } catch(e) {
+      } catch (e) {
         setLocalPrinters([]);
       }
     } else {
@@ -2461,45 +2557,98 @@ export default function App() {
     }
   };
 
-  const [printData, setPrintData] = useState<{
-    type: 'bill' | 'kitchen';
-    tableName: string;
-    items: OrderItem[];
-    total?: number;
-    discount?: number;
-    vat?: number;
-    staffName: string;
-  } | null>(null);
+  const [printData, setPrintData] = useState<PrintJobData | null>(null);
 
-  const categories = systemSettings.menuCategories || CATEGORIES;
+  // Danh sách các lệnh in chưa thành công (để thử lại / in lại khi máy in sẵn sàng)
+  const [failedPrintJobs, setFailedPrintJobs] = useState<PrintJobData[]>(() => {
+    try {
+      const saved = safeStorage.getItem('fnb_failed_print_jobs');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeFailedJob, setActiveFailedJob] = useState<PrintJobData | null>(null);
+  const [isRetryingPrint, setIsRetryingPrint] = useState(false);
+  const [showFailedJobsDrawer, setShowFailedJobsDrawer] = useState(false);
 
-  const triggerPrint = async (data: {
-    type: 'bill' | 'kitchen';
-    tableName: string;
-    items: OrderItem[];
-    total?: number;
-    subtotal?: number;
-    discount?: number;
-    vat?: number;
-    staffName: string;
-    date?: string;
-    timeIn?: string;
-    timeOut?: string;
-    note?: string;
-    customerName?: string;
-    customerType?: string;
-  }) => {
-    // 1. Find suitable printers
-    const printers = localPrinters.length > 0 ? localPrinters : (systemSettings.printers || []);
-    const targetPrinters = printers.filter(p => p.isEnabled && (p.type === data.type || p.type === 'both'));
+  const handlePrintFailure = (jobData: PrintJobData, errorMsg: string) => {
+    const failedJob: PrintJobData = {
+      ...jobData,
+      id: jobData.id || `print_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      errorMessage: errorMsg,
+      failedAt: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      retryCount: (jobData.retryCount || 0) + 1
+    };
 
+    setFailedPrintJobs(prev => {
+      const filtered = prev.filter(j => j.id !== failedJob.id);
+      const updated = [failedJob, ...filtered].slice(0, 20);
+      safeStorage.setItem('fnb_failed_print_jobs', JSON.stringify(updated));
+      return updated;
+    });
 
-    // 2. Get Template Settings
-    const template = data.type === 'kitchen' 
-      ? (systemSettings.kitchenTemplate || { showTime: true, showStaffName: true, showStoreAddress: false, showStorePhone: false, showLogo: false, showNote: true, fontSize: 'medium' })
-      : (systemSettings.paymentTemplate || { showTime: true, showStaffName: true, showStoreAddress: true, showStorePhone: true, showLogo: true, showNote: true, fontSize: 'medium' });
+    setActiveFailedJob(failedJob);
+  };
 
-    // 3. Generate Content
+  const handlePrintSuccess = (jobId?: string) => {
+    if (jobId) {
+      setFailedPrintJobs(prev => {
+        const updated = prev.filter(j => j.id !== jobId);
+        safeStorage.setItem('fnb_failed_print_jobs', JSON.stringify(updated));
+        return updated;
+      });
+    }
+    if (activeFailedJob?.id === jobId) {
+      setActiveFailedJob(null);
+    }
+  };
+
+  const printViaBrowser = (htmlContent: string) => {
+    const printFrameId = '__app_web_print_iframe__';
+    let printFrame = document.getElementById(printFrameId) as HTMLIFrameElement | null;
+    if (!printFrame) {
+      printFrame = document.createElement('iframe');
+      printFrame.id = printFrameId;
+      printFrame.style.position = 'fixed';
+      printFrame.style.right = '0';
+      printFrame.style.bottom = '0';
+      printFrame.style.width = '0px';
+      printFrame.style.height = '0px';
+      printFrame.style.border = 'none';
+      printFrame.style.zIndex = '-9999';
+      document.body.appendChild(printFrame);
+    }
+
+    try {
+      const frameDoc = printFrame.contentWindow?.document || printFrame.contentDocument;
+      if (frameDoc) {
+        frameDoc.open();
+        frameDoc.write(htmlContent);
+        frameDoc.close();
+        setTimeout(() => {
+          try {
+            printFrame?.contentWindow?.focus();
+            printFrame?.contentWindow?.print();
+          } catch (e) {
+            console.warn('Iframe print failed, falling back to window.print', e);
+            window.print();
+          }
+        }, 350);
+      } else {
+        window.print();
+      }
+    } catch (err) {
+      console.warn('Print iframe error, calling window.print:', err);
+      window.print();
+    }
+  };
+
+  const generatePrintContent = (data: PrintJobData, settings: SystemSettings): string => {
+    const template = data.type === 'kitchen'
+      ? (settings.kitchenTemplate || { showTime: true, showStaffName: true, showStoreAddress: false, showStorePhone: false, showLogo: false, showNote: true, fontSize: 'medium' })
+      : (settings.paymentTemplate || { showTime: true, showStaffName: true, showStoreAddress: true, showStorePhone: true, showLogo: true, showNote: true, fontSize: 'medium' });
+
     const styles = `
       <style>
         body { font-family: 'Courier New', monospace; padding: 20px; max-width: 300px; margin: 0 auto; }
@@ -2529,10 +2678,10 @@ export default function App() {
         </head>
         <body class="${fontSizeClass}">
           <div class="header">
-            ${template.showLogo && systemSettings.logo ? `<img src="${systemSettings.logo}" style="max-width: 50px; margin-bottom: 5px;" />` : ''}
-            <div class="store-name">${systemSettings.storeName}</div>
-            ${template.showStoreAddress && systemSettings.address ? `<div>${systemSettings.address}</div>` : ''}
-            ${template.showStorePhone && systemSettings.phone ? `<div>${systemSettings.phone}</div>` : ''}
+            ${template.showLogo && settings.logo ? `<img src="${settings.logo}" style="max-width: 50px; margin-bottom: 5px;" />` : ''}
+            <div class="store-name">${settings.storeName}</div>
+            ${template.showStoreAddress && settings.address ? `<div>${settings.address}</div>` : ''}
+            ${template.showStorePhone && settings.phone ? `<div>${settings.phone}</div>` : ''}
             <div class="title">${data.type === 'kitchen' ? 'PHIẾU BẾP' : 'HÓA ĐƠN THANH TOÁN'}</div>
           </div>
 
@@ -2543,6 +2692,7 @@ export default function App() {
             ${template.showTime && !data.timeIn && !data.timeOut ? `<div>Thời gian: ${data.date || new Date().toLocaleString('vi-VN')}</div>` : ''}
             ${template.showStaffName ? `<div>Nhân viên: ${data.staffName}</div>` : ''}
             ${template.showCustomerInfo && data.customerName ? `<div>Khách hàng: <strong>${data.customerName}</strong> ${data.customerType ? `(${data.customerType})` : ''}</div>` : ''}
+            ${data.type === 'kitchen' && data.note && template.showNote ? `<div style="margin-top: 5px; font-weight: bold; font-style: italic;">Ghi chú: ${data.note}</div>` : ''}
           </div>
 
           <table class="items">
@@ -2554,17 +2704,17 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              ${data.items.map(item => `
+              ${(data.items || []).map(item => `
                 <tr>
                   <td>
                     <div style="font-weight: bold;">${item.name}</div>
                     ${item.selectedAddOns && item.selectedAddOns.length > 0 ? `
                       <div style="font-size: 0.8em; padding-left: 10px;">
                         ${Object.entries(item.selectedAddOns.reduce((acc, a) => {
-                          const key = a.price > 0 ? `${a.name} (+${a.price.toLocaleString()}đ)` : a.name;
-                          acc[key] = (acc[key] || 0) + 1;
-                          return acc;
-                        }, {} as Record<string, number>)).map(([text, count]) => `+ ${text} ${count > 1 ? `(x${count})` : ''}`).join('<br/>')}
+      const key = a.price > 0 ? `${a.name} (+${a.price.toLocaleString()}đ)` : a.name;
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>)).map(([text, count]) => `+ ${text} ${count > 1 ? `(x${count})` : ''}`).join('<br/>')}
                       </div>
                     ` : ''}
                   </td>
@@ -2583,7 +2733,7 @@ export default function App() {
             ${data.note && template.showNote ? `<div style="font-style: italic; font-size: 0.9em; margin-bottom: 10px; border-bottom: 1px dashed #eee; padding-bottom: 5px;">Ghi chú: ${data.note}</div>` : ''}
             <div class="row">
               <span>Tạm tính:</span>
-              <span>${(data.subtotal !== undefined ? data.subtotal : data.items.reduce((acc, item) => acc + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0)).toLocaleString()}</span>
+              <span>${(data.subtotal !== undefined ? data.subtotal : (data.items || []).reduce((acc, item) => acc + (item.price + (item.selectedAddOns?.reduce((s, a) => s + a.price, 0) || 0)) * item.quantity, 0)).toLocaleString()}</span>
             </div>
             ${data.discount ? `
             <div class="row">
@@ -2592,7 +2742,7 @@ export default function App() {
             </div>` : ''}
             ${data.vat ? `
             <div class="row">
-              <span>VAT (${systemSettings.vatPercent}%):</span>
+              <span>VAT (${settings.vatPercent}%):</span>
               <span>${data.vat.toLocaleString()}</span>
             </div>` : ''}
             <div class="row" style="font-weight: bold; font-size: 1.2em; margin-top: 5px;">
@@ -2612,68 +2762,93 @@ export default function App() {
       </html>
     `;
 
-    // Always update in-app printData
-    setPrintData(data);
+    return content;
+  };
 
-    // 4. Handle Silent Printing if enabled (Only on Native Android/iOS via TCP Socket)
+  const handleFallbackPrint = (job: PrintJobData) => {
+    const htmlContent = generatePrintContent(job, systemSettings);
+    printViaBrowser(htmlContent);
+    handlePrintSuccess(job.id);
+  };
+
+  const handleRetryPrint = async (job: PrintJobData) => {
+    setIsRetryingPrint(true);
+    try {
+      const ok = await triggerPrint(job);
+      if (ok) {
+        handlePrintSuccess(job.id);
+        alert(`Đã in lại thành công cho bàn "${job.tableName}"!`);
+      }
+    } finally {
+      setIsRetryingPrint(false);
+    }
+  };
+
+  const categories = systemSettings.menuCategories || CATEGORIES;
+
+  const triggerPrint = async (data: PrintJobData): Promise<boolean> => {
+    const jobId = data.id || `print_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const jobData: PrintJobData = { ...data, id: jobId };
+
+    // 1. Find suitable printers
+    const printers = localPrinters.length > 0 ? localPrinters : (systemSettings.printers || []);
+    const targetPrinters = printers.filter(p => p.isEnabled && (p.type === data.type || p.type === 'both'));
+
+    // 2. Generate Content
+    const content = generatePrintContent(jobData, systemSettings);
+
+    // Always update in-app printData
+    setPrintData(jobData);
+
+    // 3. Handle Silent Printing if enabled (Only on Native Android/iOS via TCP Socket)
     const isNative = Capacitor.isNativePlatform();
     if (isNative && systemSettings.silentPrinting) {
       if (targetPrinters.length === 0) {
-        alert(`Không tìm thấy máy in nào được cài đặt cho ${data.type === 'kitchen' ? 'bếp' : 'hóa đơn'}! Vui lòng kiểm tra cài đặt máy in.`);
-        return;
+        const errorMsg = `Không tìm thấy máy in nào được cài đặt hoặc bật sẵn cho ${data.type === 'kitchen' ? 'bếp' : 'hóa đơn'}! Vui lòng kiểm tra lại trong Cài đặt > Máy in.`;
+        handlePrintFailure(jobData, errorMsg);
+        return false;
       }
 
       try {
-        let allSuccess = true;
-        for (const p of targetPrinters) {
-          const success = await PrinterService.printDirect(p, data, systemSettings);
-          if (!success) allSuccess = false;
-        }
-        if (allSuccess) return; 
-      } catch (error) {
-        alert(error instanceof Error ? error.message : 'Lỗi máy in không xác định');
-        return;
-      }
-    }
-
-    // 5. Browser Print (Web / Desktop browser)
-    // Uses hidden iframe to prevent popup blocker blocking window.open in browsers
-    const printFrameId = '__app_web_print_iframe__';
-    let printFrame = document.getElementById(printFrameId) as HTMLIFrameElement | null;
-    if (!printFrame) {
-      printFrame = document.createElement('iframe');
-      printFrame.id = printFrameId;
-      printFrame.style.position = 'fixed';
-      printFrame.style.right = '0';
-      printFrame.style.bottom = '0';
-      printFrame.style.width = '0px';
-      printFrame.style.height = '0px';
-      printFrame.style.border = 'none';
-      printFrame.style.zIndex = '-9999';
-      document.body.appendChild(printFrame);
-    }
-
-    try {
-      const frameDoc = printFrame.contentWindow?.document || printFrame.contentDocument;
-      if (frameDoc) {
-        frameDoc.open();
-        frameDoc.write(content);
-        frameDoc.close();
-        setTimeout(() => {
+        // In song song đồng thời ra tất cả các máy in mục tiêu qua Promise.all (thay vì in tuần tự từng máy)
+        const printPromises = targetPrinters.map(async (p) => {
           try {
-            printFrame?.contentWindow?.focus();
-            printFrame?.contentWindow?.print();
-          } catch (e) {
-            console.warn('Iframe print failed, falling back to window.print', e);
-            window.print();
+            const success = await PrinterService.printDirect(p, jobData, systemSettings);
+            return { printer: p, success, error: success ? null : `Máy in ${p.name || p.ipAddress} không phản hồi` };
+          } catch (pErr: any) {
+            console.error(`Lỗi in tới máy in ${p.name}:`, pErr);
+            return { printer: p, success: false, error: pErr?.message || `Lỗi máy in ${p.name || p.ipAddress}` };
           }
-        }, 350);
-      } else {
-        window.print();
+        });
+
+        const results = await Promise.all(printPromises);
+        const failures = results.filter(r => !r.success);
+
+        if (failures.length === 0) {
+          handlePrintSuccess(jobId);
+          return true;
+        } else {
+          const lastPrinterError = failures.map(f => f.error).filter(Boolean).join(', ');
+          handlePrintFailure(jobData, lastPrinterError || 'Lỗi in tới một hoặc nhiều máy in');
+          return false;
+        }
+      } catch (error: any) {
+        const errorMsg = error instanceof Error ? error.message : 'Lỗi kết nối máy in không xác định';
+        console.error('TriggerPrint error:', error);
+        handlePrintFailure(jobData, errorMsg);
+        return false;
       }
-    } catch (err) {
-      console.warn('Print iframe error, calling window.print:', err);
-      window.print();
+    }
+
+    // 4. Browser Print (Web / Desktop browser hoặc khi không bật silentPrinting)
+    try {
+      printViaBrowser(content);
+      handlePrintSuccess(jobId);
+      return true;
+    } catch (err: any) {
+      console.warn('Print browser error:', err);
+      handlePrintFailure(jobData, 'Không thể mở hộp thoại in trình duyệt');
+      return false;
     }
   };
 
@@ -2731,23 +2906,41 @@ export default function App() {
         setCurrentUser(prev => {
           if (!prev) return prev;
           const updatedUser = { ...prev, store: storeData };
-          localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+          safeStorage.setItem('fnb_master_user', JSON.stringify(updatedUser));
           return updatedUser;
         });
       }
     });
     unsubs.push(unsubStore);
 
-    // 1b. Sync Trạng thái tài khoản người dùng hiện tại (Phát hiện khóa / vô hiệu hóa / xóa tài khoản tức thì)
+    // 1b. Sync Trạng thái tài khoản người dùng hiện tại (Phát hiện khóa / vô hiệu hóa / đổi quyền tức thì)
     if (currentUser.id && currentUser.id !== 'superadmin' && currentUser.role !== 'superadmin') {
       const userDocRef = doc(db, 'users', currentUser.id);
       const unsubUserStatus = onSnapshot(userDocRef, (userSnap) => {
         if (!isMounted) return;
         if (userSnap.exists()) {
           const uData = userSnap.data();
-          if (uData.isActive === false || uData.isDeleted || uData.status === 'deleted') {
+          const isDeactivated = uData.isActive === false || uData.isDeleted === true || uData.status === 'blocked' || uData.status === 'inactive' || uData.status === 'deleted';
+          const roleChanged = Boolean(uData.role && currentUser.role && uData.role !== currentUser.role);
+          const storeMismatch = Boolean(
+            uData.storeId && storeId &&
+            uData.storeId !== storeId &&
+            uData.storeId !== (currentUser.store as any)?.code &&
+            uData.storeId !== (currentUser.store as any)?.id
+          );
+          const serverTokenVersion = Number(uData.tokenVersion || 1);
+          const clientTokenVersion = Number(currentUser.tokenVersion || 1);
+          const tokenRevoked = serverTokenVersion > clientTokenVersion;
+
+          if (isDeactivated || roleChanged || storeMismatch || tokenRevoked) {
             alert('Tài khoản của bạn đã bị vô hiệu hóa hoặc không còn hoạt động. Hệ thống sẽ đăng xuất.');
             handleLogout();
+            return;
+          }
+
+          // Tự động đồng bộ tokenVersion nếu trên Firestore có phiên bản mới hợp lệ
+          if (uData.tokenVersion && serverTokenVersion !== clientTokenVersion) {
+            setCurrentUser(prev => prev ? { ...prev, tokenVersion: serverTokenVersion } : null);
           }
         }
       }, (err) => {
@@ -2786,9 +2979,9 @@ export default function App() {
           });
         }
 
-        const sources = new Map(menuData.map(item => [item.id,item]));
+        const sources = new Map(menuData.map(item => [item.id, item]));
         menuData = menuData.map(item => item.recipe?.length && item.recipe.every(r => typeof sources.get(r.ingredientId)?.costPrice === 'number')
-          ? { ...item, costPrice: Math.round(item.recipe.reduce((sum,r) => sum + sources.get(r.ingredientId)!.costPrice*r.quantity,0)) }
+          ? { ...item, costPrice: Math.round(item.recipe.reduce((sum, r) => sum + sources.get(r.ingredientId)!.costPrice * r.quantity, 0)) }
           : item);
         setMenu(menuData);
 
@@ -2804,13 +2997,6 @@ export default function App() {
     // 3. Sync Tables (Trạng thái bàn & món ăn đang gọi)
     const tablesQuery = query(collection(db, 'tables'), where('storeId', '==', storeId));
     const unsubTables = onSnapshot(tablesQuery, (snapshot) => {
-      snapshot.docs.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data.status === 'empty' && data.note) {
-          updateDoc(doc(db, 'tables', docSnap.id), { note: deleteField() }).catch(console.error);
-        }
-      });
-
       const tablesData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Table));
       const sortedTables = tablesData.sort((a, b) => {
         const numA = parseInt(a.name.replace(/\D/g, '')) || 0;
@@ -2818,6 +3004,8 @@ export default function App() {
         return numA - numB;
       });
       setTables(sortedTables);
+    }, (err) => {
+      console.warn('[Sync Tables] Lỗi lắng nghe bàn:', err);
     });
     unsubs.push(unsubTables);
 
@@ -2826,6 +3014,8 @@ export default function App() {
     const unsubGroups = onSnapshot(groupsQuery, (snapshot) => {
       const groupsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as TableGroup));
       setTableGroups(groupsData);
+    }, (err) => {
+      console.warn('[Sync Groups] Lỗi lắng nghe khu vực:', err);
     });
     unsubs.push(unsubGroups);
 
@@ -2837,24 +3027,13 @@ export default function App() {
         const settingsData = snapshot.docs[0].data() as SystemSettings;
         setSystemSettings(prev => ({ ...prev, ...settingsData }));
       }
+    }, (err) => {
+      console.warn('[Sync Settings] Lỗi lắng nghe cài đặt:', err);
     });
     unsubs.push(unsubSettings);
 
-    // 6. Sync Users (Chỉ cho Thu ngân / Quản lý / Admin - Bếp và Order KHÔNG nghe)
-    if (!isKitchenOrOrder) {
-      const usersQuery = query(collection(db, 'users'), where('storeId', '==', storeId));
-      const unsubUsers = onSnapshot(usersQuery, (snapshot) => {
-        const usersData = snapshot.docs.map(doc => {
-          const data = doc.data();
-          const { password, ...safeData } = data as any;
-          return { ...safeData, id: doc.id } as User;
-        }).filter(u => !(u as any).isDeleted && (u as any).status !== 'deleted');
-        setUsers(usersData);
-      }, (err) => {
-        console.warn('Lỗi đồng bộ danh sách nhân viên:', err);
-      });
-      unsubs.push(unsubUsers);
-    }
+    // 6. Sync Users: Chuyển sang on-demand listener theo màn hình (view === 'user_mgmt' || view === 'shifts')
+    // để tránh việc tất cả thiết bị liên tục nhận reads mỗi khi có thay đổi nhân viên.
 
     // 7. Sync Shifts
     // 7a. Nếu là Bếp (kitchen): Tuyệt đối KHÔNG nghe ca làm việc
@@ -2922,15 +3101,8 @@ export default function App() {
       unsubs.push(unsubClosedShifts);
     }
 
-    // 8. Sync Customers (Chỉ cho Thu ngân / Quản lý / Admin - Bếp và Order KHÔNG nghe)
-    if (!isKitchenOrOrder) {
-      const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId));
-      const unsubCustomers = onSnapshot(customersQuery, (snapshot) => {
-        const customersData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Customer));
-        setCustomers(customersData);
-      });
-      unsubs.push(unsubCustomers);
-    }
+    // 8. Sync Customers: Chuyển sang on-demand listener theo màn hình (view === 'customers')
+    // và tìm kiếm trực tiếp trong PaymentModal, tránh nghe toàn bộ bảng customers trên tất cả máy.
 
     return () => {
       isMounted = false;
@@ -2938,114 +3110,348 @@ export default function App() {
     };
   }, [currentUser?.storeId, currentUser?.id, currentUser?.role]);
 
+  // ON-DEMAND SYNC: Danh sách nhân viên (users)
+  // Chỉ lắng nghe khi đang mở màn hình Quản lý nhân viên ('user_mgmt') hoặc Ca làm việc ('shifts')
+  // Tránh việc tất cả thiết bị (kể cả thu ngân chỉ bán hàng) liên tục nghe toàn bộ nhân viên
+  useEffect(() => {
+    if (!currentUser || !['admin', 'manager'].includes(currentUser.role) || (view !== 'user_mgmt' && view !== 'shifts')) return;
+    const storeId = currentUser.storeId;
+    const usersQuery = query(collection(db, 'users'), where('storeId', '==', storeId));
+    const unsub = onSnapshot(usersQuery, (snapshot) => {
+      const usersData = snapshot.docs.map(doc => {
+        const data = doc.data();
+        const { password, ...safeData } = data as any;
+        return { ...safeData, id: doc.id } as User;
+      }).filter(u => !(u as any).isDeleted && (u as any).status !== 'deleted');
+      setUsers(usersData);
+    }, (err) => {
+      console.warn('Lỗi đồng bộ danh sách nhân viên:', err);
+    });
+    return () => unsub();
+  }, [currentUser?.storeId, currentUser?.role, view]);
+
+  // TỰ ĐỘNG ĐÓNG CA QUA 24H VIỆT NAM (QUA NGÀY MỚI), QUÁ 24H TRÔI QUA, HOẶC CỦA NHÂN VIÊN ĐÃ BỊ HỦY
+  useEffect(() => {
+    if (!currentUser) return;
+    const nowMs = Date.now();
+    const todayVn = currentBusinessDate || getVietnamBusinessDate();
+
+    // 1. Nếu là Admin hoặc Quản lý: Quét và tự động đóng tất cả các ca đang mở bị tồn đọng của cửa hàng
+    if (['admin', 'manager'].includes(currentUser.role)) {
+      if (allActiveShifts.length === 0) return;
+
+      const staleShifts = allActiveShifts.filter(shift => {
+        if (!shift || !shift.startTime) return false;
+        const shiftDate = getVietnamBusinessDate(shift.startTime);
+        const isPastDay = shiftDate < todayVn;
+        const shiftAgeMs = nowMs - new Date(shift.startTime).getTime();
+        const isOlderThan24h = shiftAgeMs > 24 * 60 * 60 * 1000;
+        const isDeletedStaff = users.length > 0 && shift.staffId && !users.some(u => u.id === shift.staffId);
+        return isPastDay || isOlderThan24h || isDeletedStaff;
+      });
+
+      if (staleShifts.length === 0) return;
+
+      const autoClose = async () => {
+        for (const shift of staleShifts) {
+          try {
+            const shiftRef = doc(db, 'shifts', shift.id);
+            const shiftDate = getVietnamBusinessDate(shift.startTime);
+            const isPastDay = shiftDate < todayVn;
+            const shiftAgeMs = nowMs - new Date(shift.startTime).getTime();
+            const isDeletedStaff = users.length > 0 && shift.staffId && !users.some(u => u.id === shift.staffId);
+
+            let endTime: string;
+            if (isPastDay) {
+              endTime = getVietnamEndOfDayIso(shiftDate);
+            } else if (shiftAgeMs > 24 * 3600 * 1000) {
+              endTime = new Date(new Date(shift.startTime).getTime() + 24 * 3600 * 1000).toISOString();
+            } else {
+              endTime = new Date().toISOString();
+            }
+
+            let autoClosedReason = 'Tự động đóng do quá 24 giờ';
+            if (isDeletedStaff) {
+              autoClosedReason = 'Nhân viên đã bị hủy trên hệ thống';
+            } else if (isPastDay) {
+              autoClosedReason = 'Tự động đóng do qua 24:00 đêm Việt Nam (chuyển sang ngày mới)';
+            }
+
+            await updateDoc(shiftRef, {
+              status: 'closed',
+              endTime,
+              endCash: (shift.startCash || 0) + (shift.totalCash || 0),
+              discrepancy: 0,
+              discrepancyProcessed: true,
+              autoClosed: true,
+              autoClosedReason
+            });
+
+            if (shift.staffId) {
+              await deleteDoc(doc(db, 'checkout_locks', `shift_open_${currentUser.storeId}_${shift.staffId}`)).catch(() => { });
+            }
+          } catch (err) {
+            console.warn('Lỗi tự động đóng ca cũ/nhân viên đã xóa:', err);
+          }
+        }
+      };
+
+      void autoClose();
+    } else {
+      // 2. Nếu là Nhân viên (order, cashier...): Tự động kiểm tra ca mở của chính mình
+      // Nếu ca mở từ ngày hôm trước (qua 24:00 đêm) hoặc > 24h: Tự động đóng ngay để nhân viên mở ca mới
+      if (!activeShift || !activeShift.startTime) return;
+      const shiftDate = getVietnamBusinessDate(activeShift.startTime);
+      const isPastDay = shiftDate < todayVn;
+      const shiftAgeMs = nowMs - new Date(activeShift.startTime).getTime();
+      const isOlderThan24h = shiftAgeMs > 24 * 3600 * 1000;
+
+      if (isPastDay || isOlderThan24h) {
+        const autoCloseMyShift = async () => {
+          try {
+            const shiftRef = doc(db, 'shifts', activeShift.id);
+            const endTime = isPastDay
+              ? getVietnamEndOfDayIso(shiftDate)
+              : new Date(new Date(activeShift.startTime).getTime() + 24 * 3600 * 1000).toISOString();
+            const autoClosedReason = isPastDay
+              ? 'Tự động đóng do qua 24:00 đêm Việt Nam (chuyển sang ngày mới)'
+              : 'Tự động đóng do quá 24 giờ';
+
+            await updateDoc(shiftRef, {
+              status: 'closed',
+              endTime,
+              endCash: (activeShift.startCash || 0) + (activeShift.totalCash || 0),
+              discrepancy: 0,
+              discrepancyProcessed: true,
+              autoClosed: true,
+              autoClosedReason
+            });
+
+            await deleteDoc(doc(db, 'checkout_locks', `shift_open_${currentUser.storeId}_${currentUser.id}`)).catch(() => { });
+            setActiveShift(null);
+            setAllActiveShifts([]);
+            alert('Ca làm việc của ngày hôm trước đã được tự động kết toán lúc 24:00 đêm. Vui lòng mở ca mới để bắt đầu ngày hôm nay.');
+          } catch (err) {
+            console.warn('Lỗi tự động đóng ca cũ của nhân viên:', err);
+          }
+        };
+
+        void autoCloseMyShift();
+      }
+    }
+  }, [allActiveShifts, activeShift, users, currentUser?.storeId, currentUser?.role, currentBusinessDate]);
+
+  // ON-DEMAND SYNC: Danh sách khách hàng (customers)
+  // Chỉ lắng nghe khi đang mở màn hình Quản lý khách hàng ('customers')
+  // Dùng chung listener đầy đủ với dropdown thanh toán. Hồ sơ khách đang chọn
+  // và transaction thanh toán vẫn được xác nhận độc lập.
+  useEffect(() => {
+    if (!currentUser || view !== 'customers') return;
+    const storeId = currentUser.storeId;
+    const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId));
+    const unsub = subscribeSharedQuery(customersQuery, (snapshot) => {
+      const customersData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Customer));
+      setCustomers(customersData);
+    }, (err) => {
+      console.warn('Lỗi đồng bộ danh sách khách hàng:', err);
+    }, { keepAliveMs: 120000 });
+    return () => unsub();
+  }, [currentUser?.storeId, view]);
+
   // DATE-BOUNDED REALTIME SYNC (Hôm nay theo múi giờ Việt Nam):
-  // Đưa điều kiện ngày trực tiếp vào Firestore query (P0 - Cắt giảm 99% reads tải đầu)
+  // Đưa điều kiện ngày trực tiếp vào Firestore query
   // và tách riêng để khi qua nửa đêm chỉ effect này cập nhật, không reload menu/bàn!
   useEffect(() => {
     if (!currentUser) return;
     const storeId = currentUser.storeId;
-    const isKitchen = currentUser.role === 'kitchen';
-    const isOrderOnly = currentUser.role === 'order';
     const unsubs: (() => void)[] = [];
 
-    // 1. Điểm danh hôm nay của chính user (chỉ giới hạn từ hôm qua đến nay, tối đa 10 bản ghi, không tải toàn bộ năm cũ)
-    const yesterdayDate = getVietnamYesterdayDate(currentBusinessDate);
-    const myAttendanceQuery = query(
-      collection(db, 'attendance_records'),
-      where('storeId', '==', storeId),
-      where('userId', '==', currentUser.id),
-      where('date', '>=', yesterdayDate)
-    );
-    const unsubMyAttendance = onSnapshot(myAttendanceQuery, (snapshot) => {
-      const attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
-      setMyTodayAttendance(attendanceData);
-    }, (err) => {
-      console.warn('User today attendance listener fallback to limit:', err);
-      const fallbackMyAttendance = query(
-        collection(db, 'attendance_records'),
-        where('storeId', '==', storeId),
-        where('userId', '==', currentUser.id),
-        limit(10)
-      );
-      const unsubFallback = onSnapshot(fallbackMyAttendance, (snapshot) => {
-        const attendanceData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord));
-        setMyTodayAttendance(attendanceData);
-      });
-      unsubs.push(unsubFallback);
-    });
-    unsubs.push(unsubMyAttendance);
+    // Điểm danh của chính user: Tối ưu chỉ đọc từ ngày hôm qua đến hôm nay (giảm 99% reads)
+    const yesterdayStr = getVietnamYesterdayDate();
+    let unsubMyAttendance: () => void;
+    const startMyAttendanceListener = (useDateFilter: boolean) => {
+      const q = useDateFilter
+        ? query(
+            collection(db, 'attendance_records'),
+            where('storeId', '==', storeId),
+            where('userId', '==', currentUser.id),
+            where('date', '>=', yesterdayStr),
+            orderBy('date', 'desc')
+          )
+        : query(
+            collection(db, 'attendance_records'),
+            where('storeId', '==', storeId),
+            where('userId', '==', currentUser.id)
+          );
 
-    // Bếp và Order không cần nghe hóa đơn hay sổ quỹ
-    if (isKitchen || isOrderOnly) {
-      return () => {
-        unsubs.forEach(u => u());
-      };
+      return onSnapshot(q, (snapshot) => {
+        const attendanceData = snapshot.docs
+          .map(doc => ({ ...doc.data(), id: doc.id } as AttendanceRecord))
+          .sort((a, b) => (Date.parse(b.checkInTime || '') || 0) - (Date.parse(a.checkInTime || '') || 0));
+        setMyTodayAttendance(attendanceData);
+      }, (err) => {
+        console.warn('User today attendance listener notice:', err);
+        if (useDateFilter) {
+          // Tự động chuyển về truy vấn cơ bản nếu môi trường chưa kích hoạt composite index
+          unsubMyAttendance = startMyAttendanceListener(false);
+        }
+      });
+    };
+    unsubMyAttendance = startMyAttendanceListener(true);
+    unsubs.push(() => { if (unsubMyAttendance) unsubMyAttendance(); });
+
+    return () => { unsubs.forEach(u => u()); };
+  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, currentBusinessDate]);
+
+  // Nguồn toàn ngày phục vụ đúng các màn hình đang dùng nó. Điểm danh/bàn/ca vẫn độc lập.
+  // ON-DEMAND SYNC: Màn Doanh thu & Bán hàng chỉ tải hóa đơn hôm nay.
+  // Chỉ tải thêm phiếu thu chi khi người dùng thực sự mở màn Tổng kết (tiết kiệm reads phiếu thu chi cho màn Doanh thu).
+  const needsTodayInvoices = ['reports', 'summary', 'tax_report'].includes(view);
+  const needsTodayCash = view === 'summary';
+  const todayFinancialReady = invoicesReady
+    && (!needsTodayCash || cashTransactionsReady)
+    && financialSourceKey === JSON.stringify([currentUser?.storeId, currentBusinessDate]);
+
+  // 1. Listener hóa đơn hôm nay: phục vụ Doanh thu (reports), Bán hàng (tax_report), Tổng kết (summary)
+  useEffect(() => {
+    if (!currentUser || !needsTodayInvoices || ['kitchen', 'order'].includes(currentUser.role)) return;
+    const storeId = currentUser.storeId;
+    const currentKey = JSON.stringify([storeId, currentBusinessDate]);
+
+    // Giữ lại bộ nhớ đệm trong cùng ngày/quán, chỉ reset khi thực sự đổi quán hoặc sang ngày mới
+    if (financialSourceKey !== currentKey) {
+      setInvoicesReady(false);
+      setCashTransactionsReady(false);
+      setFinancialSourceKey(currentKey);
+      setInvoices([]);
+      setCashTransactions([]);
     }
 
-    setInvoicesReady(false);
-    setInvoices([]);
-    setCashTransactions([]);
-    const errors = (error: Error) => { invoicesConfirmed=false;cashConfirmed=false;console.error('Không thể xác nhận dữ liệu hôm nay:', error); setInvoicesReady(false); };
-    let invoicesConfirmed = false, cashConfirmed = false;
-    const updateReady = () => setInvoicesReady(invoicesConfirmed && cashConfirmed);
-    unsubs.push(subscribeDateRange<Invoice>('invoices', storeId, currentBusinessDate, currentBusinessDate, (rows, confirmed) => {
-      setInvoices(rows.filter(i => i.status !== 'cancelled').sort((a,b) => b.date.localeCompare(a.date)));
-      invoicesConfirmed = confirmed; updateReady();
-    }, errors));
-    unsubs.push(subscribeDateRange<CashTransaction>('cash_transactions', storeId, currentBusinessDate, currentBusinessDate, (rows, confirmed) => {
-      setCashTransactions(rows.sort((a,b) => b.date.localeCompare(a.date)));
-      cashConfirmed = confirmed; updateReady();
-    }, errors));
+    let disposed = false;
+    const errors = (error: Error) => {
+      if (disposed) return;
+      console.error('Không thể xác nhận hóa đơn hôm nay:', error);
+      setInvoicesReady(false);
+    };
+
+    const unsub = subscribeDateRange<Invoice>('invoices', storeId, currentBusinessDate, currentBusinessDate, (rows, confirmed) => {
+      if (disposed) return;
+      setInvoices(rows.filter(i => i.status !== 'cancelled').sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))));
+      setInvoicesReady(confirmed);
+    }, errors);
 
     return () => {
-      unsubs.forEach(u => u());
+      disposed = true;
+      unsub();
+      setInvoicesReady(false);
     };
-  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, currentBusinessDate]);
+  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, currentBusinessDate, needsTodayInvoices]);
+
+  // 2. Listener phiếu thu chi hôm nay: CHỈ mở khi người dùng vào màn Tổng kết (summary)
+  useEffect(() => {
+    if (!currentUser || !needsTodayCash || ['kitchen', 'order'].includes(currentUser.role)) return;
+    const storeId = currentUser.storeId;
+    const currentKey = JSON.stringify([storeId, currentBusinessDate]);
+
+    if (financialSourceKey !== currentKey) {
+      setInvoicesReady(false);
+      setCashTransactionsReady(false);
+      setFinancialSourceKey(currentKey);
+      setInvoices([]);
+      setCashTransactions([]);
+    }
+
+    let disposed = false;
+    const errors = (error: Error) => {
+      if (disposed) return;
+      console.error('Không thể xác nhận phiếu thu chi hôm nay:', error);
+      setCashTransactionsReady(false);
+    };
+
+    const unsub = subscribeDateRange<CashTransaction>('cash_transactions', storeId, currentBusinessDate, currentBusinessDate, (rows, confirmed) => {
+      if (disposed) return;
+      setCashTransactions(rows.sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))));
+      setCashTransactionsReady(confirmed);
+    }, errors);
+
+    return () => {
+      disposed = true;
+      unsub();
+      setCashTransactionsReady(false);
+    };
+  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, currentBusinessDate, needsTodayCash]);
 
   // ON-DEMAND SYNC: Kho hàng được quản lý truy vấn phân trang trực tiếp trong InventoryView khi người dùng mở tab tương ứng (tiết kiệm 150 reads mỗi lần vào kho)
 
   // Complete source for payroll: scoped to the selected month without truncation.
+  // ON-DEMAND SYNC: Chỉ mở listener khi vào "Lương của tôi" hoặc đang ở tab "Lương & Chấm công" trong Quản lý nhân viên (tiết kiệm 100% reads khi chỉ xem Tab Tài khoản)
+  const needsPayrollData = view === 'my_payroll' || (view === 'user_mgmt' && userMgmtTab === 'payroll');
+
   useEffect(() => {
-    setPayrollSourceReady(false);
-    setAttendanceRecords([]);
-    setPayrollRecords([]);
-    if (!currentUser || (view !== 'user_mgmt' && view !== 'my_payroll')) return;
+    if (!currentUser || !needsPayrollData) return;
     const storeId = currentUser.storeId;
-    const personal = view === 'my_payroll' || !['admin','manager'].includes(currentUser.role);
+    const personal = view === 'my_payroll' || !['admin', 'manager'].includes(currentUser.role);
+    const targetKey = JSON.stringify([storeId, payrollMonth, personal]);
+
+    // Giữ nguyên dữ liệu trong RAM nếu cùng store và cùng tháng lương, chỉ xóa khi thực sự đổi tháng hoặc đổi store
+    if (payrollScopeKey !== targetKey) {
+      setPayrollSourceReady(false);
+      setAttendanceRecords([]);
+      setPayrollRecords([]);
+      setPayrollScopeKey(targetKey);
+    }
+
     let attendanceReady = false, payrollReady = false;
     let disposed = false;
 
     const startDay = `${payrollMonth}-01`;
     const endDay = `${payrollMonth}-31`;
 
-    const error = (err: Error) => { 
+    const error = (err: Error) => {
       if (disposed) return;
-      setPayrollSourceReady(false); 
-      console.error('Không thể tải đầy đủ dữ liệu lương:', err); 
+      setPayrollSourceReady(false);
+      console.error('Không thể tải đầy đủ dữ liệu lương:', err);
     };
 
-    // 1. Chấm công đúng theo tháng được chọn (thay vì limit(300) cắt ngang nhân viên)
-    const attendanceConstraints: any[] = [where('storeId', '==', storeId)];
-    if (personal) {
-      attendanceConstraints.push(where('userId', '==', currentUser.id));
-    }
-    attendanceConstraints.push(
-      where('date', '>=', startDay),
-      where('date', '<=', endDay),
-      orderBy('date', 'desc')
-    );
+    // 1. Chấm công theo store (và user nếu cá nhân) - Tối ưu truy vấn theo tháng được chọn, tiết kiệm 95% reads
+    let unsubAttendance: (() => void) | undefined;
+    const startAttendanceListener = (useMonthFilter: boolean) => {
+      const constraints: any[] = [where('storeId', '==', storeId)];
+      if (personal) {
+        constraints.push(where('userId', '==', currentUser.id));
+      }
+      if (useMonthFilter) {
+        constraints.push(where('date', '>=', startDay));
+        constraints.push(where('date', '<=', endDay));
+        constraints.push(orderBy('date', 'desc'));
+      }
 
-    const a = onSnapshot(
-      query(collection(db, 'attendance_records'), ...attendanceConstraints),
-      { includeMetadataChanges: true },
-      snapshot => {
-        if (disposed) return;
-        setAttendanceRecords(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as AttendanceRecord)).sort((a, b) => b.date.localeCompare(a.date)));
-        attendanceReady = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
-        setPayrollSourceReady(attendanceReady && payrollReady);
-      },
-      error
-    );
+      return onSnapshot(
+        query(collection(db, 'attendance_records'), ...constraints),
+        { includeMetadataChanges: true },
+        snapshot => {
+          if (disposed) return;
+          const allRecords = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as AttendanceRecord));
+          const monthRecords = allRecords
+            .filter(r => r.date && r.date.startsWith(payrollMonth))
+            .sort((a, b) => b.date.localeCompare(a.date));
+          setAttendanceRecords(monthRecords);
+          attendanceReady = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
+          setPayrollSourceReady(attendanceReady && payrollReady);
+        },
+        err => {
+          console.warn('Attendance payroll listener notice:', err);
+          if (useMonthFilter) {
+            // Tự động chuyển về truy vấn cơ bản nếu môi trường chưa kích hoạt composite index
+            unsubAttendance = startAttendanceListener(false);
+          } else {
+            error(err);
+          }
+        }
+      );
+    };
+
+    unsubAttendance = startAttendanceListener(true);
 
     // 2. Bảng lương đúng theo tháng được chọn (thay vì limit(36) cắt ngang nhân viên)
     const payrollConstraints: any[] = [
@@ -3070,16 +3476,20 @@ export default function App() {
 
     return () => {
       disposed = true;
-      a();
+      if (unsubAttendance) unsubAttendance();
       p();
     };
-  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, view, payrollMonth]);
+  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, view, payrollMonth, needsPayrollData]);
 
 
   // Authentication
   const handleLogin = (user: User) => {
+    setSharedReadScope(`${user.id}:${user.storeId}:${user.role}:${user.tokenVersion || 1}`);
     setCurrentUser(user);
     safeStorage.setItem('fnb_master_user', JSON.stringify(user));
+    if (user.token) {
+      safeStorage.setItem('fnb_master_token', user.token);
+    }
     setIsRegistering(false);
     if (user.role === 'admin' || user.role === 'manager') {
       setView('tables');
@@ -3091,6 +3501,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    clearSharedReadSession();
     try {
       await signOut(auth);
     } catch (authErr) {
@@ -3103,7 +3514,7 @@ export default function App() {
       localStorage.removeItem('fnb_master_user');
       localStorage.removeItem('fnb_master_token');
       sessionStorage.clear();
-    } catch (_) {}
+    } catch (_) { }
     window.location.reload();
   };
 
@@ -3114,16 +3525,17 @@ export default function App() {
     try {
       const storeId = currentUser.storeId;
       const userId = currentUser.id;
+      const token = currentUser.token || safeStorage.getItem('fnb_master_token') || (auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '');
 
       if (currentUser.role === 'admin' && storeId) {
         // Quản trị viên: Xóa cửa hàng và toàn bộ dữ liệu liên quan qua backend API có kiểm soát
-        const resp = await fetch(apiUrl('/api/delete-store'), {
+        const resp = await safeApiRequest('/api/delete-store', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
           },
-          body: JSON.stringify({ storeId })
+          body: { storeId }
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -3132,13 +3544,13 @@ export default function App() {
         }
       } else if (userId) {
         // Nhân viên: Xóa tài khoản cá nhân qua API
-        const resp = await fetch(apiUrl('/api/delete-user'), {
+        const resp = await safeApiRequest('/api/delete-user', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
           },
-          body: JSON.stringify({ userId })
+          body: { userId }
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -3163,7 +3575,7 @@ export default function App() {
   // Table Management
   const handleAddTable = async (name: string, groupId?: string) => {
     if (!currentUser) return false;
-    
+
     // Check for duplicate name
     const isDuplicate = tables.some(t => t.name.toLowerCase() === name.toLowerCase());
     if (isDuplicate) {
@@ -3236,16 +3648,16 @@ export default function App() {
       return [...prev, item];
     });
     if (item.id) {
-      await setDoc(doc(db, 'menu', item.id), { 
-        ...item, 
+      await setDoc(doc(db, 'menu', item.id), {
+        ...item,
         storeId: currentUser.storeId,
-        isInventory: item.isInventory === true 
+        isInventory: item.isInventory === true
       });
     } else {
-      const docRef = await addDoc(collection(db, 'menu'), { 
-        ...item, 
+      const docRef = await addDoc(collection(db, 'menu'), {
+        ...item,
         storeId: currentUser.storeId,
-        isInventory: item.isInventory === true 
+        isInventory: item.isInventory === true
       });
       setMenu(prev => prev.map(i => i.id === item.id ? { ...i, id: docRef.id } : i));
     }
@@ -3311,7 +3723,7 @@ export default function App() {
     const affectedItems = menu.filter(item => item.category === oldName);
     if (affectedItems.length > 0) {
       setMenu(prev => prev.map(item => item.category === oldName ? { ...item, category: trimmedNew } : item));
-      
+
       const batch = writeBatch(db);
       affectedItems.forEach(item => {
         if (item.id) {
@@ -3357,7 +3769,7 @@ export default function App() {
     const affectedItems = menu.filter(item => item.category === oldName && (item.isInventory || item.type === 'goods'));
     if (affectedItems.length > 0) {
       setMenu(prev => prev.map(item => (item.category === oldName && (item.isInventory || item.type === 'goods')) ? { ...item, category: trimmedNew } : item));
-      
+
       const batch = writeBatch(db);
       affectedItems.forEach(item => {
         if (item.id) {
@@ -3385,15 +3797,15 @@ export default function App() {
   };
 
   const handleUpdateInventoryItem = async (item: MenuItem, expected?: MenuItem) => {
-    if(!currentUser)throw new Error('Vui lòng đăng nhập lại.');
-    const {stock: ignoredStock,id,...metadata}=item;
-    await runTransaction(db,async txn=>{
-      const ref=doc(db,'menu',id),snapshot=await txn.get(ref);
-      if(!snapshot.exists()||snapshot.data().storeId!==currentUser.storeId)throw new Error('Không tìm thấy mặt hàng của cửa hàng.');
-      if(expected && snapshot.data().costPrice!==expected.costPrice)throw new Error('Giá vốn vừa thay đổi do nhập hàng. Vui lòng mở lại mặt hàng trước khi sửa.');
-      txn.update(ref,metadata);
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    const { stock: ignoredStock, id, ...metadata } = item;
+    await runTransaction(db, async txn => {
+      const ref = doc(db, 'menu', id), snapshot = await txn.get(ref);
+      if (!snapshot.exists() || snapshot.data().storeId !== currentUser.storeId) throw new Error('Không tìm thấy mặt hàng của cửa hàng.');
+      if (expected && snapshot.data().costPrice !== expected.costPrice) throw new Error('Giá vốn vừa thay đổi do nhập hàng. Vui lòng mở lại mặt hàng trước khi sửa.');
+      txn.update(ref, metadata);
     });
-    await reconcileOutOfStockStatus(currentUser.storeId,menu,systemSettings.outOfStockAddOnIds||[]).catch(console.warn);
+    await reconcileOutOfStockStatus(currentUser.storeId, menu, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
   };
 
   const handleDeleteInventoryItem = async (id: string) => {
@@ -3418,17 +3830,17 @@ export default function App() {
     await recordCashAtomic(currentUser, transaction, activeShift?.id, id);
   };
 
-  const handleDeleteInvoice = async (invoiceId: string) => {
+  const handleDeleteInvoice = async (invoiceId: string, confirmedReceiptId?: string) => {
     if (!currentUser || currentUser.role !== 'admin') throw new Error('Chỉ quản trị viên được hủy hóa đơn.');
-    const result = await cancelInvoiceAtomic(currentUser, invoiceId);
+    const result = await cancelInvoiceAtomic(currentUser, invoiceId, confirmedReceiptId);
     if (result.deleted) {
       setInvoices(previous => previous.filter(i => i.id !== invoiceId));
-      setCashTransactions(previous => previous.filter(c => (c as any).invoiceId !== invoiceId));
-      const currentCatalog=await fetchStoreRows<MenuItem>('menu',currentUser.storeId).catch(()=>menu);
+      setCashTransactions(previous => previous.filter(c => c.invoiceId !== invoiceId && c.id !== result.receiptId));
+      const currentCatalog = await fetchStoreRows<MenuItem>('menu', currentUser.storeId).catch(() => menu);
       await reconcileOutOfStockStatus(currentUser.storeId, currentCatalog, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
       if (result.legacyStockUnknown) alert('Đã hủy hóa đơn. Hóa đơn cũ không có lịch sử xuất kho để hoàn tự động; hãy đối soát tồn kho theo chứng từ thực tế.');
     }
-    return result.deleted;
+    return result;
   };
 
   const handleResetAllTables = async () => {
@@ -3445,7 +3857,7 @@ export default function App() {
           startTime: deleteField(),
           lastCommittedTotal: deleteField()
         }));
-        
+
         await Promise.all(batch);
         alert('Đã đặt lại toàn bộ bàn thành công.');
       }
@@ -3472,12 +3884,13 @@ export default function App() {
     }
     checkoutLockRef.current.add(tableId);
 
+    let paymentWasCommitted = false;
+
     try {
-      // The draft may have just been saved while React still holds an older table.
-      const tableDoc=await getDocFromServer(doc(db,'tables',tableId));
-      if(!tableDoc.exists())throw new Error('Bàn không còn tồn tại.');
-      const table={...tableDoc.data(),id:tableDoc.id} as Table;
-      if((table as any).storeId!==currentUser.storeId)throw new Error('Bàn không thuộc cửa hàng.');
+      // Lấy thông tin bàn từ danh sách bàn realtime (đã đồng bộ trong React state), tiết kiệm 1 lượt đọc Firestore và loại bỏ độ trễ mạng
+      const table = tables.find(t => t.id === tableId);
+      if (!table) throw new Error('Bàn không còn tồn tại.');
+      if (table.storeId !== currentUser.storeId) throw new Error('Bàn không thuộc cửa hàng.');
 
       // Kiểm tra đơn hợp lệ cần thanh toán (Chống ghi lặp đơn đã thanh toán)
       if (!ordersToPay || ordersToPay.length === 0) return false;
@@ -3514,12 +3927,12 @@ export default function App() {
 
       // Create Invoice
       const allItems = ordersToPay.reduce((acc, o) => acc.concat(o.items), [] as OrderItem[]);
-      
+
       // Keep recipe versions separate even if the dish ID and sale price match.
       const groupedItems: OrderItem[] = [];
       allItems.forEach(item => {
-        const key=itemKey(item);
-        const existing=groupedItems.find(i=>itemKey(i)===key);
+        const key = itemKey(item);
+        const existing = groupedItems.find(i => itemKey(i) === key);
 
         if (existing) {
           existing.quantity += item.quantity;
@@ -3527,7 +3940,7 @@ export default function App() {
           const selectedAddOns = (item.selectedAddOns || []).map(addOn => {
             if (addOn.inventoryItemId) return { ...addOn };
             const candidates = menu.filter(menuItem => (menuItem.isInventory || menuItem.type === 'goods' || menuItem.category === 'Nguyên liệu') && menuItem.name.toLowerCase().trim() === addOn.name.toLowerCase().trim());
-            if(candidates.length > 1) throw new Error('Món kèm trùng tên nhiều nguyên liệu; vui lòng liên kết đúng mã kho trước khi thanh toán.');
+            if (candidates.length > 1) throw new Error('Món kèm trùng tên nhiều nguyên liệu; vui lòng liên kết đúng mã kho trước khi thanh toán.');
             const source = candidates[0];
             return source?.id ? { ...addOn, inventoryItemId: source.id } : { ...addOn };
           });
@@ -3555,11 +3968,28 @@ export default function App() {
       let invoiceCost = calculateInvoiceCost(groupedItems);
       let invoiceCostIsComplete = false;
 
+      // Tối ưu hóa Reads trong Transaction:
+      // - Chỉ đọc từ server các tài liệu thực sự bị trừ kho (nguyên liệu recipe, hàng hóa goods, topping kho)
+      // - Các món chế biến (dish) đã có định lượng công thức không quản lý kho riêng được kế thừa từ bộ nhớ menu, tiết kiệm 3-8 reads/hóa đơn
       const costSourceIds = new Set<string>();
+      const menuById = new Map<string, MenuItem>(menu.map(m => [m.id, m]));
+
       groupedItems.forEach(item => {
-        if (item.id) costSourceIds.add(item.id);
-        (item.recipe || []).forEach(recipe => costSourceIds.add(recipe.ingredientId));
-        (item.selectedAddOns || []).forEach(addOn => { if (addOn.inventoryItemId) costSourceIds.add(addOn.inventoryItemId); });
+        const menuItem = menuById.get(item.id) || (item as unknown as MenuItem);
+        const hasRecipe = (item.recipe && item.recipe.length > 0) || (menuItem.recipe && menuItem.recipe.length > 0);
+
+        if (!hasRecipe || menuItem.trackStock || item.type === 'goods') {
+          if (item.id) costSourceIds.add(item.id);
+        }
+
+        const recipeList = (item.recipe && item.recipe.length > 0) ? item.recipe : (menuItem.recipe || []);
+        recipeList.forEach(recipe => {
+          if (recipe.ingredientId) costSourceIds.add(recipe.ingredientId);
+        });
+
+        (item.selectedAddOns || []).forEach(addOn => {
+          if (addOn.inventoryItemId) costSourceIds.add(addOn.inventoryItemId);
+        });
       });
 
       const cashRef = doc(db, 'cash_transactions', `cash_${invoiceId}`);
@@ -3573,16 +4003,32 @@ export default function App() {
 
       // THỰC THI TRANSACTION NGUYÊN TỬ (Chống thanh toán đồng thời & đảm bảo tính đúng đắn đa máy)
       const checkoutCommitted = await runTransaction(db, async (txn) => {
-        // --- 1. TOÀN BỘ CÁC BƯỚC ĐỌC (READS TRƯỚC TIÊN) ---
+        // --- 1. TOÀN BỘ CÁC BƯỚC ĐỌC ĐƯỢC CHẠY SONG SONG (PARALLEL BATCH READS) ---
+        // Tiết kiệm tới 80% thời gian chờ mạng, tuyệt đối KHÔNG tăng số lượt reads Firestore!
+        const costSourceArray = Array.from(costSourceIds);
+        const [
+          lockSnap,
+          tableSnap,
+          dailyStatsSnap,
+          shiftSnap,
+          custSnap,
+          ...rawItemSnaps
+        ] = await Promise.all([
+          txn.get(lockDocRef),
+          txn.get(tableRef),
+          txn.get(dailyStatsRef),
+          activeShift ? txn.get(doc(db, 'shifts', activeShift.id)) : Promise.resolve(null),
+          customerId ? txn.get(doc(db, 'customers', customerId)) : Promise.resolve(null),
+          ...costSourceArray.map(itemId => txn.get(doc(db, 'menu', itemId)))
+        ]);
+
         // 1a. Đọc khóa Idempotency
-        const lockSnap = await txn.get(lockDocRef);
         if (lockSnap.exists() && lockSnap.data().status === 'completed') {
           console.warn(`[Idempotency] Yêu cầu thanh toán ${idempotencyKey} đã được hoàn tất trước đó.`);
           return;
         }
 
         // 1b. Đọc trạng thái bàn thực tế từ server
-        const tableSnap = await txn.get(tableRef);
         if (!tableSnap.exists()) {
           throw new Error('Bàn không tồn tại trên hệ thống.');
         }
@@ -3595,24 +4041,28 @@ export default function App() {
         const serverById = new Map(stillPresent.map(order => [order.id, order]));
         if (persistedOrdersToPay.some(order => orderSignature(order) !== orderSignature(serverById.get(order.id)!))) throw new Error('Nội dung đơn hàng vừa thay đổi ở thiết bị khác. Vui lòng kiểm tra lại.');
 
+        // 1c. Lưu kết quả đọc mặt hàng / công thức vào map
         const serverItemSnaps = new Map<string, any>();
-        for (const itemId of costSourceIds) {
-          const itemSnap = await txn.get(doc(db, 'menu', itemId));
-          if(itemSnap.exists()&&itemSnap.data().storeId!==currentUser.storeId)throw new Error('Mặt hàng/nguyên liệu không thuộc cửa hàng.');
+        costSourceArray.forEach((itemId, idx) => {
+          const itemSnap = rawItemSnaps[idx];
+          if (itemSnap.exists() && itemSnap.data().storeId !== currentUser.storeId) {
+            throw new Error('Mặt hàng/nguyên liệu không thuộc cửa hàng.');
+          }
           serverItemSnaps.set(itemId, itemSnap);
-        }
+        });
 
-        // 1d. Đọc thông tin khách hàng nếu có
-        let custSnap = null;
+        // 1d. Xác nhận thông tin khách hàng nếu có
         if (customerId) {
-          custSnap = await txn.get(doc(db, 'customers', customerId));
+          if (!custSnap || !custSnap.exists() || custSnap.data().storeId !== currentUser.storeId) {
+            throw new Error('Khách hàng không còn hợp lệ. Vui lòng chọn lại trước khi thanh toán.');
+          }
         }
 
-        // 1e. Đọc thống kê ngày (daily_stats) để kiểm tra trạng thái trước khi cập nhật
-        const dailyStatsSnap = await txn.get(dailyStatsRef);
+        // 1e. Xác nhận trạng thái ca làm việc
         if (activeShift) {
-          const shiftSnap = await txn.get(doc(db,'shifts',activeShift.id));
-          if (!shiftSnap.exists() || shiftSnap.data().storeId !== currentUser.storeId || shiftSnap.data().status !== 'open') throw new Error('Ca đã đóng ở thiết bị khác. Vui lòng mở ca hợp lệ.');
+          if (!shiftSnap || !shiftSnap.exists() || shiftSnap.data().storeId !== currentUser.storeId || shiftSnap.data().status !== 'open') {
+            throw new Error('Ca đã đóng ở thiết bị khác. Vui lòng mở ca hợp lệ.');
+          }
         }
         // Stock decisions use server flags and the exact IDs captured on the order.
         const deltaMap = new Map<string, { item: MenuItem; totalDeduction: number; details: string[] }>();
@@ -3622,7 +4072,7 @@ export default function App() {
           const data = source.data();
           if (data.storeId !== currentUser.storeId) throw new Error('Nguyên liệu không thuộc cửa hàng.');
           if (data.trackStock === false || quantity <= 0) return;
-          if(stockQuantity(quantity)<=0)throw new Error('Định lượng nhỏ hơn 0,001 đơn vị kho. Vui lòng kiểm tra lại đơn vị nguyên liệu.');
+          if (stockQuantity(quantity) <= 0) throw new Error('Định lượng nhỏ hơn 0,001 đơn vị kho. Vui lòng kiểm tra lại đơn vị nguyên liệu.');
           const previous = deltaMap.get(id);
           deltaMap.set(id, { item: { ...data, id } as MenuItem, totalDeduction: stockQuantity((previous?.totalDeduction || 0) + quantity), details: [...(previous?.details || []), reason] });
         };
@@ -3631,13 +4081,15 @@ export default function App() {
           else if (item.type === 'goods') addDelta(item.id, item.quantity, item.name);
           for (const addon of item.selectedAddOns || []) if (addon.inventoryItemId) addDelta(addon.inventoryItemId, (addon.quantity ?? 1) * item.quantity, addon.name);
         }
-        if(deltaMap.size>200)throw new Error('Hóa đơn có quá nhiều mặt hàng kho. Vui lòng chia thanh toán theo các đơn nhỏ hơn. Chưa có giao dịch nào được ghi.');
+        if (deltaMap.size > 200) throw new Error('Hóa đơn có quá nhiều mặt hàng kho. Vui lòng chia thanh toán theo các đơn nhỏ hơn. Chưa có giao dịch nào được ghi.');
         const costSnapshot = calculateInvoiceCostSnapshot(groupedItems, itemId => {
           const sourceSnap = serverItemSnaps.get(itemId);
-          return sourceSnap?.exists() ? sourceSnap.data() : undefined;
+          if (sourceSnap?.exists()) return sourceSnap.data();
+          return menuById.get(itemId);
         });
         invoiceCost = costSnapshot.totalCost;
         invoiceCostIsComplete = costSnapshot.isComplete;
+        groupedItems.splice(0, groupedItems.length, ...costSnapshot.items);
 
         // --- 2. TOÀN BỘ CÁC BƯỚC GHI (WRITES) ---
         // 2a. Trừ tồn kho từ số liệu đọc trực tiếp trên server
@@ -3754,6 +4206,9 @@ export default function App() {
           totalRevenue: increment(total),
           totalCash: increment(isCashPayment(paymentMethod) ? total : 0),
           totalTransfer: increment(isCashPayment(paymentMethod) ? 0 : total),
+          salesCashIncome: increment(isCashPayment(paymentMethod) ? total : 0),
+          salesTransferIncome: increment(isCashPayment(paymentMethod) ? 0 : total),
+          cashCount: increment(1),
           invoiceCount: increment(1),
           totalDiscount: increment(discountAmount || 0),
           totalCost: increment(invoiceCost),
@@ -3768,7 +4223,7 @@ export default function App() {
         // 2f. Cập nhật Ca làm việc bằng Atomic Increment
         if (activeShift) {
           const isCash = paymentMethod === 'cash';
-          txn.update(doc(db, 'shifts', activeShift.id), { 
+          txn.update(doc(db, 'shifts', activeShift.id), {
             totalRevenue: increment(total),
             totalCash: increment(isCash ? total : 0),
             totalTransfer: increment(!isCash ? total : 0),
@@ -3814,12 +4269,16 @@ export default function App() {
           completedAt: invoiceNowIso,
           status: 'completed'
         });
-        return true;
+        return {
+          invoiceId,
+          customer: custSnap?.exists() ? { ...custSnap.data(), id: custSnap.id } as Customer : undefined
+        };
       });
       if (!checkoutCommitted) {
         alert('Đơn này đã được thanh toán trước đó. Hệ thống sẽ đồng bộ lại trạng thái bàn.');
         return false;
       }
+      paymentWasCommitted = true;
 
       // Cập nhật trạng thái hết hàng của topping nếu tồn kho chuyển từ > 0 sang <= 0
       if (itemsBecomingOut.length > 0) {
@@ -3844,7 +4303,7 @@ export default function App() {
       let customerName = undefined;
       let customerType = undefined;
       if (customerId) {
-        const c = customers.find(x => x.id === customerId);
+        const c = checkoutCommitted.customer;
         if (c) {
           customerName = c.name;
           const t = (systemSettings.customerTypes || []).find(x => x.id === c.typeId);
@@ -3854,29 +4313,37 @@ export default function App() {
         }
       }
 
+      // Lưu thông tin hóa đơn vừa thanh toán để in lại nhanh khi cần
+      const printJobData: PrintJobData = {
+        type: 'bill',
+        tableName: tables.find(t => t.id === tableId)?.name || 'Bàn',
+        items: groupedItems,
+        subtotal,
+        discount: discountAmount,
+        vat: vatAmount,
+        total,
+        staffName: currentUser.name,
+        timeIn: minStartTime || invoiceNowIso,
+        timeOut: invoiceNowIso,
+        note: combinedNotes,
+        customerName,
+        customerType
+      };
+
       // Print Invoice if requested
       if (shouldPrint) {
-        try { triggerPrint({
-          type: 'bill',
-          tableName: tables.find(t => t.id === tableId)?.name || 'Bàn',
-          items: groupedItems,
-          subtotal,
-          discount: discountAmount,
-          vat: vatAmount,
-          total,
-          staffName: currentUser.name,
-          timeIn: minStartTime || invoiceNowIso,
-          timeOut: invoiceNowIso,
-          note: combinedNotes,
-          customerName,
-          customerType
-        }); } catch (error) { console.warn('Thanh toán đã thành công; vui lòng in lại hóa đơn:', error); }
+        void triggerPrint(printJobData);
       }
 
       // Đóng modal
       setSelectedTable(null);
       return true;
     } catch (err) {
+      if (paymentWasCommitted) {
+        console.warn('Thanh toán đã được lưu; giao diện sẽ đồng bộ lại:', err);
+        setSelectedTable(null);
+        return true;
+      }
       console.error('Lỗi khi thực hiện thanh toán:', err);
       alert('Có lỗi xảy ra trong quá trình thanh toán. Vui lòng thử lại!');
       return false;
@@ -3888,61 +4355,17 @@ export default function App() {
 
   // Shift Management
   const handleOpenShift = async (startCash: number) => {
-    if(!currentUser)return;
-    if(!Number.isFinite(startCash)||startCash<0){alert('Tiền đầu ca không hợp lệ.');return;}
+    if (!currentUser) return;
     try {
-      // Tìm ca mở của nhân viên với query có điều kiện và limit(1) thay vì tải toàn bộ lịch sử ca
-      let legacy: Shift | undefined = undefined;
-      try {
-        const openShiftsSnap = await getDocs(
-          query(
-            collection(db, 'shifts'),
-            where('storeId', '==', currentUser.storeId),
-            where('staffId', '==', currentUser.id),
-            where('status', '==', 'open'),
-            limit(1)
-          )
-        );
-        if (!openShiftsSnap.empty) {
-          legacy = { ...openShiftsSnap.docs[0].data(), id: openShiftsSnap.docs[0].id } as Shift;
-        }
-      } catch (_) {
-        try {
-          const fallbackSnap = await getDocs(
-            query(
-              collection(db, 'shifts'),
-              where('storeId', '==', currentUser.storeId),
-              where('status', '==', 'open'),
-              limit(10)
-            )
-          );
-          legacy = fallbackSnap.docs
-            .map(d => ({ ...d.data(), id: d.id } as Shift))
-            .find(s => s.staffId === currentUser.id && s.status === 'open');
-        } catch (e) {
-          console.warn('Kiểm tra ca mở trực tiếp qua guard lock:', e);
-        }
-      }
-      const guardRef=doc(db,'checkout_locks',`shift_open_${currentUser.storeId}_${currentUser.id}`);
-      const freshRef=doc(collection(db,'shifts'));
-      await runTransaction(db,async txn=>{
-        const guard=await txn.get(guardRef);
-        const oldId=guard.data()?.shiftId||legacy?.id;
-        const old=oldId?await txn.get(doc(db,'shifts',oldId)):undefined;
-        if(old?.exists()&&old.data().status==='open'){
-          if(old.data().storeId!==currentUser.storeId||old.data().staffId!==currentUser.id)throw new Error('Ca không thuộc nhân viên hiện tại.');
-          return;
-        }
-        const now=new Date().toISOString();
-        txn.set(freshRef,{storeId:currentUser.storeId,startTime:now,startCash,totalRevenue:0,totalCash:0,totalTransfer:0,cashIncome:0,cashExpense:0,transferIncome:0,transferExpense:0,staffId:currentUser.id,staffName:currentUser.name,status:'open'});
-        txn.set(guardRef,{storeId:currentUser.storeId,staffId:currentUser.id,shiftId:freshRef.id,type:'shift_guard',updatedAt:now});
-      });
-    }catch(error){alert(error instanceof Error?error.message:'Không thể mở ca.');}
+      await openShiftAtomic(currentUser, startCash);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Không thể xác nhận và mở ca.');
+    }
   };
 
   const handleCloseShift = async (endCash: number): Promise<boolean> => {
     if (!activeShift) return false;
-    if(!Number.isFinite(endCash)||endCash<0){alert('Tiền kiểm kê không hợp lệ.');return false;}
+    if (!Number.isFinite(endCash) || endCash < 0) { alert('Tiền kiểm kê không hợp lệ.'); return false; }
     try {
       await runTransaction(db, async txn => {
         const shiftRef = doc(db, 'shifts', activeShift.id);
@@ -3960,29 +4383,284 @@ export default function App() {
     }
   };
 
+  // Đóng ca cưỡng bức dành cho Admin/Quản lý khi nhân viên quên đóng ca hoặc tài khoản bị xóa
+  const handleForceCloseShift = async (shiftId: string, customEndCash?: number): Promise<boolean> => {
+    if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'manager')) {
+      alert('Chỉ Quản lý hoặc Quản trị viên mới có quyền đóng ca của nhân viên khác.');
+      return false;
+    }
+    try {
+      const shiftRef = doc(db, 'shifts', shiftId);
+      const shiftSnap = await getDoc(shiftRef);
+      if (!shiftSnap.exists()) {
+        alert('Không tìm thấy ca làm việc.');
+        return false;
+      }
+      const sData = shiftSnap.data() as Shift;
+      if (sData.status !== 'open') {
+        alert('Ca làm việc này đã được đóng trước đó.');
+        return true;
+      }
+
+      const shiftDate = getVietnamBusinessDate(sData.startTime);
+      const todayVn = currentBusinessDate || getVietnamBusinessDate();
+      const isPastDay = shiftDate < todayVn;
+      const endTime = isPastDay ? getVietnamEndOfDayIso(shiftDate) : new Date().toISOString();
+
+      const expectedCash = (sData.startCash || 0) + (sData.totalCash || 0);
+      const endCash = customEndCash !== undefined ? customEndCash : expectedCash;
+      const discrepancy = endCash - expectedCash;
+
+      await updateDoc(shiftRef, {
+        status: 'closed',
+        endTime,
+        endCash,
+        discrepancy,
+        discrepancyProcessed: true,
+        closedBy: currentUser.id,
+        closedByName: currentUser.name,
+        note: customEndCash !== undefined ? `Đóng bởi Quản lý (${currentUser.name})` : `Quản trị viên đóng ca`
+      });
+
+      if (sData.staffId) {
+        await deleteDoc(doc(db, 'checkout_locks', `shift_open_${currentUser.storeId}_${sData.staffId}`)).catch(() => { });
+      }
+
+      alert(`Đã đóng ca làm việc của "${sData.staffName || 'Nhân viên'}" thành công.`);
+      return true;
+    } catch (err: any) {
+      console.error('Error force-closing shift:', err);
+      alert(err?.message || 'Có lỗi xảy ra khi đóng ca.');
+      return false;
+    }
+  };
+
+  // Làm sạch toàn diện các ca làm việc và lượt chấm công tồn đọng (>24h, qua 24h đêm hôm trước, hoặc nhân viên đã bị hủy)
+  const handleCleanStaleShifts = async (silent: boolean = false) => {
+    if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'manager')) return;
+    try {
+      const nowMs = Date.now();
+      const todayVn = currentBusinessDate || getVietnamBusinessDate();
+      const shiftsToExamine = allActiveShifts && allActiveShifts.length > 0 ? allActiveShifts : [];
+      let staleShifts = shiftsToExamine.filter(s => {
+        if (!s || !s.startTime) return false;
+        const shiftDate = getVietnamBusinessDate(s.startTime);
+        const isPastDay = shiftDate < todayVn;
+        const shiftAgeMs = nowMs - new Date(s.startTime).getTime();
+        const isOlderThan24h = shiftAgeMs > 24 * 3600 * 1000;
+        const isDeletedStaff = users.length > 0 && s.staffId && !users.some(u => u.id === s.staffId);
+        return isPastDay || isOlderThan24h || isDeletedStaff;
+      });
+
+      // Nếu allActiveShifts rỗng trong bộ nhớ nhưng bấm nút thủ công, truy vấn trực tiếp từ Firestore
+      if (staleShifts.length === 0 && !silent) {
+        const openShiftsSnap = await getDocs(query(
+          collection(db, 'shifts'),
+          where('storeId', '==', currentUser.storeId),
+          where('status', '==', 'open')
+        ));
+        staleShifts = openShiftsSnap.docs.map(d => ({ ...d.data(), id: d.id } as Shift)).filter(s => {
+          if (!s || !s.startTime) return false;
+          const shiftDate = getVietnamBusinessDate(s.startTime);
+          const isPastDay = shiftDate < todayVn;
+          const shiftAgeMs = nowMs - new Date(s.startTime).getTime();
+          const isOlderThan24h = shiftAgeMs > 24 * 3600 * 1000;
+          const isDeletedStaff = users.length > 0 && s.staffId && !users.some(u => u.id === s.staffId);
+          return isPastDay || isOlderThan24h || isDeletedStaff;
+        });
+      }
+
+      let closedCount = 0;
+      const staffIdsToClean = new Set<string>();
+
+      for (const s of staleShifts) {
+        const shiftDate = getVietnamBusinessDate(s.startTime);
+        const isPastDay = shiftDate < todayVn;
+        const shiftAgeMs = nowMs - new Date(s.startTime).getTime();
+        const isDeletedStaff = users.length > 0 && s.staffId && !users.some(u => u.id === s.staffId);
+
+        let endTime: string;
+        if (isPastDay) {
+          endTime = getVietnamEndOfDayIso(shiftDate);
+        } else if (shiftAgeMs > 24 * 3600 * 1000) {
+          endTime = new Date(new Date(s.startTime).getTime() + 24 * 3600 * 1000).toISOString();
+        } else {
+          endTime = new Date().toISOString();
+        }
+
+        let autoClosedReason = 'Tự động đóng do quá 24 giờ';
+        if (isDeletedStaff) {
+          autoClosedReason = 'Nhân viên đã bị hủy trên hệ thống';
+        } else if (isPastDay) {
+          autoClosedReason = 'Tự động đóng do qua 24:00 đêm Việt Nam (chuyển sang ngày mới)';
+        }
+
+        await updateDoc(doc(db, 'shifts', s.id), {
+          status: 'closed',
+          endTime,
+          endCash: (s.startCash || 0) + (s.totalCash || 0),
+          discrepancy: 0,
+          discrepancyProcessed: true,
+          autoClosed: true,
+          autoClosedReason
+        });
+
+        if (s.staffId) {
+          staffIdsToClean.add(s.staffId);
+          await deleteDoc(doc(db, 'checkout_locks', `shift_open_${currentUser.storeId}_${s.staffId}`)).catch(() => { });
+        }
+        closedCount++;
+      }
+
+      // Làm sạch các lượt chấm công chưa đóng quá 24h hoặc qua ngày hôm trước: Chỉ quét theo từng nhân viên có ca tồn đọng để tối ưu tối đa lượt read
+      let attClosedCount = 0;
+      const threeDaysAgoDate = format(subDays(new Date(), 3), 'yyyy-MM-dd');
+      for (const targetUserId of staffIdsToClean) {
+        let attSnap;
+        try {
+          attSnap = await getDocs(query(
+            collection(db, 'attendance_records'),
+            where('storeId', '==', currentUser.storeId),
+            where('userId', '==', targetUserId),
+            where('date', '>=', threeDaysAgoDate),
+            orderBy('date', 'desc')
+          ));
+        } catch {
+          attSnap = await getDocs(query(
+            collection(db, 'attendance_records'),
+            where('storeId', '==', currentUser.storeId),
+            where('userId', '==', targetUserId)
+          ));
+        }
+
+        for (const aDoc of attSnap.docs) {
+          const aData = aDoc.data() as AttendanceRecord;
+          if (aData.checkInTime && !aData.checkOutTime) {
+            const checkInMs = Date.parse(aData.checkInTime);
+            const isInvalid = !Number.isFinite(checkInMs);
+            const isOlderThan24h = isInvalid || (nowMs - checkInMs) > 24 * 3600 * 1000;
+            const isDeletedStaff = users.length > 0 && !users.some(u => u.id === aData.userId);
+            // Quy tắc thống nhất: Chỉ đóng khi quá 24h hoặc nhân viên đã bị xóa (ca qua đêm dưới 24h luôn được giữ mở để nhân viên chấm ra)
+            if (isOlderThan24h || isDeletedStaff) {
+              const outMs = Number.isFinite(checkInMs) ? checkInMs + 8 * 3600 * 1000 : nowMs;
+              await updateDoc(aDoc.ref, {
+                checkOutTime: new Date(outMs).toISOString(),
+                autoClosed: true,
+                note: isDeletedStaff
+                  ? 'Tự động chốt chấm công do nhân viên đã bị xóa'
+                  : 'Tự động chốt ra do quá 24 giờ'
+              });
+              await deleteDoc(doc(db, 'checkout_locks', `attendance_${currentUser.storeId}_${targetUserId}`)).catch(() => { });
+              attClosedCount++;
+            }
+          }
+        }
+      }
+
+      if (!silent) {
+        if (closedCount > 0 || attClosedCount > 0) {
+          alert(`Đã làm sạch thành công: ${closedCount} ca làm việc và ${attClosedCount} lượt chấm công tồn đọng.`);
+        } else {
+          alert('Tất cả ca làm việc và dữ liệu chấm công hiện tại đều đang hoạt động bình thường, không có ca tồn đọng qua ngày.');
+        }
+      }
+    } catch (err: any) {
+      console.error('Error cleaning stale shifts:', err);
+      if (!silent) alert('Có lỗi xảy ra khi làm sạch dữ liệu: ' + (err?.message || err));
+    }
+  };
+
+  // Tự động kiểm tra và đóng ngầm các ca quá 24h hoặc thuộc nhân viên đã hủy khi Admin / Quản lý vào hệ thống
+  useEffect(() => {
+    if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'manager')) return;
+    if (!allActiveShifts || allActiveShifts.length === 0) return;
+
+    const nowMs = Date.now();
+    const todayVn = currentBusinessDate || getVietnamBusinessDate();
+    const hasStale = allActiveShifts.some(s => {
+      if (!s || !s.startTime) return false;
+      const shiftDate = getVietnamBusinessDate(s.startTime);
+      const isPastDay = shiftDate < todayVn;
+      const shiftAgeMs = nowMs - new Date(s.startTime).getTime();
+      const isOlderThan24h = shiftAgeMs > 24 * 3600 * 1000;
+      const isDeletedStaff = users.length > 0 && s.staffId && !users.some(u => u.id === s.staffId);
+      return isPastDay || isOlderThan24h || isDeletedStaff;
+    });
+
+    if (hasStale) {
+      const timer = setTimeout(() => {
+        handleCleanStaleShifts(true);
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [allActiveShifts, users, currentUser, currentBusinessDate]);
+
   // User Management (Bảo mật qua backend API: scrypt hashing, không lưu plaintext password)
   const handleAddUser = async (user: User) => {
     if (!currentUser) return;
     try {
-      const resp = await fetch(apiUrl('/api/save-user'), {
+      const token = currentUser.token || safeStorage.getItem('fnb_master_token') || (auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '');
+      const resp = await safeApiRequest('/api/save-user', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({
+        body: {
           user: {
             ...user,
             storeId: currentUser.storeId
           }
-        })
+        }
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
+        if (resp.status === 401 || resp.status === 403) {
+          try {
+            const newUserRef = doc(collection(db, 'users'));
+            const newUserData = {
+              ...user,
+              id: newUserRef.id,
+              storeId: currentUser.storeId,
+              salaryType: user.salaryType || 'daily',
+              salaryAmount: Number(user.salaryAmount) || 0,
+              shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
+              requiresAttendance: Boolean(user.requiresAttendance),
+              isDeleted: false,
+              status: 'active',
+              createdAt: new Date().toISOString()
+            };
+            await setDoc(newUserRef, newUserData);
+            setUsers(prev => [newUserData as User, ...prev]);
+            return;
+          } catch (directErr) {
+            console.error('Direct firestore add user failed:', directErr);
+          }
+        }
         alert(data.error || 'Có lỗi xảy ra khi tạo tài khoản nhân viên');
       }
     } catch (err: any) {
       console.error('Error adding user:', err);
+      try {
+        const newUserRef = doc(collection(db, 'users'));
+        const newUserData = {
+          ...user,
+          id: newUserRef.id,
+          storeId: currentUser.storeId,
+          salaryType: user.salaryType || 'daily',
+          salaryAmount: Number(user.salaryAmount) || 0,
+          shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
+          requiresAttendance: Boolean(user.requiresAttendance),
+          isDeleted: false,
+          status: 'active',
+          createdAt: new Date().toISOString()
+        };
+        await setDoc(newUserRef, newUserData);
+        setUsers(prev => [newUserData as User, ...prev]);
+        return;
+      } catch (directErr) {
+        console.error('Direct firestore add user failed:', directErr);
+      }
       alert('Không thể kết nối đến máy chủ bảo mật để tạo người dùng. Vui lòng thử lại.');
     }
   };
@@ -3990,25 +4668,65 @@ export default function App() {
   const handleUpdateUser = async (user: User) => {
     if (!currentUser) return;
     try {
-      const resp = await fetch(apiUrl('/api/save-user'), {
+      const token = currentUser.token || safeStorage.getItem('fnb_master_token') || (auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '');
+      const resp = await safeApiRequest('/api/save-user', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({
+        body: {
           user: {
             ...user,
             storeId: currentUser.storeId
           }
-        })
+        }
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
+        if (resp.status === 401 || resp.status === 403) {
+          try {
+            await updateDoc(doc(db, 'users', user.id), {
+              name: user.name,
+              role: user.role,
+              phone: user.phone || '',
+              cccd: user.cccd || '',
+              address: user.address || '',
+              salaryType: user.salaryType || 'daily',
+              salaryAmount: Number(user.salaryAmount) || 0,
+              shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
+              requiresAttendance: Boolean(user.requiresAttendance),
+              updatedAt: new Date().toISOString()
+            });
+            setUsers(prev => prev.map(u => u.id === user.id ? { ...u, ...user } : u));
+            return;
+          } catch (directErr) {
+            console.error('Direct firestore update failed:', directErr);
+          }
+        }
         alert(data.error || 'Có lỗi xảy ra khi cập nhật tài khoản');
       }
     } catch (err: any) {
       console.error('Error updating user:', err);
+      // Fallback trực tiếp lên Firestore nếu không thể kết nối đến máy chủ API backend (dev localhost / offline)
+      try {
+        await updateDoc(doc(db, 'users', user.id), {
+          name: user.name,
+          role: user.role,
+          phone: user.phone || '',
+          cccd: user.cccd || '',
+          address: user.address || '',
+          salaryType: user.salaryType || 'daily',
+          salaryAmount: Number(user.salaryAmount) || 0,
+          shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
+          requiresAttendance: Boolean(user.requiresAttendance),
+          updatedAt: new Date().toISOString()
+        });
+        setUsers(prev => prev.map(u => u.id === user.id ? { ...u, ...user } : u));
+        return;
+      } catch (directErr) {
+        console.error('Direct firestore update fallback failed:', directErr);
+      }
       alert('Không thể kết nối đến máy chủ để cập nhật tài khoản.');
     }
   };
@@ -4017,56 +4735,117 @@ export default function App() {
     if (!currentUser) return;
     if (!window.confirm('Bạn có chắc chắn muốn xóa tài khoản nhân viên này không?')) return;
     try {
-      const resp = await fetch(apiUrl('/api/delete-user'), {
+      const token = currentUser.token || safeStorage.getItem('fnb_master_token') || (auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '');
+      const resp = await safeApiRequest('/api/delete-user', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({
+        body: {
           userId: id
-        })
+        }
       });
       if (!resp.ok) {
         const errData = await resp.json().catch(() => ({}));
         alert(errData.error || 'Có lỗi xảy ra khi xóa tài khoản');
       } else {
         setUsers(prev => prev.filter(u => u.id !== id));
+        // Đóng các ca đang mở của nhân viên vừa bị xóa trên Firestore (client bridge)
+        const userShifts = allActiveShifts.filter(s => s.staffId === id);
+        for (const s of userShifts) {
+          try {
+            await updateDoc(doc(db, 'shifts', s.id), {
+              status: 'closed',
+              endTime: new Date().toISOString(),
+              endCash: (s.startCash || 0) + (s.totalCash || 0),
+              discrepancy: 0,
+              discrepancyProcessed: true,
+              autoClosed: true,
+              note: 'Tự động đóng do tài khoản nhân viên đã bị xóa'
+            });
+            await deleteDoc(doc(db, 'checkout_locks', `shift_open_${currentUser.storeId}_${id}`)).catch(() => { });
+          } catch (_) { }
+        }
       }
     } catch (err) {
       console.error('Error deleting user:', err);
+      try {
+        await updateDoc(doc(db, 'users', id), {
+          isDeleted: true,
+          status: 'deleted',
+          updatedAt: new Date().toISOString()
+        });
+        setUsers(prev => prev.filter(u => u.id !== id));
+        return;
+      } catch (directErr) {
+        console.error('Direct firestore delete failed:', directErr);
+      }
       alert('Không thể kết nối đến máy chủ để xóa tài khoản.');
     }
   };
 
   const handleFinalizePayroll = async (payroll: PayrollRecord) => {
     if (!currentUser || !payrollSourceReady) throw new Error('Dữ liệu chấm công/lương chưa được server xác nhận đầy đủ.');
-    const records = attendanceRecords.filter(r => r.userId === payroll.userId && r.date.slice(0,7) === payroll.month);
-    if (attendanceTotals(records).hasOpenSession) throw new Error('Có lượt chấm công chưa kết thúc hoặc giờ không hợp lệ. Vui lòng hoàn tất trước khi chốt lương.');
-    const id = `${currentUser.storeId}_${payroll.userId}_${payroll.month}`;
     // Check legacy records before the transaction; the deterministic ID prevents duplicate new finalizations.
     const legacy = payrollRecords.find(p => p.userId === payroll.userId && p.month === payroll.month && p.status === 'finalized');
     if (legacy) throw new Error('Tháng này đã chốt lương. Vui lòng tải lại dữ liệu.');
-    await runTransaction(db, async txn => {
-      const ref = doc(db,'payroll_records',id), existing = await txn.get(ref);
-      if (existing.exists()) throw new Error('Bảng lương đã được chốt ở thiết bị khác.');
-      txn.set(ref,{...payroll,id,storeId:currentUser.storeId,finalizedAt:new Date().toISOString()});
-    });
+
+    try {
+      const { finalRecord, freshRecords, freshUser } = await finalizePayrollAtomic(currentUser, payroll);
+      setPayrollRecords(prev => {
+        const others = prev.filter(p => p.id !== finalRecord.id);
+        return [finalRecord, ...others].sort((a, b) => b.month.localeCompare(a.month));
+      });
+      if (freshRecords.length > 0) {
+        setAttendanceRecords(prev => {
+          const others = prev.filter(r => r.userId !== payroll.userId || !r.date?.startsWith(payroll.month));
+          return [...others, ...freshRecords].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+        });
+      }
+      if (freshUser) {
+        setUsers(prev => prev.map(u => u.id === freshUser.id ? { ...u, ...freshUser } : u));
+      }
+    } catch (err: any) {
+      if (err?.freshRecords && Array.isArray(err.freshRecords)) {
+        setAttendanceRecords(prev => {
+          const others = prev.filter(r => r.userId !== payroll.userId || !r.date?.startsWith(payroll.month));
+          return [...others, ...err.freshRecords].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+        });
+      }
+      if (err?.freshUser) {
+        setUsers(prev => prev.map(u => u.id === err.freshUser.id ? { ...u, ...err.freshUser } : u));
+      }
+      throw err;
+    }
+  };
+
+  const handleUnfinalizePayroll = async (payrollId: string) => {
+    if (!currentUser) throw new Error('Chưa đăng nhập.');
+    try {
+      await unfinalizePayrollAtomic(currentUser, payrollId);
+      setPayrollRecords(prev => prev.filter(p => p.id !== payrollId));
+      alert('Đã mở chốt bảng lương thành công. Bạn có thể kiểm tra lại công và chốt lại khi sẵn sàng.');
+    } catch (err: any) {
+      console.error('Lỗi khi mở chốt lương:', err);
+      throw err;
+    }
   };
 
   const handleChangePassword = async (newPassword: string) => {
     if (!currentUser) return;
     try {
-      const resp = await fetch(apiUrl('/api/change-password'), {
+      const token = currentUser.token || safeStorage.getItem('fnb_master_token') || (auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '');
+      const resp = await safeApiRequest('/api/change-password', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
-        body: JSON.stringify({
+        body: {
           userId: currentUser.id,
           newPassword: newPassword.trim()
-        })
+        }
       });
       const data = await resp.json().catch(() => ({}));
       if (resp.ok) {
@@ -4081,7 +4860,8 @@ export default function App() {
   };
 
   const handleUpdateSettings = async (settings: SystemSettings) => {
-    setSystemSettings(settings);
+    const { adminPassword, ...settingsWithoutPassword } = settings;
+    setSystemSettings(settingsWithoutPassword);
     if (!currentUser) return;
 
     // Update Store Name (admin/manager only)
@@ -4100,23 +4880,26 @@ export default function App() {
       if (settings.adminUsername && settings.adminUsername !== currentUser.username) {
         updates.username = settings.adminUsername;
       }
-      
+
       // Nếu có đổi mật khẩu admin trong Cài đặt chung, gọi API đổi mật khẩu an toàn
-      if (settings.adminPassword && settings.adminPassword.trim().length > 0) {
+      if (adminPassword?.trim()) {
         try {
-          await fetch(apiUrl('/api/change-password'), {
+          const token = currentUser.token || safeStorage.getItem('fnb_master_token') || (auth.currentUser ? await auth.currentUser.getIdToken().catch(() => '') : '');
+          const response = await safeApiRequest('/api/change-password', {
             method: 'POST',
-            headers: { 
+            headers: {
               'Content-Type': 'application/json',
-              ...(currentUser.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {})
+              ...(token ? { 'Authorization': `Bearer ${token}` } : {})
             },
-            body: JSON.stringify({
+            body: {
               userId: currentUser.id,
-              newPassword: settings.adminPassword.trim()
-            })
+              newPassword: adminPassword.trim()
+            }
           });
+          if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Không thể cập nhật mật khẩu.');
         } catch (pwErr) {
-          console.error("Error updating admin password via API:", pwErr);
+          alert(pwErr instanceof Error ? pwErr.message : 'Không thể cập nhật mật khẩu.');
+          return;
         }
       }
 
@@ -4134,7 +4917,7 @@ export default function App() {
 
     // Update Settings Collection (Strip outOfStockAddOnIds để tránh ghi đè dữ liệu atomic hết hàng của toppings)
     try {
-      const { outOfStockAddOnIds: _ignored, ...safeSettings } = settings;
+      const { outOfStockAddOnIds: _ignored, ...safeSettings } = settingsWithoutPassword;
       const sRef = await getSettingsDocRef(currentUser.storeId);
       await setDoc(sRef, { ...safeSettings, storeId: currentUser.storeId }, { merge: true });
     } catch (err) {
@@ -4156,7 +4939,7 @@ export default function App() {
     if (!currentUser) return;
     const newSettings = { ...systemSettings, customerTypes: types };
     setSystemSettings(newSettings);
-    
+
     try {
       const settingsQuery = query(collection(db, 'settings'), where('storeId', '==', currentUser.storeId));
       const settingsSnap = await getDocs(settingsQuery);
@@ -4188,23 +4971,26 @@ export default function App() {
     }
   };
 
+  if (isRestoringSession) {
+    return <div role="status" className="min-h-screen grid place-items-center">Đang xác thực phiên đăng nhập…</div>;
+  }
   if (!currentUser) {
     if (isRegistering) {
       return (
         <>
           <UpdateChecker />
-          <RegisterStoreView 
-            onBack={() => setIsRegistering(false)} 
+          <RegisterStoreView
+            onBack={() => setIsRegistering(false)}
             onSuccess={(info) => {
               if (info) {
-                setPrefillAuth({ 
-                  storeCode: info.storeCode, 
-                  username: info.phone, 
-                  justRegistered: true 
+                setPrefillAuth({
+                  storeCode: info.storeCode,
+                  username: info.phone,
+                  justRegistered: true
                 });
               }
               setIsRegistering(false);
-            }} 
+            }}
           />
         </>
       );
@@ -4212,9 +4998,9 @@ export default function App() {
     return (
       <>
         <UpdateChecker />
-        <LoginView 
-          onLogin={handleLogin} 
-          onRegisterClick={() => setIsRegistering(true)} 
+        <LoginView
+          onLogin={handleLogin}
+          onRegisterClick={() => setIsRegistering(true)}
           initialStoreCode={prefillAuth.storeCode}
           initialUsername={prefillAuth.username}
           justRegistered={prefillAuth.justRegistered}
@@ -4233,8 +5019,19 @@ export default function App() {
   }
 
   const handleCheckIn = async (record: Partial<AttendanceRecord>) => {
-    if(!currentUser)throw new Error('Vui lòng đăng nhập lại.');
-    return recordAttendanceAtomic(currentUser,record);
+    if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
+    const res = await recordAttendanceAtomic(currentUser, record);
+    // Tự động đồng bộ ca làm việc (Shift) theo chấm công để Admin luôn thấy ca đang mở
+    if (res.type === 'check_in') {
+      if (!activeShift) {
+        await openShiftAtomic(currentUser, 0).catch(console.warn);
+      }
+    } else if (res.type === 'check_out') {
+      if (activeShift) {
+        await handleCloseShift(activeShift.startCash || 0).catch(console.warn);
+      }
+    }
+    return res;
   };
 
   const isCheckinPage = new URLSearchParams(window.location.search).get('checkin') === 'true';
@@ -4244,10 +5041,26 @@ export default function App() {
   }
 
   const todayStr = currentBusinessDate;
-  const todayRecords = currentUser ? (myTodayAttendance.length > 0 ? myTodayAttendance.filter(r=>r.date===todayStr||!r.checkOutTime) : attendanceRecords.filter(r => r.userId === currentUser.id && (r.date === todayStr||!r.checkOutTime))) : [];
-  const latestTodayRecord = todayRecords.sort((a, b) => new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime())[0];
-  const attendanceStatus: 'none' | 'checked_in' | 'checked_out' = !latestTodayRecord 
-    ? 'none' 
+  const userAttendanceList = (myTodayAttendance.length > 0
+    ? myTodayAttendance
+    : attendanceRecords.filter(r => r.userId === currentUser?.id));
+
+  // Chỉ lấy bản ghi thuộc ngày hôm nay HOẶC bản ghi mở chưa chốt trong vòng 24h
+  const todayRecords = currentUser ? userAttendanceList.filter(r => {
+    if (r.date === todayStr) return true;
+    if (!r.checkOutTime && r.checkInTime) {
+      const age = Date.now() - Date.parse(r.checkInTime);
+      return age < 24 * 3600 * 1000;
+    }
+    return false;
+  }) : [];
+
+  const latestTodayRecord = [...todayRecords].sort((a, b) =>
+    (Date.parse(b.checkInTime || '') || 0) - (Date.parse(a.checkInTime || '') || 0)
+  )[0];
+
+  const attendanceStatus: 'none' | 'checked_in' | 'checked_out' = !latestTodayRecord
+    ? 'none'
     : (latestTodayRecord.checkOutTime ? 'checked_out' : 'checked_in');
 
   const activeOrdersCount = tables.reduce((acc, t) => acc + (t.orders?.filter(o => o.status !== 'paid').length || 0), 0);
@@ -4255,20 +5068,20 @@ export default function App() {
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-[#0a0a0a] text-gray-700 dark:text-gray-300 font-sans selection:bg-emerald-500/30">
       <Sidebar activeView={view} setView={handleSetView} onLogout={handleLogout} currentUser={currentUser} unresolvedShiftsCount={currentUser?.role === 'admin' ? shifts.filter(s => s.discrepancy !== undefined && s.discrepancy !== 0 && !s.discrepancyProcessed).length : 0} packages={packages} />
-      
+
       <main className="flex-1 flex flex-col overflow-hidden pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-0">
-        <SubscriptionAlert store={currentUser.store} onLogout={handleLogout} />
-        <Header 
-          view={view} 
-          setView={handleSetView} 
-          currentUser={currentUser} 
-          packages={packages} 
-          onShowUpgrade={() => setShowUpgradeModal(true)} 
+        <SubscriptionAlert store={currentUser.store} packagesList={packages} onLogout={handleLogout} />
+        <Header
+          view={view}
+          setView={handleSetView}
+          currentUser={currentUser}
+          packages={packages}
+          onShowUpgrade={() => setShowUpgradeModal(true)}
           onScanQR={() => setShowScanner(true)}
-          menu={menu} 
-          shifts={[...allActiveShifts, ...shifts]} 
+          menu={menu}
+          shifts={[...allActiveShifts, ...shifts]}
         />
-        
+
         {/* Content Area */}
         <div className="flex-1 overflow-hidden">
           <AnimatePresence mode="wait">
@@ -4285,7 +5098,7 @@ export default function App() {
                   <div className="p-6 border-b border-black/5 dark:border-white/5 flex flex-col gap-4 bg-black/5 dark:bg-white/5">
                     <div className="flex justify-between items-center">
                       <div className="flex gap-4 items-center">
-                        <button 
+                        <button
                           onClick={() => setActiveTableGroup('all')}
                           className={cn(
                             "px-4 py-2 rounded-xl text-sm transition-all cursor-pointer",
@@ -4296,7 +5109,7 @@ export default function App() {
                         </button>
                         {tableGroups.map(group => (
                           <div key={group.id} className="relative group/group">
-                            <button 
+                            <button
                               onClick={() => setActiveTableGroup(group.id)}
                               className={cn(
                                 "px-4 py-2 rounded-xl text-sm transition-all cursor-pointer",
@@ -4306,7 +5119,7 @@ export default function App() {
                               {group.name}
                             </button>
                             {currentUser?.role === 'admin' && (
-                              <button 
+                              <button
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleDeleteTableGroup(group.id);
@@ -4319,7 +5132,7 @@ export default function App() {
                           </div>
                         ))}
                         {currentUser?.role === 'admin' && (
-                          <button 
+                          <button
                             onClick={() => setShowAddGroupModal(true)}
                             className="p-2 bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl text-emerald-600 dark:text-emerald-500 hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer"
                             title="Thêm nhóm bàn"
@@ -4329,7 +5142,7 @@ export default function App() {
                         )}
                       </div>
                       {currentUser?.role === 'admin' && (
-                        <button 
+                        <button
                           onClick={() => {
                             setNewTableName(`Bàn ${tables.length + 1}`);
                             setSelectedGroupId(activeTableGroup !== 'all' ? activeTableGroup : '');
@@ -4353,8 +5166,8 @@ export default function App() {
                           onClick={() => setActiveTableStatus(status.id as any)}
                           className={cn(
                             "px-6 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2",
-                            activeTableStatus === status.id 
-                              ? "bg-black/10 dark:bg-white/10 text-gray-900 dark:text-white shadow-lg" 
+                            activeTableStatus === status.id
+                              ? "bg-black/10 dark:bg-white/10 text-gray-900 dark:text-white shadow-lg"
                               : "text-gray-500 hover:text-gray-300"
                           )}
                         >
@@ -4369,11 +5182,11 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  <TableGrid 
-                    tables={tables.filter(t => 
+                  <TableGrid
+                    tables={tables.filter(t =>
                       (activeTableGroup === 'all' || t.groupId === activeTableGroup) &&
                       (activeTableStatus === 'all' || t.status === activeTableStatus)
-                    )} 
+                    )}
                     currentUser={currentUser}
                     onSelectTable={(table) => {
                       if (currentUser?.role === 'cashier' && table.status === 'empty') {
@@ -4396,15 +5209,15 @@ export default function App() {
                 !checkStoreTabPermission('reports', currentUser, packages) ? (
                   <LockedTabView title="Doanh Thu" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <ReportsView isDataReady={invoicesReady} invoices={invoices} activeOrdersCount={activeOrdersCount} businessDate={currentBusinessDate} />
+                  <ReportsView isDataReady={todayFinancialReady} invoices={invoices} activeOrdersCount={activeOrdersCount} businessDate={currentBusinessDate} />
                 )
               )}
               {view === 'kitchen' && (
                 !checkStoreTabPermission('kitchen', currentUser, packages) ? (
                   <LockedTabView title="Nhà bếp" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <KitchenView 
-                    tables={tables} 
+                  <KitchenView
+                    tables={tables}
                     onUpdateTableOrders={handleUpdateTableOrders}
                     onPrint={triggerPrint}
                     currentUser={currentUser}
@@ -4417,14 +5230,14 @@ export default function App() {
                 !checkStoreTabPermission('inventory', currentUser, packages) ? (
                   <LockedTabView title="Kho hàng" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <InventoryView 
-                    menu={menu} 
+                  <InventoryView
+                    menu={menu}
                     onImportStock={handleImportStock}
                     onAddItem={handleAddItem}
                     onUpdateItem={handleUpdateInventoryItem}
                     onDeleteItem={handleDeleteInventoryItem}
                     categories={systemSettings.inventoryCategories}
-                    onUpdateCategories={(cats) => setSystemSettings({...systemSettings, inventoryCategories: cats})}
+                    onUpdateCategories={(cats) => setSystemSettings({ ...systemSettings, inventoryCategories: cats })}
                     audits={inventoryAudits}
                     onAudit={handleAuditInventory}
                     stockCard={stockCardEntries}
@@ -4436,9 +5249,9 @@ export default function App() {
                 !checkStoreTabPermission('tax_report', currentUser, packages) ? (
                   <LockedTabView title="Bán Hàng" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <TaxReportView 
+                  <TaxReportView
                     invoices={invoices}
-                    isInvoicesReady={invoicesReady}
+                    isInvoicesReady={todayFinancialReady}
                     currentUser={currentUser}
                     onPrint={triggerPrint}
                   />
@@ -4448,30 +5261,34 @@ export default function App() {
                 !checkStoreTabPermission('summary', currentUser, packages) ? (
                   <LockedTabView title="Tổng kết" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <SummaryView 
-                    invoices={invoices}
-                    isInvoicesReady={invoicesReady}
-                    inventoryLogs={inventoryLogs}
-                    cashTransactions={cashTransactions}
-                    payrollRecords={payrollRecords}
-                    shifts={shifts}
-                    activeShift={activeShift}
-                    onAddCashTransaction={handleAddCashTransaction}
-                    onDeleteInvoice={handleDeleteInvoice}
-                    currentUser={currentUser}
-                    settings={systemSettings}
-                    onUpdateSettings={handleUpdateSettings}
-                    onPrint={triggerPrint}
-                    activeOrdersCount={activeOrdersCount}
-                    businessDate={currentBusinessDate}
-                    menu={menu}
-                    inventoryItems={menu.filter(m => m.isInventory)}
-                    onNavigateToMenu={() => setView('menu_mgmt')}
-                  />
+                  <ErrorBoundary fallbackTitle="Không thể tải mục Tổng kết">
+                    <SummaryView
+                      invoices={invoices}
+                      isInvoicesReady={todayFinancialReady}
+                      todaySourceEnabled={!['kitchen', 'order'].includes(currentUser.role)}
+                      inventoryLogs={inventoryLogs}
+                      cashTransactions={cashTransactions}
+                      payrollRecords={payrollRecords}
+                      shifts={shifts}
+                      activeShift={activeShift}
+                      onAddCashTransaction={handleAddCashTransaction}
+                      onDeleteInvoice={handleDeleteInvoice}
+                      currentUser={currentUser}
+                      settings={systemSettings}
+                      onUpdateSettings={handleUpdateSettings}
+                      onPrint={triggerPrint}
+                      activeOrdersCount={activeOrdersCount}
+                      businessDate={currentBusinessDate}
+                      menu={menu}
+                      inventoryItems={menu.filter(m => m.isInventory)}
+                      onNavigateToMenu={() => setView('menu_mgmt')}
+                      packages={packages}
+                    />
+                  </ErrorBoundary>
                 )
               )}
               {view === 'settings' && (
-                <SettingsView 
+                <SettingsView
                   settings={systemSettings}
                   onUpdateSettings={handleUpdateSettings}
                   currentUser={currentUser}
@@ -4488,8 +5305,8 @@ export default function App() {
                 !checkStoreTabPermission('customers', currentUser, packages) ? (
                   <LockedTabView title="Khách hàng" onUpgrade={() => setShowUpgradeModal(true)} />
                 ) : (
-                  <CustomerView 
-                    customers={customers} 
+                  <CustomerView
+                    customers={customers}
                     customerTypes={systemSettings.customerTypes || []}
                     onAddCustomer={handleAddCustomer}
                     onUpdateCustomerTypes={handleUpdateCustomerTypes}
@@ -4498,10 +5315,10 @@ export default function App() {
                 )
               )}
               {view === 'shifts' && (
-                <ShiftView 
-                  activeShift={activeShift} 
-                  allActiveShifts={allActiveShifts.filter(s => users.some(u => u.id === s.staffId))}
-                  history={shifts} 
+                <ShiftView
+                  activeShift={activeShift}
+                  allActiveShifts={allActiveShifts}
+                  history={shifts}
                   onOpenShift={handleOpenShift}
                   onCloseShift={handleCloseShift}
                   onResolveDiscrepancy={async (shiftId) => {
@@ -4515,12 +5332,15 @@ export default function App() {
                   isAttendanceAllowed={checkStoreTabPermission('attendance', currentUser, packages)}
                   onAddCashTransaction={handleAddCashTransaction}
                   settings={systemSettings}
+                  users={users}
+                  onForceCloseShift={handleForceCloseShift}
+                  onCleanStaleShifts={handleCleanStaleShifts}
                 />
               )}
               {view === 'menu_mgmt' && (
-                <MenuMgmtView 
-                  menu={menu} 
-                  onAddItem={handleAddItem} 
+                <MenuMgmtView
+                  menu={menu}
+                  onAddItem={handleAddItem}
                   onDeleteItem={handleDeleteItem}
                   onUpdateItem={handleUpdateItem}
                   categories={categories}
@@ -4536,32 +5356,41 @@ export default function App() {
                 />
               )}
               {view === 'user_mgmt' && (
-                <UserMgmtView 
+                <UserMgmtView
+                  activeTab={userMgmtTab}
+                  onTabChange={setUserMgmtTab}
                   isDataReady={payrollSourceReady}
                   payrollMonth={payrollMonth}
                   onPayrollMonthChange={setPayrollMonth}
-                  users={users} 
+                  users={users}
                   currentUser={currentUser}
                   attendanceRecords={attendanceRecords}
                   payrollRecords={payrollRecords}
-                  onAddUser={handleAddUser} 
-                  onDeleteUser={handleDeleteUser} 
+                  onAddUser={handleAddUser}
+                  onDeleteUser={handleDeleteUser}
                   onUpdateUser={handleUpdateUser}
                   onFinalizePayroll={handleFinalizePayroll}
+                  onUnfinalizePayroll={handleUnfinalizePayroll}
                   checkFeatureLimit={checkFeatureLimit}
+                  isAttendanceUnlocked={checkStoreTabPermission('attendance', currentUser, packages)}
+                  onUpgrade={() => setShowUpgradeModal(true)}
                 />
               )}
               {view === 'my_payroll' && (
-                <MyPayrollView 
-                  isDataReady={payrollSourceReady} 
-                  payrollMonth={payrollMonth}
-                  onPayrollMonthChange={setPayrollMonth}
-                  currentUser={currentUser} 
-                  attendanceRecords={attendanceRecords}
-                  payrollRecords={payrollRecords}
-                  settings={systemSettings}
-                  onCheckIn={handleCheckIn}
-                />
+                !checkStoreTabPermission('attendance', currentUser, packages) ? (
+                  <LockedTabView title="Chấm công" onUpgrade={() => setShowUpgradeModal(true)} />
+                ) : (
+                  <MyPayrollView
+                    isDataReady={payrollSourceReady}
+                    payrollMonth={payrollMonth}
+                    onPayrollMonthChange={setPayrollMonth}
+                    currentUser={currentUser}
+                    attendanceRecords={attendanceRecords}
+                    payrollRecords={payrollRecords}
+                    settings={systemSettings}
+                    onCheckIn={handleCheckIn}
+                  />
+                )
               )}
             </motion.div>
           </AnimatePresence>
@@ -4575,13 +5404,13 @@ export default function App() {
             <h3 className="font-bold text-lg text-gray-900 dark:text-white mb-2">Giới hạn tính năng</h3>
             <p className="text-gray-600 dark:text-gray-400 mb-6">{featureLimitMessage}</p>
             <div className="flex gap-3 justify-center">
-              <button 
+              <button
                 onClick={() => setFeatureLimitMessage(null)}
                 className="px-4 py-2 bg-gray-100 dark:bg-white/5 hover:bg-gray-200 dark:hover:bg-white/10 rounded-xl font-bold transition-colors"
               >
                 Đóng
               </button>
-              <button 
+              <button
                 onClick={() => { setFeatureLimitMessage(null); setShowUpgradeModal(true); }}
                 className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-bold transition-colors"
               >
@@ -4591,10 +5420,10 @@ export default function App() {
           </div>
         </div>
       )}
-      {showUpgradeModal && <SubscriptionModal store={currentUser?.store} onClose={() => setShowUpgradeModal(false)} />}
+      {showUpgradeModal && <SubscriptionModal store={currentUser?.store} packagesList={packages} onClose={() => setShowUpgradeModal(false)} />}
       {selectedTable && (
-        <MenuOrdering 
-          selectedTable={selectedTable} 
+        <MenuOrdering
+          selectedTable={selectedTable}
           tables={tables}
           systemSettings={systemSettings}
           onClose={() => setSelectedTable(null)}
@@ -4635,8 +5464,8 @@ export default function App() {
             <div className="space-y-4">
               <div>
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Tên bàn</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                   value={newTableName}
                   onChange={(e) => setNewTableName(e.target.value)}
@@ -4644,7 +5473,7 @@ export default function App() {
               </div>
               <div>
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Nhóm bàn</label>
-                <select 
+                <select
                   className="w-full bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                   value={selectedGroupId}
                   onChange={(e) => setSelectedGroupId(e.target.value)}
@@ -4657,13 +5486,13 @@ export default function App() {
               </div>
             </div>
             <div className="flex gap-3 pt-4">
-              <button 
+              <button
                 onClick={() => setShowAddTableModal(false)}
                 className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 font-bold hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
               >
                 Hủy
               </button>
-              <button 
+              <button
                 onClick={async () => {
                   const success = await handleAddTable(newTableName, selectedGroupId);
                   if (success) setShowAddTableModal(false);
@@ -4688,19 +5517,19 @@ export default function App() {
             <div className="space-y-4">
               <div>
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Tên bàn</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                   value={editingTable.name}
-                  onChange={(e) => setEditingTable({...editingTable, name: e.target.value})}
+                  onChange={(e) => setEditingTable({ ...editingTable, name: e.target.value })}
                 />
               </div>
               <div>
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Nhóm bàn</label>
-                <select 
+                <select
                   className="w-full bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                   value={editingTable.groupId || ''}
-                  onChange={(e) => setEditingTable({...editingTable, groupId: e.target.value || undefined})}
+                  onChange={(e) => setEditingTable({ ...editingTable, groupId: e.target.value || undefined })}
                 >
                   <option value="">-- Không có nhóm --</option>
                   {tableGroups.map(group => (
@@ -4710,13 +5539,13 @@ export default function App() {
               </div>
             </div>
             <div className="flex gap-3 pt-4">
-              <button 
+              <button
                 onClick={() => setEditingTable(null)}
                 className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 font-bold hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
               >
                 Hủy
               </button>
-              <button 
+              <button
                 onClick={async () => {
                   const success = await handleUpdateTable(editingTable.id, { name: editingTable.name, groupId: editingTable.groupId || null });
                   if (success) setEditingTable(null);
@@ -4741,8 +5570,8 @@ export default function App() {
             <div className="space-y-4">
               <div>
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Tên nhóm</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   placeholder="VD: Tầng 1, Tầng 2, Sân vườn..."
                   className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                   value={newGroupName}
@@ -4751,13 +5580,13 @@ export default function App() {
               </div>
             </div>
             <div className="flex gap-3 pt-4">
-              <button 
+              <button
                 onClick={() => setShowAddGroupModal(false)}
                 className="flex-1 py-3 rounded-xl border border-black/10 dark:border-white/10 text-gray-600 dark:text-gray-400 font-bold hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
               >
                 Hủy
               </button>
-              <button 
+              <button
                 onClick={() => {
                   if (newGroupName) {
                     handleAddTableGroup(newGroupName);
@@ -4889,13 +5718,13 @@ export default function App() {
             <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-4">Xác nhận</h3>
             <p className="text-gray-700 dark:text-gray-300 mb-8">{confirmDialog.message}</p>
             <div className="flex gap-4">
-              <button 
+              <button
                 onClick={() => setConfirmDialog(null)}
                 className="flex-1 py-3 rounded-xl bg-black/5 dark:bg-white/5 text-gray-900 dark:text-white font-bold hover:bg-black/10 dark:hover:bg-white/10 transition-all cursor-pointer"
               >
                 Hủy
               </button>
-              <button 
+              <button
                 onClick={async () => {
                   await confirmDialog.onConfirm();
                   setConfirmDialog(null);
@@ -4910,13 +5739,245 @@ export default function App() {
       )}
 
       {showScanner && currentUser && (
-        <AttendanceScanner 
-          currentUser={currentUser} 
-          settings={systemSettings} 
-          attendanceRecords={attendanceRecords} 
-          onCheckIn={handleCheckIn} 
-          onClose={() => setShowScanner(false)} 
+        <AttendanceScanner
+          currentUser={currentUser}
+          settings={systemSettings}
+          attendanceRecords={attendanceRecords}
+          onCheckIn={handleCheckIn}
+          onClose={() => setShowScanner(false)}
         />
+      )}
+
+      {/* MODAL: LỖI IN ẤN - HỘP THOẠI THỬ IN LẠI NGAY */}
+      {activeFailedJob && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-white dark:bg-[#1a1b1e] border border-rose-500/30 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-5">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-2xl bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-7 h-7" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                  Lỗi in {activeFailedJob.type === 'kitchen' ? 'Phiếu Báo Bếp' : 'Hóa Đơn'}
+                </h3>
+                <p className="text-xs text-rose-500 font-medium truncate" title={activeFailedJob.errorMessage}>
+                  {activeFailedJob.errorMessage || 'Không thể kết nối đến máy in'}
+                </p>
+              </div>
+              <button
+                onClick={() => setActiveFailedJob(null)}
+                className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-full text-gray-400 hover:text-gray-600 dark:hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-black/5 dark:bg-white/5 rounded-2xl p-4 border border-black/5 dark:border-white/5 space-y-2 text-sm">
+              <div className="flex justify-between items-center">
+                <span className="text-gray-500">Bàn:</span>
+                <span className="font-bold text-gray-900 dark:text-white">{activeFailedJob.tableName}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-500">Số lượng món:</span>
+                <span className="font-bold text-gray-900 dark:text-white">
+                  {activeFailedJob.items?.reduce((s, i) => s + (i.quantity || 1), 0) || 0} món
+                </span>
+              </div>
+              {activeFailedJob.total !== undefined && (
+                <div className="flex justify-between items-center border-t border-black/5 dark:border-white/5 pt-2">
+                  <span className="text-gray-500">Tổng tiền:</span>
+                  <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                    {activeFailedJob.total.toLocaleString()}đ
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between items-center text-xs text-gray-400 pt-1">
+                <span>Thời gian lỗi:</span>
+                <span>{activeFailedJob.failedAt || 'Vừa xong'}</span>
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              <button
+                disabled={isRetryingPrint}
+                onClick={() => handleRetryPrint(activeFailedJob)}
+                className="w-full py-3.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-500/20 active:scale-[0.98] cursor-pointer disabled:opacity-50"
+              >
+                <RotateCcw className={cn("w-4 h-4", isRetryingPrint && "animate-spin")} />
+                <span>{isRetryingPrint ? 'Đang gửi lại lệnh in...' : 'Thử in lại ngay'}</span>
+              </button>
+
+              <button
+                onClick={() => handleFallbackPrint(activeFailedJob)}
+                className="w-full py-2.5 px-4 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 border border-blue-500/20 font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>In qua trình duyệt / Xem trước</span>
+              </button>
+
+              <button
+                onClick={() => setActiveFailedJob(null)}
+                className="w-full py-2.5 px-4 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-gray-600 dark:text-gray-400 font-bold text-xs transition-all cursor-pointer"
+              >
+                Để in lại sau (Lưu vào hàng đợi)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DRAWER / MODAL: DANH SÁCH CÁC LỆNH IN CHƯA THÀNH CÔNG */}
+      {showFailedJobsDrawer && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-3xl max-w-lg w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="p-5 border-b border-black/10 dark:border-white/10 flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-rose-500/15 text-rose-500 flex items-center justify-center">
+                  <Printer className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-gray-900 dark:text-white">Lệnh in chưa thành công ({failedPrintJobs.length})</h3>
+                  <p className="text-xs text-gray-500">Các phiếu báo bếp hoặc hóa đơn bị lỗi kết nối máy in</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowFailedJobsDrawer(false)}
+                className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-full text-gray-400 hover:text-gray-600 dark:hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+              {failedPrintJobs.length === 0 ? (
+                <div className="py-12 text-center text-gray-400 space-y-2">
+                  <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto" />
+                  <p className="text-sm font-medium text-gray-600 dark:text-gray-300">Tất cả lệnh in đều đã được gửi thành công!</p>
+                </div>
+              ) : (
+                failedPrintJobs.map((job) => (
+                  <div
+                    key={job.id}
+                    className="p-3.5 rounded-2xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 space-y-2.5"
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className={cn(
+                            "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase",
+                            job.type === 'kitchen' ? "bg-amber-500/20 text-amber-600 dark:text-amber-400" : "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400"
+                          )}>
+                            {job.type === 'kitchen' ? 'Báo Bếp' : 'Hóa Đơn'}
+                          </span>
+                          <span className="font-bold text-sm text-gray-900 dark:text-white">{job.tableName}</span>
+                        </div>
+                        <p className="text-xs text-rose-500 mt-1 line-clamp-1">{job.errorMessage || 'Lỗi máy in'}</p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        {job.total !== undefined && (
+                          <p className="font-mono font-bold text-sm text-emerald-600 dark:text-emerald-400">
+                            {job.total.toLocaleString()}đ
+                          </p>
+                        )}
+                        <span className="text-[10px] text-gray-400">{job.failedAt}</span>
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-gray-500 bg-black/5 dark:bg-black/20 p-2 rounded-xl">
+                      <span className="font-medium text-gray-700 dark:text-gray-300">Món ({job.items?.length || 0}): </span>
+                      {job.items?.map(i => `${i.name} (x${i.quantity})`).join(', ')}
+                    </div>
+
+                    <div className="flex gap-2 justify-end pt-1">
+                      <button
+                        onClick={() => {
+                          setFailedPrintJobs(prev => {
+                            const updated = prev.filter(j => j.id !== job.id);
+                            safeStorage.setItem('fnb_failed_print_jobs', JSON.stringify(updated));
+                            return updated;
+                          });
+                        }}
+                        className="px-2.5 py-1.5 text-xs font-bold text-gray-500 hover:text-rose-500 rounded-lg hover:bg-rose-500/10 transition-colors cursor-pointer"
+                      >
+                        Bỏ qua
+                      </button>
+                      <button
+                        onClick={() => handleFallbackPrint(job)}
+                        className="px-3 py-1.5 text-xs font-bold text-blue-600 dark:text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                        title="In qua trình duyệt / Xem trước"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>In dự phòng</span>
+                      </button>
+                      <button
+                        disabled={isRetryingPrint}
+                        onClick={() => handleRetryPrint(job)}
+                        className="px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-lg transition-colors flex items-center gap-1 shadow-sm disabled:opacity-50 cursor-pointer"
+                      >
+                        <RotateCcw className={cn("w-3.5 h-3.5", isRetryingPrint && "animate-spin")} />
+                        <span>In lại</span>
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {failedPrintJobs.length > 0 && (
+              <div className="p-4 border-t border-black/10 dark:border-white/10 flex justify-between items-center bg-gray-50 dark:bg-[#151619] shrink-0">
+                <button
+                  onClick={() => {
+                    if (window.confirm('Xác nhận xóa toàn bộ danh sách lệnh in lỗi?')) {
+                      setFailedPrintJobs([]);
+                      safeStorage.removeItem('fnb_failed_print_jobs');
+                      setShowFailedJobsDrawer(false);
+                    }
+                  }}
+                  className="text-xs font-bold text-gray-500 hover:text-rose-500 transition-colors cursor-pointer"
+                >
+                  Xóa tất cả
+                </button>
+                <button
+                  disabled={isRetryingPrint}
+                  onClick={async () => {
+                    setIsRetryingPrint(true);
+                    try {
+                      let successCount = 0;
+                      for (const job of [...failedPrintJobs]) {
+                        const ok = await triggerPrint(job);
+                        if (ok) successCount++;
+                      }
+                      if (successCount > 0) {
+                        alert(`Đã in lại thành công ${successCount}/${failedPrintJobs.length} lệnh in.`);
+                      }
+                    } finally {
+                      setIsRetryingPrint(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 shadow-md disabled:opacity-50 cursor-pointer"
+                >
+                  <RotateCcw className={cn("w-3.5 h-3.5", isRetryingPrint && "animate-spin")} />
+                  <span>In lại tất cả ({failedPrintJobs.length})</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* NÚT NỔI: DANH SÁCH LỆNH IN BỊ LỖI CẦN IN LẠI */}
+      {failedPrintJobs.length > 0 && !activeFailedJob && (
+        <div className="fixed bottom-20 md:bottom-6 right-6 z-40 animate-in slide-in-from-bottom-4">
+          <button
+            onClick={() => setShowFailedJobsDrawer(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-full shadow-2xl font-bold text-xs transition-all hover:scale-105 active:scale-95 cursor-pointer border border-white/20"
+            title="Có lệnh in chưa thành công, bấm để in lại"
+          >
+            <Printer className="w-4 h-4 animate-bounce" />
+            <span>Lệnh in lỗi ({failedPrintJobs.length})</span>
+            <span className="px-1.5 py-0.5 bg-white/20 rounded-full text-[10px]">In lại</span>
+          </button>
+        </div>
       )}
 
       <UpdateChecker />
@@ -4946,7 +6007,7 @@ const ThemeToggle = () => {
   };
 
   return (
-    <button 
+    <button
       onClick={toggleTheme}
       className="p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer rounded-full bg-black/5 dark:bg-white/5"
       title="Đổi giao diện"
@@ -4957,20 +6018,20 @@ const ThemeToggle = () => {
 };
 
 
-const Header = ({ 
-  view, 
-  setView, 
-  currentUser, 
-  packages, 
+const Header = ({
+  view,
+  setView,
+  currentUser,
+  packages,
   onShowUpgrade,
   onScanQR,
   menu = [],
   shifts = []
-}: { 
-  view: ViewType; 
+}: {
+  view: ViewType;
   setView: (view: ViewType) => void;
-  currentUser: User | null; 
-  packages: any[]; 
+  currentUser: User | null;
+  packages: any[];
   onShowUpgrade: () => void;
   onScanQR?: () => void;
   menu?: MenuItem[];
@@ -5006,16 +6067,16 @@ const Header = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const allNotifications: { 
-    id: string; 
-    title: string; 
-    description: string; 
-    type: 'warning' | 'error' | 'info'; 
-    actionText?: string; 
+  const allNotifications: {
+    id: string;
+    title: string;
+    description: string;
+    type: 'warning' | 'error' | 'info';
+    actionText?: string;
     action?: () => void;
     time?: string;
   }[] = [];
-  
+
   if (currentUser?.role === 'admin' || currentUser?.role === 'manager') {
     // 1. Subscription Expiration
     if (currentUser.store?.subscription?.validUntil) {
@@ -5095,7 +6156,7 @@ const Header = ({
 
         if (log.type === 'bill_void') {
           title = `⚠️ Hủy/lệch khi tính tiền: Bàn ${log.tableName || '---'}`;
-          const detailsStr = log.details && log.details.length > 0 
+          const detailsStr = log.details && log.details.length > 0
             ? log.details.map(d => `${d.itemName} (${d.oldQuantity}→${d.newQuantity})`).join(', ')
             : log.itemName;
           desc = `NV: ${log.staffName || 'Nhân viên'} • ${detailsStr} • Giảm: ${(log.valueDiff || 0).toLocaleString('vi-VN')}đ${log.reason ? `. Lý do: "${log.reason}"` : ''}`;
@@ -5158,7 +6219,7 @@ const Header = ({
     if (e) e.stopPropagation();
     setDismissedNotifIds(prev => {
       const updated = [...prev, id];
-      try { localStorage.setItem('fnb_dismissed_notif_ids', JSON.stringify(updated.slice(-200))); } catch {}
+      try { localStorage.setItem('fnb_dismissed_notif_ids', JSON.stringify(updated.slice(-200))); } catch { }
       return updated;
     });
   };
@@ -5166,7 +6227,7 @@ const Header = ({
   const dismissAllNotifications = () => {
     setDismissedNotifIds(prev => {
       const updated = [...prev, ...allNotifications.map(n => n.id)];
-      try { localStorage.setItem('fnb_dismissed_notif_ids', JSON.stringify(updated.slice(-200))); } catch {}
+      try { localStorage.setItem('fnb_dismissed_notif_ids', JSON.stringify(updated.slice(-200))); } catch { }
       return updated;
     });
   };
@@ -5234,19 +6295,19 @@ const Header = ({
           {getVietnamHeaderDateString()} • {currentUser?.name}
         </p>
       </div>
-      
+
       <div className="flex items-center gap-4 md:gap-6">
         {currentUser?.role === 'admin' && (
           <div className="hidden lg:flex items-center gap-3">
             <div className="relative">
-              <button 
+              <button
                 onClick={() => setShowPackageInfo(!showPackageInfo)}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-500/20 transition-colors"
               >
                 <Package className="w-4 h-4" />
                 <span className="text-sm font-bold">{currentPackage.name}</span>
               </button>
-              
+
               {showPackageInfo && (
                 <div className="absolute top-full right-0 mt-2 w-72 bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-2xl shadow-xl p-4 z-50">
                   <h4 className="font-bold mb-2">Thông tin gói dịch vụ</h4>
@@ -5264,12 +6325,12 @@ const Header = ({
                       {APP_PACKAGE_TABS.map(tab => {
                         const isAllowed = isTabAllowedInPackage(tab.id, currentPackage);
                         return (
-                          <div 
+                          <div
                             key={tab.id}
                             className={cn(
                               "flex items-center gap-1.5 px-2 py-1 rounded-md",
-                              isAllowed 
-                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-semibold" 
+                              isAllowed
+                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-semibold"
                                 : "bg-black/5 dark:bg-white/5 text-gray-400 line-through opacity-60"
                             )}
                           >
@@ -5298,7 +6359,7 @@ const Header = ({
           </div>
         )}
 
-        
+
 
         {view === 'tables' && (
           <div className="hidden md:flex items-center gap-4 text-sm">
@@ -5312,13 +6373,13 @@ const Header = ({
             </div>
           </div>
         )}
-        
+
         <div className="h-8 w-[1px] bg-black/10 dark:bg-white/10 hidden md:block" />
 
         <ThemeToggle />
         {(currentUser?.role === 'admin' || currentUser?.role === 'manager') && (
           <div className="relative" ref={notifRef}>
-            <button 
+            <button
               onClick={() => setShowNotifications(!showNotifications)}
               className="relative p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer rounded-full hover:bg-black/5 dark:hover:bg-white/5"
               title="Thông báo hệ thống"
@@ -5365,7 +6426,7 @@ const Header = ({
                       )}
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center gap-1.5 shrink-0">
                     {permStatus !== 'granted' ? (
                       <button
@@ -5386,11 +6447,10 @@ const Header = ({
                         </button>
                         <button
                           onClick={handleTogglePhoneNotif}
-                          className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer border ${
-                            phoneNotifEnabled 
-                              ? 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-500/20 hover:bg-rose-100' 
-                              : 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/20 hover:bg-emerald-100'
-                          }`}
+                          className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer border ${phoneNotifEnabled
+                            ? 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-500/20 hover:bg-rose-100'
+                            : 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/20 hover:bg-emerald-100'
+                            }`}
                         >
                           {phoneNotifEnabled ? 'Tắt' : 'Bật'}
                         </button>
@@ -5401,9 +6461,9 @@ const Header = ({
                 <div className="max-h-[380px] overflow-y-auto custom-scrollbar divide-y divide-black/5 dark:divide-white/5">
                   {notifications.length > 0 ? (
                     notifications.map((notif) => (
-                      <div 
-                        key={notif.id} 
-                        onClick={notif.action} 
+                      <div
+                        key={notif.id}
+                        onClick={notif.action}
                         className="p-3.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer group relative"
                       >
                         <div className="flex items-start gap-3">

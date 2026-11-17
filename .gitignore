@@ -18,4 +18,10 @@ dist_backup_now/
 *_bak/
 android/*_bak/
 android/app/src/main/assets/public_old/
+.vscode/
+android/.idea/
+verification/*.json
+verification/*.diff
+scripts/inspect_*.ts
+scripts/check_*.ts
 

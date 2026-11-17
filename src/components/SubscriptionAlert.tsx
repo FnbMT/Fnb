@@ -19,19 +19,27 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db } from '../lib/firebase';
-import { collection, getDocs, doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
 import { StorePackage, StorePackagePricing } from '../types';
 import { APP_PACKAGE_TABS, isTabAllowedInPackage } from '../utils/packagePermissions';
 import { cn } from '../lib/utils';
 import { Capacitor } from '@capacitor/core';
 
+let cachedSystemConfig: {
+  bankCode?: string;
+  bankAccountNumber?: string;
+  bankAccountName?: string;
+} | null = null;
+
 export const SubscriptionModal = ({ 
   store, 
+  packagesList,
   onClose, 
   isForced, 
   onLogout 
 }: { 
   store: any, 
+  packagesList?: StorePackage[],
   onClose?: () => void, 
   isForced?: boolean, 
   onLogout?: () => void 
@@ -48,7 +56,7 @@ export const SubscriptionModal = ({
     bankCode?: string;
     bankAccountNumber?: string;
     bankAccountName?: string;
-  }>({
+  }>(() => cachedSystemConfig || {
     bankCode: 'MB',
     bankAccountNumber: '',
     bankAccountName: ''
@@ -56,60 +64,86 @@ export const SubscriptionModal = ({
 
   // 1. Fetch system bank config & commercial packages
   useEffect(() => {
+    let isMounted = true;
+
+    const processPackages = (rawList: StorePackage[]) => {
+      const validPkgs = rawList.filter(p => {
+        if (!p || !p.id || p.id === 'trial') return false;
+        const name = (p.name || '').trim();
+        if (!name) return false;
+        return !name.toLowerCase().includes('dùng thử');
+      });
+
+      if (!isMounted) return;
+      setPackages(validPkgs);
+      if (validPkgs.length > 0) {
+        setSelectedPackage(prev => {
+          if (prev && validPkgs.some(p => p.id === prev.id)) return prev;
+          const currentPkgMatch = validPkgs.find(p => p.id === store?.subscription?.packageId);
+          const defaultPkg = currentPkgMatch || validPkgs[0];
+          const initialDuration = defaultPkg.pricing && defaultPkg.pricing.length > 0 
+            ? defaultPkg.pricing[0].durationMonths 
+            : (defaultPkg.durationMonths || 1);
+          setSelectedDuration(initialDuration);
+          return defaultPkg;
+        });
+      }
+    };
+
     const loadData = async () => {
       try {
-        // Load bank config
-        const configDoc = await getDoc(doc(db, 'system', 'config'));
-        if (configDoc.exists()) {
-          setSystemConfig(configDoc.data() as any);
+        // If packagesList is provided from parent (App.tsx), use it immediately (0 extra Firestore reads!)
+        if (packagesList && packagesList.length > 0) {
+          processPackages(packagesList);
+        } else {
+          // Fallback fetch if not passed as prop
+          const snap = await getDocs(collection(db, 'packages'));
+          if (!snap.empty && isMounted) {
+            const fetched = snap.docs.map(d => ({ ...d.data(), id: d.id } as StorePackage));
+            processPackages(fetched);
+          }
         }
 
-        // Load packages (filter out 'trial' as requested: chỉ hiển thị các gói kinh doanh, bỏ gói dùng thử)
-        const snap = await getDocs(collection(db, 'packages'));
-        if (!snap.empty) {
-          const pkgs = snap.docs
-            .map(d => ({ ...d.data(), id: d.id } as StorePackage))
-            .filter(p => p.id !== 'trial' && !p.name.toLowerCase().includes('dùng thử'));
-          setPackages(pkgs);
-          if (pkgs.length > 0) {
-            const currentPkgMatch = pkgs.find(p => p.id === store?.subscription?.packageId);
-            const defaultPkg = currentPkgMatch || pkgs[0];
-            setSelectedPackage(defaultPkg);
-            const initialDuration = defaultPkg.pricing && defaultPkg.pricing.length > 0 ? defaultPkg.pricing[0].durationMonths : 1;
-            setSelectedDuration(initialDuration);
+        // Load bank config once and cache in memory (0 extra reads on subsequent modal opens)
+        if (cachedSystemConfig) {
+          if (isMounted) setSystemConfig(cachedSystemConfig);
+        } else {
+          const configDoc = await getDoc(doc(db, 'system', 'config'));
+          if (configDoc.exists() && isMounted) {
+            const data = configDoc.data() as any;
+            cachedSystemConfig = data;
+            setSystemConfig(data);
           }
         }
       } catch (err) {
         console.error("Error loading subscription data:", err);
       }
     };
+
     loadData();
-  }, [store?.subscription?.packageId]);
+    return () => { isMounted = false; };
+  }, [packagesList, store?.subscription?.packageId]);
 
-  // 2. Realtime listener to detect automatic activation when SePay webhook updates this store
+  // 2. Tự động nhận diện kích hoạt gói qua webhook SePay thông qua store prop được App.tsx cập nhật thời gian thực
+  // App.tsx đã duy trì sẵn onSnapshot cho store; loại bỏ hoàn toàn onSnapshot trùng lặp tại đây để tiết kiệm 100% reads trùng
+  const initialSubRef = React.useRef({
+    status: store?.subscription?.status,
+    validUntil: store?.subscription?.validUntil
+  });
+
   useEffect(() => {
-    if (!store?.id) return;
-    const initialStatus = store?.subscription?.status;
-    const initialValidUntil = store?.subscription?.validUntil;
+    if (!store?.subscription) return;
+    const initial = initialSubRef.current;
+    const currentStatus = store.subscription.status;
+    const currentValidUntil = store.subscription.validUntil;
 
-    const unsub = onSnapshot(doc(db, 'stores', store.id), (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        const updatedSub = data?.subscription;
-        if (updatedSub) {
-          // If status turned active or validUntil was extended
-          if (
-            (initialStatus !== 'active' && updatedSub.status === 'active') ||
-            (initialValidUntil && updatedSub.validUntil && updatedSub.validUntil !== initialValidUntil)
-          ) {
-            setPaymentSuccess(true);
-          }
-        }
-      }
-    });
-
-    return () => unsub();
-  }, [store?.id]);
+    if (
+      (initial.status !== 'active' && currentStatus === 'active') ||
+      (initial.validUntil && currentValidUntil && currentValidUntil !== initial.validUntil)
+    ) {
+      setPaymentSuccess(true);
+    }
+  }, [store?.subscription?.status, store?.subscription?.validUntil]);
 
   const handleCopy = (text: string, field: string) => {
     navigator.clipboard.writeText(text);
@@ -577,7 +611,15 @@ export const SubscriptionModal = ({
   );
 };
 
-export const SubscriptionAlert = ({ store, onLogout }: { store: any, onLogout?: () => void }) => {
+export const SubscriptionAlert = ({ 
+  store, 
+  packagesList, 
+  onLogout 
+}: { 
+  store: any, 
+  packagesList?: StorePackage[], 
+  onLogout?: () => void 
+}) => {
   const [showModal, setShowModal] = useState(false);
   const [daysRemaining, setDaysRemaining] = useState<number | null>(null);
 
@@ -629,6 +671,7 @@ export const SubscriptionAlert = ({ store, onLogout }: { store: any, onLogout?: 
         {(showModal || isExpired) && (
           <SubscriptionModal 
             store={store} 
+            packagesList={packagesList}
             isForced={isExpired} 
             onClose={() => setShowModal(false)} 
             onLogout={onLogout} 

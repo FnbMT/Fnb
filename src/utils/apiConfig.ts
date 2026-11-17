@@ -1,4 +1,4 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 
 /**
  * Lấy URL gốc của backend API.
@@ -65,4 +65,112 @@ export function apiUrl(endpoint: string): string {
   const base = getApiBaseUrl();
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   return `${base}${cleanEndpoint}`;
+}
+
+export interface ApiResponse<T = any> {
+  ok: boolean;
+  status: number;
+  json: () => Promise<T>;
+  text: () => Promise<string>;
+}
+
+/**
+ * Gửi HTTP request an toàn:
+ * - Trên Native (Android/iOS): Ưu tiên dùng CapacitorHttp trực tiếp cho API call này
+ *   (tránh bị chặn bởi CORS/mixed content và không cần bật CapacitorHttp globally làm hỏng Firestore WebChannel)
+ * - Trên Web: Dùng fetch tiêu chuẩn
+ */
+export async function safeApiRequest<T = any>(
+  endpoint: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: any;
+    signal?: AbortSignal;
+  } = {}
+): Promise<ApiResponse<T>> {
+  const url = apiUrl(endpoint);
+
+  if (Capacitor.isNativePlatform()) {
+    try {
+      let data = options.body;
+      if (typeof options.body === 'string') {
+        try {
+          data = JSON.parse(options.body);
+        } catch {
+          data = options.body;
+        }
+      }
+      const requestOptions: any = {
+        url,
+        method: options.method || 'GET',
+        headers: options.headers || {},
+      };
+      if (data !== undefined) {
+        requestOptions.data = data;
+      }
+      const nativeResp = await CapacitorHttp.request(requestOptions);
+
+      return {
+        ok: nativeResp.status >= 200 && nativeResp.status < 300,
+        status: nativeResp.status,
+        json: async () => {
+          if (typeof nativeResp.data === 'object' && nativeResp.data !== null) return nativeResp.data;
+          if (typeof nativeResp.data === 'string' && nativeResp.data.trim().length > 0) {
+            try { return JSON.parse(nativeResp.data); } catch { return {}; }
+          }
+          return {};
+        },
+        text: async () => (typeof nativeResp.data === 'string' ? nativeResp.data : JSON.stringify(nativeResp.data || '')),
+      };
+    } catch (nativeErr) {
+      console.warn('[safeApiRequest] Native HTTP request warning, falling back to fetch:', nativeErr);
+    }
+  }
+
+  try {
+    const res = await fetch(url, {
+      method: options.method || 'GET',
+      headers: options.headers,
+      body: typeof options.body === 'object' && !(options.body instanceof FormData) ? JSON.stringify(options.body) : options.body,
+      signal: options.signal,
+    });
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      json: () => res.json(),
+      text: () => res.text(),
+    };
+  } catch (fetchErr: any) {
+    // Nếu đang chạy trên web localhost và fetch đến server từ xa bị lỗi (CORS / mạng / offline):
+    // Tự động fallback sang endpoint cục bộ cùng origin localhost (Vite proxy / Express server)
+    const isLocalhost = typeof window !== 'undefined' && 
+      (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+    const isRemoteUrl = url.startsWith('http://') || url.startsWith('https://');
+
+    if (isLocalhost && isRemoteUrl) {
+      const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+      try {
+        console.warn(`[safeApiRequest] Fetch đến remote URL (${url}) thất bại, tự động chuyển về server local: ${cleanEndpoint}`);
+        const localRes = await fetch(cleanEndpoint, {
+          method: options.method || 'GET',
+          headers: options.headers,
+          body: typeof options.body === 'object' && !(options.body instanceof FormData) ? JSON.stringify(options.body) : options.body,
+          signal: options.signal,
+        });
+
+        return {
+          ok: localRes.ok,
+          status: localRes.status,
+          json: () => localRes.json(),
+          text: () => localRes.text(),
+        };
+      } catch (localErr) {
+        console.error('[safeApiRequest] Cả remote và local endpoint đều thất bại:', localErr);
+      }
+    }
+
+    throw fetchErr;
+  }
 }

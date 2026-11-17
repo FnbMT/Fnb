@@ -42,27 +42,29 @@ export const MyPayrollView = ({
     
     const records = attendanceRecords.filter(r => 
       r.userId === currentUser.id && 
-      isWithinInterval(parseISO(r.date), { start, end }) &&
-      (r.status === 'present' || r.status === 'half-day' || r.status === 'late')
+      (r.date ? r.date.startsWith(payrollMonth) : true) &&
+      (r.status === 'present' || r.status === 'half-day' || r.status === 'late' || !r.status)
     );
     
     const {presentDays,totalHours,hasOpenSession}=attendanceTotals(records);
 
     let calculatedSalary = 0;
     if (currentUser.salaryType === 'monthly') {
-      calculatedSalary = currentUser.salaryAmount || 0;
+      calculatedSalary = Math.round(currentUser.salaryAmount || 0);
     } else if (currentUser.salaryType === 'daily') {
-      calculatedSalary = (currentUser.salaryAmount || 0) * presentDays;
+      calculatedSalary = Math.round((currentUser.salaryAmount || 0) * presentDays);
     } else if (currentUser.salaryType === 'hourly') {
-      calculatedSalary = (currentUser.salaryAmount || 0) * totalHours;
+      calculatedSalary = Math.round((currentUser.salaryAmount || 0) * totalHours);
     }
 
     if (finalized) {
       return {
         presentDays: finalized.presentDays,
-        calculatedSalary: finalized.calculatedSalary,
-        bonus: finalized.bonus,
-        totalSalary: finalized.totalSalary,
+        totalHours: finalized.totalHours ?? totalHours,
+        calculatedSalary: Math.round(finalized.calculatedSalary),
+        bonus: Math.round(finalized.bonus || 0),
+        deduction: Math.round(finalized.deduction || 0),
+        totalSalary: Math.round(finalized.totalSalary),
         records: records.sort((a, b) => {
           if (a.date === b.date) return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
           return b.date.localeCompare(a.date);
@@ -73,8 +75,10 @@ export const MyPayrollView = ({
 
     return {
       presentDays,
+      totalHours,
       calculatedSalary,
       bonus: 0,
+      deduction: 0,
       totalSalary: calculatedSalary,
       records: records.sort((a, b) => {
         if (a.date === b.date) return new Date(b.checkInTime || 0).getTime() - new Date(a.checkInTime || 0).getTime();
@@ -149,11 +153,17 @@ export const MyPayrollView = ({
             <div className="space-y-4 pt-2">
               <div className="flex justify-between items-center">
                 <span className="text-sm text-gray-600 dark:text-gray-400">Tổng công (ngày)</span>
-                <span className="font-bold text-blue-600 dark:text-blue-400 text-xl">{payrollData?.presentDays || 0}</span>
+                <span className="font-bold text-blue-600 dark:text-blue-400 text-xl">{payrollData?.presentDays || 0} công</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600 dark:text-gray-400">Tổng giờ làm</span>
+                <span className="font-bold text-purple-600 dark:text-purple-400 font-mono text-base">
+                  {payrollData?.totalHours ? `${Math.floor(payrollData.totalHours)}h ${Math.round((payrollData.totalHours % 1) * 60)}p` : '0h'}
+                </span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-sm text-gray-600 dark:text-gray-400">Thưởng</span>
-                <span className="font-bold text-emerald-600 dark:text-emerald-400 font-mono text-lg">+{payrollData?.bonus.toLocaleString() || 0}đ</span>
+                <span className="font-bold text-emerald-600 dark:text-emerald-400 font-mono text-lg">+{Math.round(payrollData?.bonus || 0).toLocaleString('vi-VN')}đ</span>
               </div>
               <div className={cn(
                 "flex justify-between items-center p-4 border rounded-xl",
@@ -200,51 +210,69 @@ export const MyPayrollView = ({
                     <th className="px-3 sm:px-6 py-3 sm:py-4 font-medium whitespace-nowrap">Ngày</th>
                     <th className="px-3 sm:px-6 py-3 sm:py-4 font-medium whitespace-nowrap">Vào ca</th>
                     <th className="px-3 sm:px-6 py-3 sm:py-4 font-medium whitespace-nowrap">Ra ca</th>
+                    <th className="px-3 sm:px-6 py-3 sm:py-4 font-medium text-center whitespace-nowrap">Thời gian làm</th>
                     <th className="px-3 sm:px-6 py-3 sm:py-4 font-medium text-center whitespace-nowrap">Trạng thái</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/5 dark:divide-white/5">
                   {!payrollData?.records?.length ? (
                     <tr>
-                      <td colSpan={4} className="px-3 sm:px-6 py-12 text-center text-gray-500 italic">
+                      <td colSpan={5} className="px-3 sm:px-6 py-12 text-center text-gray-500 italic">
                         Không có dữ liệu chấm công trong tháng này.
                       </td>
                     </tr>
                   ) : (
-                    payrollData.records.map((record) => (
-                      <tr key={record.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                        <td className="px-3 sm:px-6 py-3 sm:py-4 whitespace-nowrap">
-                          <div className="font-bold text-sm text-gray-900 dark:text-white">{format(parseISO(record.date), 'dd/MM/yyyy')}</div>
-                        </td>
-                        <td className="px-3 sm:px-6 py-3 sm:py-4 whitespace-nowrap">
-                          {record.checkInTime ? (
-                            <div className="flex items-center gap-1.5 text-xs sm:text-sm font-medium text-emerald-600 dark:text-emerald-400">
-                              <Clock className="w-3.5 h-3.5" /> {format(parseISO(record.checkInTime), 'HH:mm')}
-                            </div>
-                          ) : <span className="text-gray-600 dark:text-gray-500 text-sm">-</span>}
-                        </td>
-                        <td className="px-3 sm:px-6 py-3 sm:py-4 whitespace-nowrap">
-                          {record.checkOutTime ? (
-                            <div className="flex items-center gap-1.5 text-xs sm:text-sm font-medium text-rose-600 dark:text-rose-400">
-                              <Clock className="w-3.5 h-3.5" /> {format(parseISO(record.checkOutTime), 'HH:mm')}
-                            </div>
-                          ) : <span className="text-gray-600 dark:text-gray-500 text-sm">-</span>}
-                        </td>
-                        <td className="px-3 sm:px-6 py-3 sm:py-4 text-center whitespace-nowrap">
-                          <span className={cn(
-                            "px-2 py-1 rounded-md text-[10px] font-bold uppercase",
-                            record.status === 'present' ? "bg-emerald-500/20 text-emerald-600 dark:text-emerald-500" :
-                            record.status === 'late' ? "bg-amber-500/20 text-amber-600 dark:text-amber-500" :
-                            record.status === 'half-day' ? "bg-blue-500/20 text-blue-600 dark:text-blue-500" :
-                            "bg-rose-500/20 text-rose-600 dark:text-rose-500"
-                          )}>
-                            {record.status === 'present' ? 'Đủ công' :
-                             record.status === 'late' ? 'Đi trễ' :
-                             record.status === 'half-day' ? 'Nửa công' : 'Vắng'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))
+                    payrollData.records.map((record) => {
+                      const inMs = record.checkInTime ? Date.parse(record.checkInTime) : NaN;
+                      const outMs = record.checkOutTime ? Date.parse(record.checkOutTime) : NaN;
+                      const hasValidDuration = Number.isFinite(inMs) && Number.isFinite(outMs) && outMs >= inMs;
+                      const diffMinutes = hasValidDuration ? Math.round((outMs - inMs) / 60000) : 0;
+                      const durHours = Math.floor(diffMinutes / 60);
+                      const durMins = diffMinutes % 60;
+                      const durText = hasValidDuration 
+                        ? (durMins > 0 ? `${durHours}h ${durMins}p` : `${durHours}h`)
+                        : (record.checkInTime && !record.checkOutTime ? 'Đang làm...' : '---');
+
+                      return (
+                        <tr key={record.id} className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                          <td className="px-3 sm:px-6 py-3 sm:py-4 whitespace-nowrap">
+                            <div className="font-bold text-sm text-gray-900 dark:text-white">{format(parseISO(record.date), 'dd/MM/yyyy')}</div>
+                          </td>
+                          <td className="px-3 sm:px-6 py-3 sm:py-4 whitespace-nowrap">
+                            {record.checkInTime ? (
+                              <div className="flex items-center gap-1.5 text-xs sm:text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                                <Clock className="w-3.5 h-3.5" /> {format(parseISO(record.checkInTime), 'HH:mm')}
+                              </div>
+                            ) : <span className="text-gray-600 dark:text-gray-500 text-sm">-</span>}
+                          </td>
+                          <td className="px-3 sm:px-6 py-3 sm:py-4 whitespace-nowrap">
+                            {record.checkOutTime ? (
+                              <div className="flex items-center gap-1.5 text-xs sm:text-sm font-medium text-rose-600 dark:text-rose-400">
+                                <Clock className="w-3.5 h-3.5" /> {format(parseISO(record.checkOutTime), 'HH:mm')}
+                              </div>
+                            ) : <span className="text-gray-600 dark:text-gray-500 text-sm">-</span>}
+                          </td>
+                          <td className="px-3 sm:px-6 py-3 sm:py-4 text-center whitespace-nowrap">
+                            <span className="font-mono font-bold text-xs text-purple-600 dark:text-purple-400 bg-purple-500/10 px-2 py-1 rounded-md">
+                              {durText}
+                            </span>
+                          </td>
+                          <td className="px-3 sm:px-6 py-3 sm:py-4 text-center whitespace-nowrap">
+                            <span className={cn(
+                              "px-2 py-1 rounded-md text-[10px] font-bold uppercase",
+                              record.status === 'present' ? "bg-emerald-500/20 text-emerald-600 dark:text-emerald-500" :
+                              record.status === 'late' ? "bg-amber-500/20 text-amber-600 dark:text-amber-500" :
+                              record.status === 'half-day' ? "bg-blue-500/20 text-blue-600 dark:text-blue-500" :
+                              "bg-rose-500/20 text-rose-600 dark:text-rose-500"
+                            )}>
+                              {record.status === 'present' ? 'Đủ công' :
+                               record.status === 'late' ? 'Đi trễ' :
+                               record.status === 'half-day' ? 'Nửa công' : 'Vắng'}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>

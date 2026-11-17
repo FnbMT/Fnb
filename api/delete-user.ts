@@ -1,8 +1,11 @@
 import type { Request, Response } from 'express';
 import { adminDb, adminAuth } from './_firebaseAdmin.js';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
+import { handleCors } from './_cors.js';
 
 export default async function handler(req: any, res: any) {
+  if (handleCors(req, res)) return;
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -74,6 +77,57 @@ export default async function handler(req: any, res: any) {
     try {
       await adminDb.collection('user_secrets').doc(cleanUserId).delete();
     } catch (secErr) {}
+
+    // Tự động đóng tất cả ca làm việc đang mở của nhân viên bị xóa
+    try {
+      const openShiftsSnap = await adminDb.collection('shifts')
+        .where('staffId', '==', cleanUserId)
+        .where('status', '==', 'open')
+        .get();
+
+      const nowIso = new Date().toISOString();
+      for (const shiftDoc of openShiftsSnap.docs) {
+        const sData = shiftDoc.data() || {};
+        await shiftDoc.ref.update({
+          status: 'closed',
+          endTime: nowIso,
+          endCash: (Number(sData.startCash) || 0) + (Number(sData.totalCash) || 0),
+          discrepancy: 0,
+          discrepancyProcessed: true,
+          autoClosed: true,
+          note: 'Tự động đóng do tài khoản nhân viên đã bị xóa khỏi hệ thống'
+        });
+      }
+    } catch (shiftErr) {
+      console.warn("Lỗi dọn dẹp ca làm việc của nhân viên bị xóa:", shiftErr);
+    }
+
+    // Tự động chốt các lượt chấm công chưa đóng của nhân viên bị xóa
+    try {
+      const openAttSnap = await adminDb.collection('attendance_records')
+        .where('userId', '==', cleanUserId)
+        .get();
+
+      const nowIso = new Date().toISOString();
+      for (const attDoc of openAttSnap.docs) {
+        const aData = attDoc.data() || {};
+        if (aData.checkInTime && !aData.checkOutTime) {
+          await attDoc.ref.update({
+            checkOutTime: nowIso,
+            autoClosed: true,
+            note: 'Tự động đóng lượt chấm công do nhân viên đã bị xóa'
+          });
+        }
+      }
+    } catch (attErr) {
+      console.warn("Lỗi dọn dẹp chấm công của nhân viên bị xóa:", attErr);
+    }
+
+    // Xóa các checkout_locks liên quan đến nhân viên bị xóa
+    try {
+      await adminDb.collection('checkout_locks').doc(`shift_open_${targetStoreId}_${cleanUserId}`).delete().catch(() => {});
+      await adminDb.collection('checkout_locks').doc(`attendance_${targetStoreId}_${cleanUserId}`).delete().catch(() => {});
+    } catch (_) {}
 
     // Thu hồi tức thì phiên đăng nhập & refresh token
     invalidateUserStatusCache(cleanUserId);

@@ -11,7 +11,7 @@ import { OrderItem, AddOnItem, RecipeItem } from "../types";
  * Nếu một topping cũ đã được lưu giá vốn theo suất (hoặc quantity = 0), mặc định lấy quantity = 1.
  */
 export function calculateAddOnCostPerServing(addon: AddOnItem): number {
-  const unitCost = addon.costPrice || 0;
+  const unitCost = Math.max(0, addon.costPrice || 0);
   const qty =
     typeof addon.quantity === "number" && addon.quantity > 0
       ? addon.quantity
@@ -22,16 +22,27 @@ export function calculateAddOnCostPerServing(addon: AddOnItem): number {
 /**
  * Tính tổng giá vốn cho 1 dòng món trong đơn hàng (gồm giá vốn món chính + toàn bộ món kèm theo định lượng):
  * Công thức: (item.costPrice × item.quantity) + [Tổng (unitCost × quantityPerServing × item.quantity)]
+ * Đảm bảo giá vốn không bao giờ âm (kể cả khi dữ liệu cũ trong database bị lỗi số âm)
  */
 export function calculateOrderItemCost(item: OrderItem): number {
   const soldQuantity = Number.isFinite(item.quantity)
     ? Math.max(0, item.quantity)
     : 0;
-  const baseItemCost = (item.costPrice || 0) * soldQuantity;
+  let unitCost = typeof item.costPrice === 'number' && Number.isFinite(item.costPrice) && item.costPrice > 0
+    ? item.costPrice
+    : 0;
+  if (unitCost <= 0 && item.recipe && item.recipe.length > 0) {
+    unitCost = item.recipe.reduce((sum, r) => {
+      const q = typeof r.quantity === 'number' && r.quantity > 0 ? r.quantity : 0;
+      const c = typeof (r as any).costPrice === 'number' && (r as any).costPrice > 0 ? (r as any).costPrice : 0;
+      return sum + q * c;
+    }, 0);
+  }
+  const baseItemCost = Math.max(0, unitCost) * soldQuantity;
   const addOnsCost = (item.selectedAddOns || []).reduce((sum, addon) => {
     return sum + calculateAddOnCostPerServing(addon) * soldQuantity;
   }, 0);
-  return baseItemCost + addOnsCost;
+  return Math.max(0, baseItemCost + addOnsCost);
 }
 
 /**
@@ -39,12 +50,13 @@ export function calculateOrderItemCost(item: OrderItem): number {
  */
 export function calculateInvoiceCost(items: OrderItem[]): number {
   if (!items || !Array.isArray(items)) return 0;
-  return items.reduce((total, item) => total + calculateOrderItemCost(item), 0);
+  return Math.max(0, items.reduce((total, item) => total + calculateOrderItemCost(item), 0));
 }
 
 export interface InvoiceCostSnapshotResult {
   totalCost: number;
   isComplete: boolean;
+  items: OrderItem[];
 }
 
 export type CostSourceItem = {
@@ -53,6 +65,7 @@ export type CostSourceItem = {
   recipe?: RecipeItem[];
   costVerified?: boolean;
   isFreeCost?: boolean;
+  addOns?: AddOnItem[];
 };
 
 /**
@@ -83,6 +96,12 @@ export function calculateInvoiceCostSnapshot(
   items: OrderItem[],
   getCostSource: (itemId: string, itemName?: string) => CostSourceItem | undefined
 ): InvoiceCostSnapshotResult {
+  // Trả snapshot mới; tính/xem báo cáo không được sửa đơn hoặc hóa đơn đầu vào.
+  items = (items || []).map(item => ({
+    ...item,
+    ...(item.recipe ? { recipe: item.recipe.map(recipe => ({ ...recipe })) } : {}),
+    ...(item.selectedAddOns ? { selectedAddOns: item.selectedAddOns.map(addon => ({ ...addon })) } : {}),
+  }));
   let totalCost = 0;
   let isComplete = true;
 
@@ -118,7 +137,7 @@ export function calculateInvoiceCostSnapshot(
         const ingVerified = Boolean((r as any).costVerified || ingSource?.costVerified);
         
         // Nguyên liệu trong công thức bắt buộc phải có giá vốn > 0 hoặc đã xác minh
-        const ingDeclared = (typeof ingUnitCost === "number" && Number.isFinite(ingUnitCost) && ingUnitCost > 0) || ingVerified;
+        const ingDeclared = typeof ingUnitCost === "number" && Number.isFinite(ingUnitCost) && ingUnitCost >= 0 && (ingUnitCost > 0 || ingVerified);
         if (!ingDeclared || !Number.isFinite(r.quantity) || r.quantity <= 0) {
           recipeComplete = false;
         } else {
@@ -127,38 +146,58 @@ export function calculateInvoiceCostSnapshot(
       }
 
       if (!recipeComplete) {
-        // Nếu công thức chưa đủ dữ liệu, thử dùng giá vốn trực tiếp nếu có
-        const fallbackCost = (typeof item.costPrice === "number" && item.costPrice > 0)
-          ? item.costPrice
-          : (typeof source?.costPrice === "number" && source.costPrice > 0)
-            ? source.costPrice
+        // Nếu công thức chưa đủ dữ liệu, ưu tiên lấy giá vốn trực tiếp từ máy chủ trước
+        const fallbackCost = (typeof source?.costPrice === "number" && source.costPrice > 0)
+          ? source.costPrice
+          : (typeof item.costPrice === "number" && item.costPrice > 0)
+            ? item.costPrice
             : 0;
         if (fallbackCost > 0) {
           totalCost += fallbackCost * quantity;
+          (item as any).costPrice = fallbackCost;
         }
+        (item as any).costVerified = false;
         isComplete = false;
       } else {
         totalCost += itemRecipeCost * quantity;
+        (item as any).costPrice = itemRecipeCost;
+        (item as any).costVerified = true;
       }
     } else {
       // 2. Không có công thức định lượng: dùng giá vốn trực tiếp (direct costPrice)
-      // NGUYÊN TẮC: Ưu tiên giá vốn đã xác minh tại thời điểm bán (item.costPrice > 0) nếu có
+      // NGUYÊN TẮC: Ưu tiên giá vốn mới nhất đã xác minh từ máy chủ (source.costPrice) đọc trong transaction
       let unitCost: number | undefined = undefined;
-      if (typeof item.costPrice === "number" && Number.isFinite(item.costPrice) && item.costPrice > 0) {
-        unitCost = item.costPrice;
-      } else if (typeof source?.costPrice === "number" && Number.isFinite(source.costPrice) && source.costPrice > 0) {
+      let isUnitVerified = false;
+
+      if (typeof source?.costPrice === "number" && Number.isFinite(source.costPrice) && source.costPrice > 0) {
+        // Ưu tiên 1: Giá vốn thực tế từ máy chủ (đã cập nhật sau các lần nhập kho)
         unitCost = source.costPrice;
-      } else if (item.costPrice === 0 || source?.costPrice === 0) {
+        isUnitVerified = true;
+      } else if (source?.isFreeCost || source?.costVerified) {
+        unitCost = source.costPrice ?? 0;
+        isUnitVerified = typeof unitCost === 'number' && Number.isFinite(unitCost) && unitCost >= 0;
+      } else if (typeof item.costPrice === "number" && Number.isFinite(item.costPrice) && item.costPrice > 0) {
+        // Chỉ dùng giá vốn trên giỏ hàng nếu máy chủ không có, nhưng đánh dấu CHƯA XÁC MINH từ máy chủ
+        unitCost = item.costPrice;
+        isUnitVerified = false;
+      } else if (source?.costPrice === 0) {
         unitCost = 0;
+        isUnitVerified = isCostExplicitlyVerified(0, itemSellingPrice, isItemExplicitlyVerified);
+      } else if (item.costPrice === 0) {
+        unitCost = 0;
+        isUnitVerified = false;
       }
 
-      const isVerified = isCostExplicitlyVerified(unitCost, itemSellingPrice, isItemExplicitlyVerified);
-      if (!isVerified) {
+      if (!isUnitVerified) {
         isComplete = false;
       }
       if (typeof unitCost === "number" && unitCost > 0) {
         totalCost += unitCost * quantity;
       }
+
+      // Khóa giá vốn xác minh vào từng dòng món trong hóa đơn
+      (item as any).costPrice = unitCost ?? 0;
+      (item as any).costVerified = isUnitVerified;
     }
 
     // 3. Xử lý toppings / món ăn kèm (selectedAddOns)
@@ -174,19 +213,23 @@ export function calculateInvoiceCostSnapshot(
 
       if (addon.inventoryItemId) {
         const addOnSource = getCostSource(addon.inventoryItemId, addon.name);
-        const addOnUnitCost = (typeof addon.costPrice === "number" && addon.costPrice > 0)
-          ? addon.costPrice
-          : (typeof addOnSource?.costPrice === "number" && addOnSource.costPrice > 0)
-            ? addOnSource.costPrice
-            : (addon.costPrice === 0 || addOnSource?.costPrice === 0)
-              ? 0
-              : undefined;
+        let addOnUnitCost: number | undefined = undefined;
+        let isAddonVerified = false;
 
-        const isAddonVerified = isCostExplicitlyVerified(
-          addOnUnitCost,
-          addonSellingPrice,
-          addonExplicitlyVerified || Boolean(addOnSource?.costVerified)
-        );
+        // Ưu tiên giá vốn nguyên liệu topping đọc từ máy chủ trong transaction
+        if (typeof addOnSource?.costPrice === "number" && Number.isFinite(addOnSource.costPrice) && addOnSource.costPrice > 0) {
+          addOnUnitCost = addOnSource.costPrice;
+          isAddonVerified = true;
+        } else if (addOnSource?.isFreeCost || addOnSource?.costVerified) {
+          addOnUnitCost = addOnSource.costPrice ?? 0;
+          isAddonVerified = typeof addOnUnitCost === 'number' && Number.isFinite(addOnUnitCost) && addOnUnitCost >= 0;
+        } else if (typeof addon.costPrice === "number" && Number.isFinite(addon.costPrice) && addon.costPrice > 0) {
+          addOnUnitCost = addon.costPrice;
+          isAddonVerified = false;
+        } else if (addOnSource?.costPrice === 0) {
+          addOnUnitCost = 0;
+          isAddonVerified = isCostExplicitlyVerified(0, addonSellingPrice, addonExplicitlyVerified);
+        }
 
         if (!isAddonVerified) {
           isComplete = false;
@@ -194,26 +237,39 @@ export function calculateInvoiceCostSnapshot(
         if (typeof addOnUnitCost === "number" && addOnUnitCost > 0) {
           totalCost += addOnUnitCost * perServing * quantity;
         }
+        (addon as any).costPrice = addOnUnitCost ?? 0;
+        (addon as any).costVerified = isAddonVerified;
       } else {
-        // Topping không gắn mã kho:
-        // Thử tìm nguồn theo tên món trong hệ thống
-        const addOnSource = getCostSource('', addon.name);
-        let addOnUnitCost = (typeof addon.costPrice === "number" && addon.costPrice > 0)
-          ? addon.costPrice
-          : (typeof addOnSource?.costPrice === "number" && addOnSource.costPrice > 0)
-            ? addOnSource.costPrice
-            : undefined;
+        // Topping không gắn mã kho: Thử tìm nguồn theo tên món trong hệ thống
+        const addOnSource = source?.addOns?.find(configured => configured.id === addon.id) as CostSourceItem | undefined
+          || getCostSource('', addon.name);
+        let addOnUnitCost: number | undefined = undefined;
+        let isAddonVerified = false;
+
+        if (typeof addOnSource?.costPrice === "number" && Number.isFinite(addOnSource.costPrice) && addOnSource.costPrice > 0) {
+          addOnUnitCost = addOnSource.costPrice;
+          isAddonVerified = true;
+        } else if (addOnSource?.isFreeCost || addOnSource?.costVerified) {
+          addOnUnitCost = addOnSource.costPrice ?? 0;
+          isAddonVerified = typeof addOnUnitCost === 'number' && Number.isFinite(addOnUnitCost) && addOnUnitCost >= 0;
+        } else if (typeof addon.costPrice === "number" && Number.isFinite(addon.costPrice) && addon.costPrice > 0) {
+          addOnUnitCost = addon.costPrice;
+          isAddonVerified = false;
+        }
 
         if (typeof addOnUnitCost === "number" && addOnUnitCost > 0) {
           totalCost += addOnUnitCost * perServing * quantity;
         } else if (addonSellingPrice > 0 && !addonExplicitlyVerified && !addOnSource?.costVerified) {
-          // Bắt buộc đánh dấu thiếu giá vốn đối với topping có thu tiền khách mà chưa có giá vốn
+          // Bắt buộc đánh dấu thiếu giá vốn đối với topping có thu tiền khách mà chưa có nguồn xác minh từ máy chủ
           isComplete = false;
         }
+        if (!isAddonVerified && addonSellingPrice > 0) isComplete = false;
+        (addon as any).costPrice = addOnUnitCost ?? 0;
+        (addon as any).costVerified = isAddonVerified;
       }
     }
   }
 
-  return { totalCost: Math.round(totalCost), isComplete };
+  return { totalCost: Math.max(0, Math.round(totalCost)), isComplete, items };
 }
 

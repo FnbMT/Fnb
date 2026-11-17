@@ -74,16 +74,18 @@ export async function getUserAccountStatus(userId: string, forceFresh = false): 
     }
 
     const userData = userDoc.data() || {};
-    if (userData.isDeleted || userData.status === 'deleted' || userData.isActive === false) {
+    if (userData.isDeleted || (userData.status && userData.status !== 'active') || userData.isActive === false) {
       userStatusCache.set(userId, { exists: false, tokenVersion: 0, role: '', storeId: '', cachedAt: Date.now() });
       return null;
     }
 
     const secretData = (secretDoc && secretDoc.exists) ? (secretDoc.data() || {}) : {};
 
-    const tokenVersion = Number(secretData.tokenVersion || userData.tokenVersion || 1);
-    const role = String(secretData.role || userData.role || 'order');
-    const storeId = String(secretData.storeId || userData.storeId || '');
+    const tokenVersion = Number(userData.tokenVersion ?? secretData.tokenVersion ?? 1);
+    if (!Number.isSafeInteger(tokenVersion) || tokenVersion < 1
+      || (secretData.tokenVersion != null && Number(secretData.tokenVersion) !== tokenVersion)) return null;
+    const role = String(userData.role || '');
+    const storeId = String(userData.storeId || '');
 
     const status: UserAccountStatus = {
       exists: true,
@@ -259,10 +261,12 @@ export async function verifyAuthToken(token: string, options?: { forceFresh?: bo
   }
 
   const callerVersion = Number(unverifiedCaller.tokenVersion || 1);
-  if (callerVersion < accountStatus.tokenVersion) {
-    console.warn(`[Auth Revocation] Phiên đăng nhập của tài khoản ${unverifiedCaller.uid} đã bị thu hồi (token v${callerVersion} < server v${accountStatus.tokenVersion}).`);
+  if (callerVersion !== accountStatus.tokenVersion) {
+    console.warn(`[Auth Revocation] Phiên đăng nhập của tài khoản ${unverifiedCaller.uid} đã bị thu hồi (token v${callerVersion}, máy chủ v${accountStatus.tokenVersion}).`);
     return null;
   }
+
+  if (!accountStatus.storeId || unverifiedCaller.storeId !== accountStatus.storeId) return null;
 
   if (accountStatus.role && unverifiedCaller.role !== accountStatus.role) {
     console.warn(`[Auth Revocation] Vai trò của tài khoản ${unverifiedCaller.uid} đã thay đổi (${unverifiedCaller.role} -> ${accountStatus.role}). Thu hồi token cũ.`);

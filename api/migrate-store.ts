@@ -1,3 +1,4 @@
+import { handleCors } from './_cors.js';
 import type { Request, Response } from 'express';
 import { getAuthenticatedCaller } from './_token.js';
 import { 
@@ -10,6 +11,7 @@ import {
 import { backfillStoreDailyStats } from '../scripts/backfill_daily_stats.js';
 
 export default async function handler(req: any, res: any) {
+  if (handleCors(req, res)) return;
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -89,6 +91,8 @@ export default async function handler(req: any, res: any) {
       backfill: backfillResult,
       message: dryRun 
         ? 'Chạy thử nghiệm (dry-run) thành công. Không có dữ liệu nào bị ghi đè.'
+        : backfillResult?.skippedUnreconciledDays?.length
+          ? `Đã chốt ${backfillResult.updatedStatsDocs} ngày. ${backfillResult.skippedUnreconciledDays.length} ngày có chứng từ chưa khớp cần kiểm tra. ${backfillResult.skippedChangedDays.length} ngày có thay đổi đồng thời cần chạy lại.`
         : backfillResult?.skippedChangedDays?.length
           ? `Đã bỏ qua ${backfillResult.skippedChangedDays.length} ngày có chứng từ thay đổi trong lúc đối soát. Vui lòng chạy lại các ngày đó.`
           : 'Đã hoàn tất chuẩn hóa và đối soát các ngày được chọn. Giá vốn ước tính vẫn được giữ nhãn ước tính.'

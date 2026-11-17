@@ -22,6 +22,7 @@ export interface User {
   shifts?: { start: string, end: string }[];
   requiresAttendance?: boolean;
   isActive?: boolean;
+  tokenVersion?: number;
   status?: string;
   isDeleted?: boolean;
 }
@@ -32,6 +33,7 @@ export interface PayrollRecord {
   storeId: string;
   month: string;
   presentDays: number;
+  totalHours?: number;
   baseSalaryAmount: number;
   baseSalaryType: 'hourly' | 'daily' | 'monthly';
   calculatedSalary: number;
@@ -42,6 +44,9 @@ export interface PayrollRecord {
   totalSalary: number;
   status: 'finalized';
   finalizedAt?: string;
+  attendanceSnapshotHash?: string;
+  attendanceRecordIds?: string[];
+  verifiedAt?: string;
 }
 
 export interface Store {
@@ -80,6 +85,9 @@ export interface DailyStats {
   expenseRent?: number; // Chi thuê mặt bằng / địa điểm
   expenseOther?: number; // Chi phí vận hành khác (điện, nước, dịch vụ...)
   cashCount?: number;
+  salesCashIncome?: number; // Phiếu thu bán hàng tiền mặt thực tế
+  salesTransferIncome?: number; // Phiếu thu bán hàng chuyển khoản thực tế
+  receiptReconciliationVersion?: number; // Có đối chiếu hóa đơn với từng phiếu thu
   version?: number; // Schema version (VD: 2)
   updatedAt?: string;
   sourceRevision?: number;
@@ -321,6 +329,7 @@ export interface CashTransaction {
   paymentMethod: 'cash' | 'transfer';
   category: string;
   note?: string;
+  invoiceId?: string;
   staffId: string;
   staffName: string;
   storeId: string;
@@ -360,6 +369,27 @@ export interface PrintTemplateSettings {
   showNote: boolean;
   showCustomerInfo?: boolean;
   fontSize: 'small' | 'medium' | 'large';
+}
+
+export interface PrintJobData {
+  id?: string;
+  type: 'bill' | 'kitchen';
+  tableName: string;
+  items: OrderItem[];
+  total?: number;
+  subtotal?: number;
+  discount?: number;
+  vat?: number;
+  staffName: string;
+  date?: string;
+  timeIn?: string;
+  timeOut?: string;
+  note?: string;
+  customerName?: string;
+  customerType?: string;
+  errorMessage?: string;
+  failedAt?: string;
+  retryCount?: number;
 }
 
 export interface SystemSettings {

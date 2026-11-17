@@ -4,8 +4,11 @@ import { adminDb, adminAuth, safeDeleteSentinel } from './_firebaseAdmin.js';
 import { hashPassword, encryptAes } from './_crypto.js';
 import { getAuthenticatedCaller, invalidateUserStatusCache } from './_token.js';
 import { STORE_STAFF_ROLES, ALL_USER_ROLES, isValidUserRole, isStoreStaffRole, UserRole } from './_roles.js';
+import { handleCors } from './_cors.js';
 
 export default async function handler(req: any, res: any) {
+  if (handleCors(req, res)) return;
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -122,20 +125,15 @@ export default async function handler(req: any, res: any) {
         shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
         requiresAttendance: Boolean(user.requiresAttendance),
         tokenVersion: 1,
-        password: cleanPassword,
         isDeleted: false,
         status: 'active',
         createdAt: new Date().toISOString()
       };
 
-      let newUserId: string;
-      if (existingDoc && (existingData?.isDeleted || existingData?.status === 'deleted')) {
-        newUserId = existingDoc.id;
-        await adminDb.collection('users').doc(newUserId).set(userDocData, { merge: true });
-      } else {
-        const newUserDocRef = await adminDb.collection('users').add(userDocData);
-        newUserId = newUserDocRef.id;
-      }
+      const restoring = existingDoc && (existingData?.isDeleted || existingData?.status === 'deleted');
+      const newUserRef = restoring ? adminDb.collection('users').doc(existingDoc.id) : adminDb.collection('users').doc();
+      const newUserId = newUserRef.id;
+      if (restoring) userDocData.tokenVersion = (Number(existingData?.tokenVersion) || 1) + 1;
 
       // 2. Lưu thông tin băm vào vùng tối mật user_secrets
       const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
@@ -145,7 +143,7 @@ export default async function handler(req: any, res: any) {
         role: role,
         passwordHash,
         clientHash,
-        tokenVersion: 1,
+        tokenVersion: userDocData.tokenVersion,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
@@ -155,25 +153,13 @@ export default async function handler(req: any, res: any) {
       }
 
       try {
-        await adminDb.collection('user_secrets').doc(newUserId).set(secretPayload);
-      try {
-        await adminDb.collection('system').doc(`user_secret_${newUserId}`).set({
-          userId: newUserId,
-          storeId: targetStoreId,
-          role: role,
-          clientHash,
-          updatedAt: new Date().toISOString()
-        }, { merge: true });
-      } catch (_) {}
-
-      } catch (secErr) {
-        // NGUYÊN TẮC AN TOÀN: Nếu lưu mật khẩu thất bại, lập tức rollback xóa user vừa tạo
-        try {
-          await adminDb.collection('users').doc(newUserId).delete();
-        } catch (_) {}
-        return res.status(500).json({
-          error: 'Lỗi hệ thống: Không thể lưu trữ thông tin xác thực an toàn. Tạo tài khoản thất bại.'
-        });
+        const batch = adminDb.batch();
+        if (restoring) batch.set(newUserRef, { ...userDocData, password: safeDeleteSentinel() }, { merge: true });
+        else batch.set(newUserRef, userDocData);
+        batch.set(adminDb.collection('user_secrets').doc(newUserId), secretPayload);
+        await batch.commit();
+      } catch (error) {
+        return res.status(500).json({ error: 'Không thể lưu đồng thời tài khoản và thông tin xác thực.' });
       }
 
       return res.status(200).json({
@@ -276,8 +262,7 @@ export default async function handler(req: any, res: any) {
       if (passwordChanged) {
         const cleanPassword = String(user.password).trim();
         secretPayload.passwordHash = hashPassword(cleanPassword);
-        updates.password = cleanPassword;
-        try { await adminDb.collection('system').doc(`user_secret_${userId}`).set({ userId, storeId: targetStoreId, role, clientHash: secretPayload.clientHash, updatedAt: new Date().toISOString() }, { merge: true }); } catch (_) {}
+        updates.password = safeDeleteSentinel();
         secretPayload.clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
         secretPayload.passwordChangedAt = new Date().toISOString();
         if (role === 'admin') {
@@ -288,7 +273,10 @@ export default async function handler(req: any, res: any) {
       }
 
       try {
-        await adminDb.collection('user_secrets').doc(userId).set(secretPayload, { merge: true });
+        const batch = adminDb.batch();
+        batch.set(adminDb.collection('user_secrets').doc(userId), secretPayload, { merge: true });
+        batch.update(userDocRef, updates);
+        await batch.commit();
       } catch (secErr) {
         return res.status(500).json({
           error: 'Lỗi hệ thống: Không thể cập nhật thông tin xác thực an toàn vào vùng bảo mật.'
@@ -297,9 +285,9 @@ export default async function handler(req: any, res: any) {
 
       invalidateUserStatusCache(userId);
       await adminAuth.revokeRefreshTokens(userId);
+    } else {
+      await userDocRef.update(updates);
     }
-
-    await userDocRef.update(updates);
 
     return res.status(200).json({
       success: true,
