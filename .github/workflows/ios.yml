@@ -434,10 +434,19 @@ jobs:
 
           echo "Bắt đầu tải lên TestFlight: $IPA_PATH"
 
+          UPLOAD_LOG="$RUNNER_TEMP/altool_upload.log"
+          set +e
           xcrun altool \
             --upload-app \
             -f "$IPA_PATH" \
             -t ios \
             --apiKey "$API_KEY_ID" \
             --apiIssuer "$API_ISSUER_ID" \
-            --show-progress
+            --show-progress 2>&1 | tee "$UPLOAD_LOG"
+          UPLOAD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ $UPLOAD_STATUS -ne 0 ] || grep -q "ERROR:" "$UPLOAD_LOG"; then
+            echo "::error::Tải lên App Store Connect / TestFlight thất bại! Vui lòng kiểm tra lỗi chi tiết từ Apple ở log phía trên."
+            exit 1
+          fi
