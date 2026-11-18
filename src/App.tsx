@@ -3308,8 +3308,8 @@ export default function App() {
   // Chỉ tải thêm phiếu thu chi khi người dùng thực sự mở màn Tổng kết (tiết kiệm reads phiếu thu chi cho màn Doanh thu).
   const needsTodayInvoices = ['reports', 'summary', 'tax_report'].includes(view);
   const needsTodayCash = view === 'summary';
-  const todayFinancialReady = invoicesReady
-    && (!needsTodayCash || cashTransactionsReady)
+  const todayFinancialReady = (invoicesReady || invoices.length > 0)
+    && (!needsTodayCash || cashTransactionsReady || cashTransactions.length > 0 || invoicesReady)
     && financialSourceKey === JSON.stringify([currentUser?.storeId, currentBusinessDate]);
 
   // 1. Listener hóa đơn hôm nay: phục vụ Doanh thu (reports), Bán hàng (tax_report), Tổng kết (summary)

@@ -434,7 +434,7 @@ export const SummaryView = ({
   const exportLock = useRef(false);
   const pageLocks = useRef(new Set<string>());
   const detailNeeds = { invoices: filterType === 'day' || needsInv, cash: filterType === 'day' || needsCash,
-    todayReady: !usesParentToday || isInvoicesReady };
+    todayReady: !usesParentToday || isInvoicesReady || (invoices && invoices.length > 0) };
   const detailNeedsRef = useRef(detailNeeds);
   detailNeedsRef.current = detailNeeds;
   const detailController = useRef<{ ensure: (invoices: boolean, cash: boolean) => void } | null>(null);
@@ -811,8 +811,11 @@ export const SummaryView = ({
       const reqInvoices = typeof detailNeedsRef !== 'undefined' && detailNeedsRef ? detailNeedsRef.current.invoices : (typeof detailNeeds !== 'undefined' ? detailNeeds.invoices : (filterType === 'day' || activeTab === 'sales' || activeTab === 'items' || activeTab === 'financial'));
       const reqCash = typeof detailNeedsRef !== 'undefined' && detailNeedsRef ? detailNeedsRef.current.cash : (typeof detailNeeds !== 'undefined' ? detailNeeds.cash : (filterType === 'day' || activeTab === 'cash' || activeTab === 'financial'));
       const reqTodayReady = typeof detailNeedsRef !== 'undefined' && detailNeedsRef ? detailNeedsRef.current.todayReady : (typeof detailNeeds !== 'undefined' ? detailNeeds.todayReady : true);
-      setIsLoadingHistorical((reqInvoices && !sources.invoices.confirmed)
-        || (reqCash && !sources.cash.confirmed) || !reqTodayReady);
+      const isViewingTodayOnly = filterType === 'day' && dateFilter === todayVietnam;
+      setIsLoadingHistorical(!isViewingTodayOnly && (
+        (reqInvoices && !sources.invoices.confirmed)
+        || (reqCash && !sources.cash.confirmed) || !reqTodayReady
+      ));
     };
     const fail = (kind: 'invoices' | 'cash', error: Error) => {
       if (!current()) return;
@@ -1286,7 +1289,10 @@ export const SummaryView = ({
   const sourceCoverage = useMemo(() => {
     const invoiceDays = new Set<string>(), cashDays = new Set<string>();
     for (const day of expectedReportDates) {
-      if (day === todayVietnam && isInvoicesReady) { invoiceDays.add(day); cashDays.add(day); }
+      if (day === todayVietnam && (todaySourceEnabled || isInvoicesReady || periodInvoices.length > 0 || (invoices && invoices.length > 0))) {
+        invoiceDays.add(day);
+        cashDays.add(day);
+      }
       if (rawScope.periodKey === periodKey) {
         if (rawScope.invoicesConfirmed && day >= rawScope.invoicesStartDay && day <= rawScope.invoicesEndDay) invoiceDays.add(day);
         if (rawScope.cashConfirmed && day >= rawScope.cashStartDay && day <= rawScope.cashEndDay) cashDays.add(day);
@@ -1297,7 +1303,7 @@ export const SummaryView = ({
       supplemental.cashDays.forEach(day => cashDays.add(day));
     }
     return { invoiceDays, cashDays };
-  }, [expectedReportDates, todayVietnam, isInvoicesReady, rawScope, periodKey, supplemental]);
+  }, [expectedReportDates, todayVietnam, isInvoicesReady, rawScope, periodKey, supplemental, todaySourceEnabled, periodInvoices.length, invoices]);
   const rawReport = useMemo(() => aggregateReportDays(currentUser?.storeId || '', expectedReportDates, periodInvoices, sourcePeriodCash, sourceCoverage),
     [currentUser?.storeId, expectedReportDates, periodInvoices, sourcePeriodCash, sourceCoverage]);
   const sourceMismatch = [...rawReport.receiptIssues].map(([day, issue]) => `${day} · ${issue}`).join('\n');
@@ -1640,8 +1646,12 @@ export const SummaryView = ({
   };
 
   const invoicesSum = periodInvoices.reduce((sum, inv) => sum + inv.total, 0);
-  const totalSales = statsAggregates ? statsAggregates.totalRevenue : invoicesSum;
-  const totalInvoicesCount = statsAggregates ? statsAggregates.invoiceCount : periodInvoices.length;
+  const totalSales = (statsAggregates && statsAggregates.totalRevenue > 0)
+    ? statsAggregates.totalRevenue
+    : (invoicesSum > 0 ? invoicesSum : (statsAggregates ? statsAggregates.totalRevenue : invoicesSum));
+  const totalInvoicesCount = (statsAggregates && statsAggregates.invoiceCount > 0)
+    ? statsAggregates.invoiceCount
+    : (periodInvoices.length > 0 ? periodInvoices.length : (statsAggregates ? statsAggregates.invoiceCount : periodInvoices.length));
 
   const sampleSales = periodInvoices.reduce((sum, inv) => sum + inv.total, 0);
   const sampleCost = periodInvoices.reduce((sum, inv) => {
