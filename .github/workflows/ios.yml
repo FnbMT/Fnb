@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "App Marketing Version (e.g. 1.0.3)"
+        description: "App Marketing Version (e.g. 1.0.4)"
         required: false
-        default: "1.0.3"
+        default: "1.0.4"
 
 # Tự động hủy build cũ nếu có push mới để tránh nghẽn hàng đợi runner macOS
 concurrency:
@@ -280,13 +280,13 @@ jobs:
 
           BUILD_NUM=$(date "+%Y%m%d%H%M")
 
-          # Xác định version: ưu tiên input workflow -> package.json -> fallback 1.0.3
+          # Xác định version: ưu tiên input workflow -> package.json -> fallback 1.0.4
           APP_VERSION="${{ inputs.version }}"
           if [ -z "$APP_VERSION" ]; then
-            APP_VERSION=$(node -p "require('../../package.json').version" 2>/dev/null || echo "1.0.3")
+            APP_VERSION=$(node -p "require('../../package.json').version" 2>/dev/null || echo "1.0.4")
           fi
           if [ "$APP_VERSION" = "0.0.0" ] || [ -z "$APP_VERSION" ]; then
-            APP_VERSION="1.0.3"
+            APP_VERSION="1.0.4"
           fi
 
           echo "Setting Marketing Version to: $APP_VERSION (Build: $BUILD_NUM)"

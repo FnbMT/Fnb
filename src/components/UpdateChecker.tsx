@@ -6,7 +6,7 @@ import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 
 // Fallback version if native runtime info is unavailable (e.g. dev/web)
-export const CURRENT_LOCAL_VERSION = '1.0.3';
+export const CURRENT_LOCAL_VERSION = '1.0.4';
 
 export interface VersionInfo {
   version: string;

@@ -3,6 +3,7 @@ import { Package, Plus, Search, AlertTriangle, ArrowDownToLine, ArrowUpFromLine,
 import { MenuItem, InventoryAudit, AuditItem, StockCardEntry, User } from '../types';
 import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
+import { QuantityInput } from './QuantityInput';
 import { format } from 'date-fns';
 import { operationId } from '../utils/dataIntegrity';
 import { getVietnamBusinessDate, getVietnamDayBoundariesIso } from '../utils/firestoreDateHelper';
@@ -443,13 +444,11 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                     {formatStock(item.stock)}
                   </td>
                   <td className="px-4 py-3 md:px-6 md:py-4">
-                    <input 
-                      type="number" 
-                      step="0.001"
+                    <QuantityInput 
                       className="w-full bg-gray-100 dark:bg-black/20 border border-black/10 dark:border-white/10 rounded-lg py-2 px-3 text-center text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                       value={auditItems[item.id] ?? ''}
                       placeholder={formatStock(item.stock)}
-                      onChange={(e) => setAuditItems({...auditItems, [item.id]: e.target.value === '' ? item.stock : Number(e.target.value)})}
+                      onChange={(val) => setAuditItems({...auditItems, [item.id]: val})}
                     />
                   </td>
                   <td className="px-4 py-3 md:px-6 md:py-4 text-right font-mono font-bold">
@@ -792,12 +791,10 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
               </div>
               <div>
                 <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Số lượng nhập <span className="text-rose-600 dark:text-rose-500">*</span></label>
-                <input 
-                  type="number" 
-                  step="0.001"
+                <QuantityInput 
                   className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                   value={importData.quantity}
-                  onChange={(e) => setImportData({...importData, quantity: Number(e.target.value)})}
+                  onChange={(val) => setImportData({...importData, quantity: val})}
                 />
               </div>
               <div>
@@ -923,11 +920,10 @@ export const InventoryView = ({ menu, onImportStock, onAddItem, onUpdateItem, on
                 </div>
                 <div>
                   <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Cảnh báo khi dưới <span className="text-rose-600 dark:text-rose-500">*</span></label>
-                  <input 
-                    type="number" 
+                  <QuantityInput 
                     className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl py-3 px-4 text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                     value={newItem.minStock}
-                    onChange={(e) => setNewItem({...newItem, minStock: Number(e.target.value)})}
+                    onChange={(val) => setNewItem({...newItem, minStock: val})}
                   />
                 </div>
               </div>

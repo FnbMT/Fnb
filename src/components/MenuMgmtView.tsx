@@ -3,8 +3,27 @@ import { UtensilsCrossed, Plus, Edit2, Trash2, Search, Image as ImageIcon, Check
 import { MenuItem, CATEGORIES, MenuItemType, RecipeItem, AddOnItem } from '../types';
 import { cn } from '../lib/utils';
 import { CurrencyInput } from './CurrencyInput';
+import { QuantityInput } from './QuantityInput';
 import * as XLSX from 'xlsx';
 import { getMenuItemImage } from '../utils/foodImageHelper';
+
+const parseExcelNumber = (val: any): number => {
+  if (val === undefined || val === null || val === '') return 0;
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  const str = String(val).trim();
+  if (!str) return 0;
+  if (str.includes('.') && str.includes(',')) {
+    if (str.indexOf('.') < str.indexOf(',')) {
+      return parseFloat(str.replace(/\./g, '').replace(',', '.')) || 0;
+    } else {
+      return parseFloat(str.replace(/,/g, '')) || 0;
+    }
+  }
+  if (str.includes(',')) {
+    return parseFloat(str.replace(',', '.')) || 0;
+  }
+  return parseFloat(str) || 0;
+};
 
 export const MenuMgmtView = ({ 
   menu, 
@@ -225,7 +244,7 @@ export const MenuMgmtView = ({
         const rawType = String(row['Loại'] || row['Loại hàng'] || row['Loại hệ thống'] || row['Phân loại'] || '').trim().toLowerCase();
         const rawCategory = String(row['Nhóm'] || row['Danh mục'] || row['Nhóm hàng'] || '').trim().toLowerCase();
         const rawCode = String(row['Mã món'] || row['Mã hàng'] || row['Mã nguyên liệu'] || row['Mã'] || '').trim().toUpperCase();
-        const rawPrice = Number(row['Giá bán']) || 0;
+        const rawPrice = parseExcelNumber(row['Giá bán']);
 
         return (
           rawType.includes('nguyên liệu') ||
@@ -303,9 +322,9 @@ export const MenuMgmtView = ({
           const rawCode = String(row['Mã món'] || row['Mã hàng'] || row['Mã nguyên liệu'] || row['Mã'] || '').trim();
           const rawName = String(row['Tên món'] || row['Tên hàng'] || row['Tên nguyên liệu'] || row['Tên'] || '').trim();
           const rawCategory = String(row['Nhóm'] || row['Danh mục'] || row['Nhóm hàng'] || 'Nguyên liệu').trim();
-          const rawCostPrice = row['Giá vốn'] !== undefined && row['Giá vốn'] !== '' ? Number(row['Giá vốn']) || 0 : undefined;
+          const rawCostPrice = row['Giá vốn'] !== undefined && row['Giá vốn'] !== '' ? parseExcelNumber(row['Giá vốn']) : undefined;
           const rawUnit = String(row['Đơn vị'] || row['Đơn vị tính'] || 'kg').trim();
-          const rawStock = Number(row['Tồn kho']) || 0;
+          const rawStock = parseExcelNumber(row['Tồn kho']);
           const rawStatus = String(row['Trạng thái'] || '').toLowerCase();
 
           // Tìm nguyên liệu đã tồn tại theo mã hoặc theo tên
@@ -393,9 +412,26 @@ export const MenuMgmtView = ({
 
         // Hàm hỗ trợ tìm hoặc tự sinh nguyên liệu kho nếu công thức có tên nguyên liệu mới
         const getOrCreateIngredient = async (nameOrCode: string): Promise<MenuItem> => {
-          const query = nameOrCode.toLowerCase().trim();
+          const raw = String(nameOrCode || '').trim();
+          const query = raw.toLowerCase();
           if (inventoryByCode.has(query)) return inventoryByCode.get(query)!;
           if (inventoryByName.has(query)) return inventoryByName.get(query)!;
+          if (inventoryById.has(query)) return inventoryById.get(query)!;
+
+          // Hỗ trợ trường hợp Excel ghi dạng "NL001 - Lươn tươi"
+          if (raw.includes(' - ')) {
+            const [cPart, ...nParts] = raw.split(' - ');
+            const codeQ = cPart.trim().toLowerCase();
+            const nameQ = nParts.join(' - ').trim().toLowerCase();
+            if (inventoryByCode.has(codeQ)) return inventoryByCode.get(codeQ)!;
+            if (inventoryByName.has(nameQ)) return inventoryByName.get(nameQ)!;
+          }
+
+          // Kiểm tra toàn bộ danh mục menu xem có món nào trùng mã hoặc tên
+          const matchedByCode = menu.find(m => m.code?.toLowerCase().trim() === query);
+          if (matchedByCode) return matchedByCode;
+          const matchedByName = menu.find(m => m.name?.toLowerCase().trim() === query);
+          if (matchedByName) return matchedByName;
 
           // Nếu chưa có, tự động tạo nguyên liệu mới vào kho
           goodsSeq++;
@@ -403,7 +439,7 @@ export const MenuMgmtView = ({
           const newIng: MenuItem = {
             id: Math.random().toString(36).substr(2, 9),
             code: newCode,
-            name: nameOrCode.trim(),
+            name: raw,
             price: 0,
             costPrice: 0,
             category: 'Nguyên liệu',
@@ -440,10 +476,10 @@ export const MenuMgmtView = ({
           const rawCode = String(row['Mã món'] || row['Mã hàng'] || row['Mã'] || '').trim();
           const rawName = String(row['Tên món'] || row['Tên hàng'] || row['Tên'] || '').trim();
           const rawCategory = String(row['Nhóm'] || row['Danh mục'] || 'Món mới').trim();
-          const rawPrice = Number(row['Giá bán']) || 0;
-          const rawCostPrice = row['Giá vốn'] !== undefined && row['Giá vốn'] !== '' ? Number(row['Giá vốn']) || 0 : undefined;
+          const rawPrice = parseExcelNumber(row['Giá bán']);
+          const rawCostPrice = row['Giá vốn'] !== undefined && row['Giá vốn'] !== '' ? parseExcelNumber(row['Giá vốn']) : undefined;
           const rawUnit = String(row['Đơn vị'] || row['Đơn vị tính'] || 'Phần').trim();
-          const rawStock = Number(row['Tồn kho']) || 0;
+          const rawStock = parseExcelNumber(row['Tồn kho']);
           const rawStatus = String(row['Trạng thái'] || '').toLowerCase();
 
           let existing = rawCode ? dishesByCode.get(rawCode.toLowerCase()) : undefined;
@@ -510,14 +546,18 @@ export const MenuMgmtView = ({
           if (rawRecipeVal !== undefined && rawRecipeVal !== null && String(rawRecipeVal).trim() !== '') {
             const recipeStr = String(rawRecipeVal).trim();
             itemToSave.recipe = [];
-            const parts = recipeStr.split(/[|,\n+]/);
+            // Tách các thành phần: cho phép ngăn cách bởi |, ;, xuống dòng, +, hoặc dấu phẩy ngăn giữa 2 thành phần (có dấu : phía sau)
+            const parts = recipeStr.split(/(?:[|;\n+]|,(?=\s*[^:,|;\n+]+\s*:))/);
             for (const part of parts) {
               if (!part.trim()) continue;
               const subParts = part.split(':');
               const ingKey = subParts[0]?.trim();
-              const qtyStr = subParts[1]?.trim();
-              if (ingKey && qtyStr) {
-                const qty = Number(qtyStr.replace(/[^0-9.]/g, ''));
+              const qtyRaw = subParts.slice(1).join(':').trim();
+              if (ingKey && qtyRaw) {
+                // Hỗ trợ cả dấu chấm và dấu phẩy thập phân: "0.1", "0,1", "0,25 kg"
+                const qtyNormalized = qtyRaw.replace(',', '.');
+                const match = qtyNormalized.match(/[0-9]+(?:\.[0-9]+)?/);
+                const qty = match ? parseFloat(match[0]) : 0;
                 if (!isNaN(qty) && qty > 0) {
                   const ingredient = await getOrCreateIngredient(ingKey);
                   itemToSave.recipe.push({
@@ -547,13 +587,13 @@ export const MenuMgmtView = ({
           if (rawAddOnsVal !== undefined && rawAddOnsVal !== null && String(rawAddOnsVal).trim() !== '') {
             const addOnsStr = String(rawAddOnsVal).trim();
             itemToSave.addOns = [];
-            const parts = addOnsStr.split(/[|\n]/);
+            const parts = addOnsStr.split(/(?:[|;\n]|,(?=\s*[^:,|;\n]+\s*:))/);
             for (const part of parts) {
               if (!part.trim()) continue;
               const [nameOrCode, priceStr, qtyStr] = part.split(':');
               if (nameOrCode) {
-                const price = priceStr ? Number(priceStr.trim().replace(/[^0-9.]/g, '')) : 0;
-                const qty = qtyStr ? Number(qtyStr.trim().replace(/[^0-9.]/g, '')) : 1;
+                const price = priceStr ? parseExcelNumber(priceStr) : 0;
+                const qty = qtyStr ? parseExcelNumber(qtyStr) : 1;
                 const inv = await getOrCreateIngredient(nameOrCode);
                 itemToSave.addOns.push({
                   id: Math.random().toString(36).substr(2, 7),
@@ -624,7 +664,14 @@ export const MenuMgmtView = ({
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
 
   const inventoryItems = useMemo(() => {
-    return menu.filter(item => item.isInventory || item.type === 'goods' || item.category === 'Nguyên liệu');
+    return menu.filter(item => 
+      item.isInventory || 
+      item.type === 'goods' || 
+      item.category === 'Nguyên liệu' || 
+      item.category === 'Nguyên Liệu' ||
+      item.category?.toLowerCase().includes('kho') ||
+      item.category?.toLowerCase().includes('nguyên liệu')
+    );
   }, [menu]);
 
   const filtered = menu.filter(item => {
@@ -737,18 +784,18 @@ export const MenuMgmtView = ({
 
   const calculateCostPrice = (recipe: RecipeItem[]) => {
     if (!recipe || recipe.length === 0) return 0;
-    return recipe.reduce((total, r) => {
+    return Math.round(recipe.reduce((total, r) => {
       const ingredient = menu.find(m => m.id === r.ingredientId);
       if (ingredient) {
-        return total + (ingredient.costPrice * r.quantity);
+        return total + ((Number(ingredient.costPrice) || 0) * (Number(r.quantity) || 0));
       }
       return total;
-    }, 0);
+    }, 0));
   };
 
   const addRecipeItem = () => {
     const recipe = newItem.recipe || [];
-    setNewItem({ ...newItem, recipe: [...recipe, { ingredientId: '', name: '', quantity: 0, unit: 'kg' }] });
+    setNewItem({ ...newItem, recipe: [...recipe, { ingredientId: '', name: '', quantity: 1, unit: 'kg' }] });
   };
 
   const addAddOn = () => {
@@ -1264,20 +1311,34 @@ export const MenuMgmtView = ({
                             }}
                           >
                             <option value="" className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">-- Chọn nguyên liệu --</option>
-                            {menu.filter(m => m.type === 'goods' || m.category === 'Nguyên liệu').map(m => (
-                              <option key={m.id} value={m.id} className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">{m.code} - {m.name}</option>
+                            {inventoryItems.map(m => (
+                              <option key={m.id} value={m.id} className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">
+                                {m.code ? `${m.code} - ` : ''}{m.name}
+                              </option>
                             ))}
+                            {/* Fallback nếu nguyên liệu hiện tại chưa có trong danh sách inventoryItems */}
+                            {r.ingredientId && !inventoryItems.some(m => m.id === r.ingredientId) && (() => {
+                              const orphan = menu.find(m => m.id === r.ingredientId);
+                              return orphan ? (
+                                <option key={orphan.id} value={orphan.id} className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">
+                                  {orphan.code ? `${orphan.code} - ` : ''}{orphan.name}
+                                </option>
+                              ) : (
+                                <option key={r.ingredientId} value={r.ingredientId} className="bg-white dark:bg-[#1a1b1e] text-gray-900 dark:text-white">
+                                  {r.name || r.ingredientId}
+                                </option>
+                              );
+                            })()}
                           </select>
                         </div>
                         <div className="w-24">
                           <label className="text-[10px] text-gray-500 uppercase mb-1 block">Số lượng</label>
-                          <input 
-                            type="number" 
-                            className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-lg py-2 px-3 text-sm text-gray-900 dark:text-white"
+                          <QuantityInput 
+                            className="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-lg py-2 px-3 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
                             value={r.quantity}
-                            onChange={(e) => {
+                            onChange={(val) => {
                               const recipe = [...(newItem.recipe || [])];
-                              recipe[idx].quantity = Number(e.target.value);
+                              recipe[idx].quantity = val;
                               const newCostPrice = calculateCostPrice(recipe);
                               setNewItem({...newItem, recipe, costPrice: newCostPrice});
                             }}
@@ -1392,14 +1453,11 @@ export const MenuMgmtView = ({
                                 SL trừ kho / suất
                               </label>
                               <div className="flex items-center gap-1">
-                                <input
-                                  type="number"
-                                  step="any"
-                                  min="0.01"
+                                <QuantityInput
+                                  min={0.001}
                                   className="w-full bg-white dark:bg-[#1a1b1e] border border-black/10 dark:border-white/10 rounded-lg py-2 px-2.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500 text-right font-mono"
                                   value={addon.quantity ?? 1}
-                                  onChange={(e) => {
-                                    const val = parseFloat(e.target.value) || 0;
+                                  onChange={(val) => {
                                     const addOns = [...(newItem.addOns || [])];
                                     addOns[idx] = { ...addOns[idx], quantity: val };
                                     setNewItem({ ...newItem, addOns });
