@@ -4,20 +4,24 @@ import { Customer, CustomerType, User } from '../types';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs, limit } from 'firebase/firestore';
 
 export const CustomerView = ({ 
   customers, 
   customerTypes,
   onAddCustomer,
   onUpdateCustomerTypes,
-  currentUser
+  currentUser,
+  hasMoreCustomers = false,
+  onLoadMoreCustomers
 }: { 
   customers: Customer[],
   customerTypes: CustomerType[],
   onAddCustomer: (customer: Customer) => void,
   onUpdateCustomerTypes: (types: CustomerType[]) => void,
-  currentUser: User | null
+  currentUser: User | null,
+  hasMoreCustomers?: boolean,
+  onLoadMoreCustomers?: () => void
 }) => {
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -43,38 +47,51 @@ export const CustomerView = ({
     );
   }, [customers, search]);
 
-  // Tìm kiếm từ máy chủ khi từ khóa là số điện thoại và chưa có trong danh sách nạp sẵn
+  // Tìm kiếm từ máy chủ khi từ khóa là số điện thoại (từ 4 chữ số trở lên) và chưa khớp đủ cục bộ
   useEffect(() => {
-    const cleanSearch = search.trim();
-    const isPhoneNumber = /^[0-9+]{8,15}$/.test(cleanSearch.replace(/\s+/g, ''));
-    const alreadyFoundLocally = isPhoneNumber && customers.some(c => 
-      c.phone && c.phone.replace(/\s+/g, '') === cleanSearch.replace(/\s+/g, '')
+    const cleanSearch = search.trim().replace(/\s+/g, '');
+    const isPhoneQuery = /^[0-9+]{4,15}$/.test(cleanSearch);
+    const exactFoundLocally = isPhoneQuery && customers.some(c =>
+      c.phone && c.phone.replace(/\s+/g, '') === cleanSearch
     );
 
-    if (!currentUser?.storeId || !isPhoneNumber || alreadyFoundLocally) {
+    if (!currentUser?.storeId || !isPhoneQuery || (exactFoundLocally && cleanSearch.length >= 9)) {
       setRemoteResults(prev => prev.length === 0 ? prev : []);
       setRemoteSearchKey('');
       return;
     }
 
-    // Reset kết quả tìm kiếm ngay khi đổi từ khóa số điện thoại để không hiển thị kết quả cũ của số khác
     setRemoteResults([]);
-    setRemoteSearchKey(cleanSearch);
+    setRemoteSearchKey(search.trim());
 
     let active = true;
     const timer = setTimeout(async () => {
       try {
         setIsSearchingRemote(true);
-        const q = query(
-          collection(db, 'customers'),
-          where('storeId', '==', currentUser.storeId),
-          where('phone', '==', cleanSearch)
-        );
-        const snap = await getDocs(q);
-        const found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
+        let found: Customer[] = [];
+        try {
+          const prefixQ = query(
+            collection(db, 'customers'),
+            where('storeId', '==', currentUser.storeId),
+            where('phone', '>=', cleanSearch),
+            where('phone', '<=', cleanSearch + '\uf8ff'),
+            limit(20)
+          );
+          const snap = await getDocs(prefixQ);
+          found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
+        } catch {
+          const exactQ = query(
+            collection(db, 'customers'),
+            where('storeId', '==', currentUser.storeId),
+            where('phone', '==', cleanSearch),
+            limit(20)
+          );
+          const snap = await getDocs(exactQ);
+          found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
+        }
         if (active) {
           setRemoteResults(found);
-          setRemoteSearchKey(cleanSearch);
+          setRemoteSearchKey(search.trim());
         }
       } catch (err) {
         console.warn('Lỗi tìm kiếm khách hàng từ xa:', err);
@@ -222,6 +239,18 @@ export const CustomerView = ({
           </div>
         )})}
       </div>
+
+      {hasMoreCustomers && onLoadMoreCustomers && !search.trim() && (
+        <div className="flex justify-center pt-2">
+          <button
+            type="button"
+            onClick={onLoadMoreCustomers}
+            className="px-6 py-2.5 bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 border border-black/10 dark:border-white/10 rounded-xl text-sm font-semibold text-gray-800 dark:text-gray-200 transition-all cursor-pointer"
+          >
+            Tải thêm danh sách khách hàng
+          </button>
+        </div>
+      )}
 
       {/* Add Customer Modal */}
       <AnimatePresence>

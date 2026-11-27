@@ -158,6 +158,7 @@ export default async function handler(req: any, res: any) {
         else batch.set(newUserRef, userDocData);
         batch.set(adminDb.collection('user_secrets').doc(newUserId), secretPayload);
         await batch.commit();
+        await adminDb.collection('stores').doc(targetStoreId).update({ 'userSummary.needsSync': true }).catch(() => {});
       } catch (error) {
         return res.status(500).json({ error: 'Không thể lưu đồng thời tài khoản và thông tin xác thực.' });
       }
@@ -285,6 +286,9 @@ export default async function handler(req: any, res: any) {
 
       invalidateUserStatusCache(userId);
       await adminAuth.revokeRefreshTokens(userId);
+      if (roleChanged) {
+        await adminDb.collection('stores').doc(targetStoreId).update({ 'userSummary.needsSync': true }).catch(() => {});
+      }
     } else {
       await userDocRef.update(updates);
     }

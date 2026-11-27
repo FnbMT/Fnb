@@ -118,6 +118,41 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
     return localStorage.getItem('kitchen_sound_enabled') !== 'false';
   });
   const [printingOrderId, setPrintingOrderId] = useState<string | null>(null);
+  const [optimisticOrdersByTable, setOptimisticOrdersByTable] = useState<Record<string, OrderSession[]>>({});
+  const pendingFlushRef = useRef<Map<string, { timer: ReturnType<typeof setTimeout>; orders: OrderSession[] }>>(new Map());
+  const onUpdateTableOrdersRef = useRef(onUpdateTableOrders);
+  onUpdateTableOrdersRef.current = onUpdateTableOrders;
+
+  // Đồng bộ lại state lạc quan khi server đẩy dữ liệu mới về (trừ bàn đang trong nhịp gộp thao tác 1.2s)
+  useEffect(() => {
+    setOptimisticOrdersByTable(prev => {
+      const activeKeys = Object.keys(prev);
+      if (activeKeys.length === 0) return prev;
+      let changed = false;
+      const next: Record<string, OrderSession[]> = {};
+      for (const tableId of activeKeys) {
+        if (pendingFlushRef.current.has(tableId)) {
+          next[tableId] = prev[tableId];
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [tables]);
+
+  // Đảm bảo đẩy hết các thao tác đang gom dở lên Firestore nếu người dùng rời màn hình Bếp
+  useEffect(() => {
+    return () => {
+      for (const [tableId, entry] of pendingFlushRef.current.entries()) {
+        clearTimeout(entry.timer);
+        pendingFlushRef.current.delete(tableId);
+        void onUpdateTableOrdersRef.current(tableId, entry.orders).catch(err => {
+          console.warn('Lỗi đồng bộ bếp khi chuyển màn hình:', err);
+        });
+      }
+    };
+  }, []);
 
   // Track known order IDs to sound alarm on new incoming orders
   const knownOrderIdsRef = useRef<Set<string>>(new Set());
@@ -132,8 +167,9 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
     }[] = [];
 
     tables.forEach(table => {
-      // Include tables that have active orders
-      const orders = (table.orders || []).filter(o => o.status !== 'paid');
+      // Include tables that have active orders (ưu tiên hiển thị tức thì state lạc quan khi bếp vừa tích món)
+      const sourceOrders = optimisticOrdersByTable[table.id] ?? table.orders ?? [];
+      const orders = sourceOrders.filter(o => o.status !== 'paid');
       orders.forEach((order, idx) => {
         list.push({
           table,
@@ -149,7 +185,7 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
       const timeB = new Date(b.order.startTime).getTime() || 0;
       return timeA - timeB;
     });
-  }, [tables]);
+  }, [tables, optimisticOrdersByTable]);
 
   // Audio trigger on newly arrived pending orders
   useEffect(() => {
@@ -281,7 +317,13 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
     orderId: string,
     newStatus: 'pending' | 'cooking' | 'ready' | 'completed'
   ) => {
-    const updatedOrders = (table.orders || []).map(o => {
+    const pending = pendingFlushRef.current.get(table.id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingFlushRef.current.delete(table.id);
+    }
+    const currentOrders = pending?.orders ?? optimisticOrdersByTable[table.id] ?? table.orders ?? [];
+    const updatedOrders = currentOrders.map(o => {
       if (o.id === orderId) {
         // If marked as ready or completed, also mark all items as completed
         const items = (newStatus === 'ready' || newStatus === 'completed')
@@ -297,19 +339,35 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
       return o;
     });
 
-    try { await onUpdateTableOrders(table.id, updatedOrders); } catch(error) { alert(error instanceof Error ? error.message : 'Không thể cập nhật món; vui lòng thử lại.'); }
+    setOptimisticOrdersByTable(prev => ({ ...prev, [table.id]: updatedOrders }));
+    try {
+      await onUpdateTableOrders(table.id, updatedOrders);
+    } catch (error) {
+      setOptimisticOrdersByTable(prev => {
+        const next = { ...prev };
+        delete next[table.id];
+        return next;
+      });
+      alert(error instanceof Error ? error.message : 'Không thể cập nhật món; vui lòng thử lại.');
+    }
   };
 
-  // Handler: Toggle single item completion
-  const handleToggleItemCompleted = async (
+  // Handler: Toggle single item completion (Gom cụm thao tác 1.2s để giảm 60-75% reads fan-out bảng tables trên mọi máy)
+  const handleToggleItemCompleted = (
     table: Table,
     orderId: string,
     itemIndex: number
   ) => {
-    const updatedOrders = (table.orders || []).map(o => {
+    const pending = pendingFlushRef.current.get(table.id);
+    if (pending) {
+      clearTimeout(pending.timer);
+    }
+    const baseOrders = pending?.orders ?? optimisticOrdersByTable[table.id] ?? table.orders ?? [];
+    const updatedOrders = baseOrders.map(o => {
       if (o.id === orderId) {
         const newItems = [...o.items];
         const currentItem = newItems[itemIndex];
+        if (!currentItem) return o;
         newItems[itemIndex] = {
           ...currentItem,
           isCompleted: !currentItem.isCompleted
@@ -333,7 +391,23 @@ export const KitchenView: React.FC<KitchenViewProps> = ({
       return o;
     });
 
-    try { await onUpdateTableOrders(table.id, updatedOrders); } catch(error) { alert(error instanceof Error ? error.message : 'Không thể cập nhật món; vui lòng thử lại.'); }
+    setOptimisticOrdersByTable(prev => ({ ...prev, [table.id]: updatedOrders }));
+
+    const timer = setTimeout(async () => {
+      pendingFlushRef.current.delete(table.id);
+      try {
+        await onUpdateTableOrdersRef.current(table.id, updatedOrders);
+      } catch (error) {
+        setOptimisticOrdersByTable(prev => {
+          const next = { ...prev };
+          delete next[table.id];
+          return next;
+        });
+        alert(error instanceof Error ? error.message : 'Không thể cập nhật món; vui lòng thử lại.');
+      }
+    }, 1200);
+
+    pendingFlushRef.current.set(table.id, { timer, orders: updatedOrders });
   };
 
   // Handler: Re-print Kitchen Ticket

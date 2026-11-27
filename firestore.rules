@@ -15,24 +15,40 @@ service cloud.firestore {
       );
     }
 
-    // Kiểm tra danh tính Quản lý (Admin của quán hoặc SuperAdmin)
-    function isAdmin() {
-      return request.auth != null && (
-        request.auth.token.role in ['admin', 'superadmin'] ||
-        request.auth.token.isSuperAdmin == true ||
-        request.auth.uid == 'superadmin'
+    // Kiểm tra danh tính Quản trị viên của ĐÚNG cửa hàng (chống chéo quyền giữa các quán)
+    function isStoreAdmin(targetStoreId) {
+      return isSuperAdmin() || (
+        request.auth != null &&
+        request.auth.token.role == 'admin' &&
+        targetStoreId is string &&
+        request.auth.token.storeId == targetStoreId
+      );
+    }
+
+    // Kiểm tra người dùng đã xác thực thuộc đúng cửa hàng
+    function isSameStoreMember(targetStoreId) {
+      return isSuperAdmin() || (
+        request.auth != null &&
+        targetStoreId is string &&
+        request.auth.token.storeId == targetStoreId
+      );
+    }
+
+    // Bảo vệ tuyệt đối thông tin gói cước (subscription) trên cửa hàng:
+    // Chỉ SuperAdmin hoặc Backend Admin SDK (SePay Webhook) mới được thay đổi gói / hạn dùng / mở khóa
+    function isSubscriptionUnchanged() {
+      return (
+        (!('subscription' in resource.data) && !('subscription' in request.resource.data)) ||
+        ('subscription' in resource.data && 'subscription' in request.resource.data && request.resource.data.subscription == resource.data.subscription)
       );
     }
 
     // Kiểm tra thông tin thanh toán mã QR (VietQR / STK Ngân hàng) KHÔNG BỊ THAY ĐỔI
-    // Ngăn chặn nhân viên thường hoặc kẻ gian sửa STK nhận tiền của quán
+    // Ngăn chặn nhân viên thường hoặc quán khác sửa STK nhận tiền của quán
     function isBankInfoUnchanged() {
       return (
-        // STK ngân hàng: Nếu đã có thì phải giữ nguyên như cũ, nếu chưa có thì không được tự thêm mới
         (!('bankAccountNumber' in resource.data) && !('bankAccountNumber' in request.resource.data) || ('bankAccountNumber' in resource.data && request.resource.data.bankAccountNumber == resource.data.bankAccountNumber))
-        // Tên chủ tài khoản: Phải giữ nguyên như cũ
         && (!('bankAccountName' in resource.data) && !('bankAccountName' in request.resource.data) || ('bankAccountName' in resource.data && request.resource.data.bankAccountName == resource.data.bankAccountName))
-        // Mã ngân hàng: Phải giữ nguyên như cũ
         && (!('bankCode' in resource.data) && !('bankCode' in request.resource.data) || ('bankCode' in resource.data && request.resource.data.bankCode == resource.data.bankCode))
       );
     }
@@ -51,10 +67,11 @@ service cloud.firestore {
 
     // ==========================================
     // 2. CÀI ĐẶT HỆ THỐNG VÀ GÓI CƯỚC (BẢO VỆ SUPERADMIN)
-    // Đọc công khai cho toàn bộ client cũ/mới, nhưng CHỈ SUPERADMIN MỚI ĐƯỢC GHI
+    // Chỉ công khai đọc duy nhất 'system/config' (thông tin ngân hàng nâng cấp gói);
+    // CẤM đọc mọi bản ghi nhạy cảm khác như 'system/user_secret_*'.
     // ==========================================
     match /system/{docId} {
-      allow read: if true;
+      allow read: if docId == 'config' || isSuperAdmin();
       allow write: if isSuperAdmin();
     }
 
@@ -70,54 +87,78 @@ service cloud.firestore {
 
     // ==========================================
     // 3. THÔNG TIN QUÁN VÀ TÀI KHOẢN NGƯỜI DÙNG
-    // Khóa chặt Superadmin, bảo toàn tài khoản của quán
+    // Khóa chặt gói cước subscription, bảo vệ SuperAdmin & Admin chủ quán
     // ==========================================
     match /stores/{storeId} {
       allow read: if true;
-      allow create: if request.resource.data.code is string;
-      allow update: if true;
-      allow delete: if isSuperAdmin(); // Không cho tự ý xóa cửa hàng từ client
+      // Tạo quán mới bắt buộc đi qua API /api/register-store (Admin SDK) hoặc SuperAdmin
+      allow create: if isSuperAdmin();
+      // CẤM người dùng tự ý sửa gói cước (subscription) hoặc đổi mã quán (code)
+      allow update: if isSuperAdmin() || (
+        isSubscriptionUnchanged() &&
+        request.resource.data.code == resource.data.code
+      );
+      allow delete: if isSuperAdmin();
     }
 
     match /users/{userId} {
       allow read: if true;
       
-      // CẤM tạo tài khoản mạo danh superadmin từ client
+      // Tạo nhân sự bắt buộc đi qua API /api/save-user (Admin SDK) hoặc chính Admin của đúng quán đó (cấm lưu password thô & cấm mạo danh superadmin)
       allow create: if userId != 'superadmin'
                     && request.resource.data.username != 'superadmin'
                     && request.resource.data.storeId is string
                     && request.resource.data.username is string
-                    && request.resource.data.role in ['admin', 'manager', 'cashier', 'order', 'order_cashier', 'kitchen'];
+                    && !('password' in request.resource.data)
+                    && request.resource.data.role in ['admin', 'manager', 'cashier', 'order', 'order_cashier', 'kitchen']
+                    && isStoreAdmin(request.resource.data.storeId);
       
-      // TUYỆT ĐỐI CẤM XÓA tài khoản superadmin
-      allow delete: if userId != 'superadmin'
-                    && resource.data.role != 'superadmin'
-                    && resource.data.username != 'superadmin';
+      // TUYỆT ĐỐI CẤM XÓA tài khoản superadmin và tài khoản admin chủ quán từ client
+      allow delete: if isSuperAdmin() || (
+                      userId != 'superadmin'
+                      && resource.data.role != 'superadmin'
+                      && resource.data.role != 'admin'
+                      && resource.data.username != 'superadmin'
+                      && isStoreAdmin(resource.data.storeId)
+                    );
 
-      // Tài khoản superadmin chỉ chính Superadmin mới được sửa; nhân sự quán bảo toàn role/storeId
+      // Cập nhật user:
+      // - SuperAdmin chỉ chính SuperAdmin mới được sửa
+      // - Tài khoản Admin chủ quán: chỉ SuperAdmin hoặc chính Admin của đúng quán đó mới được cập nhật thông tin (bảo toàn role, storeId, không chèn password thô)
+      // - Nhân viên thường: bảo toàn role/storeId/username/password; chỉ cho phép cập nhật bởi thành viên cùng quán hoặc khi ghi nhận lastLogin
       allow update: if (userId == 'superadmin' || resource.data.role == 'superadmin' || resource.data.username == 'superadmin')
                       ? isSuperAdmin()
-                      : (request.resource.data.role == resource.data.role
-                         && request.resource.data.storeId == resource.data.storeId
-                         && request.resource.data.username == resource.data.username
-                         && (!('password' in request.resource.data) || request.resource.data.password == resource.data.password)
-                         && (!('isLegacy' in request.resource.data) || request.resource.data.isLegacy == resource.data.isLegacy));
+                      : (resource.data.role == 'admin'
+                          ? (isStoreAdmin(resource.data.storeId)
+                             && request.resource.data.role == resource.data.role
+                             && request.resource.data.storeId == resource.data.storeId
+                             && (!('password' in request.resource.data) || ('password' in resource.data && request.resource.data.password == resource.data.password)))
+                          : (request.resource.data.role == resource.data.role
+                             && request.resource.data.storeId == resource.data.storeId
+                             && request.resource.data.username == resource.data.username
+                             && (!('password' in request.resource.data) || ('password' in resource.data && request.resource.data.password == resource.data.password))
+                             && (!('isLegacy' in request.resource.data) || ('isLegacy' in resource.data && request.resource.data.isLegacy == resource.data.isLegacy))
+                             && (isSameStoreMember(resource.data.storeId) || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLogin']))));
     }
 
     // ==========================================
-    // 4. CÀI ĐẶT CỦA CỬA HÀNG (BẢO VỆ MÃ QR / TÀI KHOẢN NGÂN HÀNG)
-    // Chỉ Admin mới được cài/sửa mã QR; nhân viên khác không được thay thế
+    // 4. CÀI ĐẶT CỦA CỬA HÀNG (CÔ LẬP THEO STORE_ID & BẢO VỆ MÃ VIETQR)
+    // Chỉ đúng Admin của quán đó (hoặc SuperAdmin) mới được cài/sửa mã QR ngân hàng;
+    // Admin quán khác TUYỆT ĐỐI không thể can thiệp chéo quán!
     // ==========================================
     match /settings/{settingId} {
       allow read: if true;
-      allow delete: if isAdmin();
+      allow delete: if isStoreAdmin(resource.data.storeId);
       
-      // Khi tạo mới: Admin được set mọi trường; nếu không phải Admin thì cấm gán trường ngân hàng
-      allow create: if isAdmin() 
-                    || (!('bankAccountNumber' in request.resource.data) && !('bankCode' in request.resource.data));
+      allow create: if request.resource.data.storeId is string && (
+                      isStoreAdmin(request.resource.data.storeId)
+                      || (!('bankAccountNumber' in request.resource.data) && !('bankCode' in request.resource.data) && !('bankAccountName' in request.resource.data))
+                    );
       
-      // Khi cập nhật: Admin được đổi STK; nhân viên thường chỉ được cập nhật các mục khác (không đổi STK)
-      allow update: if isAdmin() || isBankInfoUnchanged();
+      allow update: if request.resource.data.storeId == resource.data.storeId && (
+                      isStoreAdmin(resource.data.storeId)
+                      || isBankInfoUnchanged()
+                    );
     }
 
     // ==========================================
@@ -130,7 +171,7 @@ service cloud.firestore {
     // ==========================================
     // 6. DỮ LIỆU VẬN HÀNH BÁN HÀNG CỦA QUÁN
     // (Thực đơn, Bàn, Hóa đơn, Kho, Sổ quỹ, Ca làm việc...)
-    // Tương thích 100% cho mọi máy iPhone / iPad đang chạy bản cũ
+    // Giữ tương thích mượt mà cho mọi thiết bị POS / iPhone / Android đang vận hành
     // ==========================================
     match /menu/{menuId} {
       allow read, write: if true;

@@ -11,7 +11,6 @@ export default async function handler(req: any, res: any) {
   const hasJwtSec = Boolean(process.env.JWT_SECRET);
   const superPass = process.env.SUPERADMIN_PASSWORD || '';
   const hasSuperPass = Boolean(superPass && superPass.trim().length > 0);
-  const superUser = process.env.SUPERADMIN_USERNAME || 'superadmin';
 
   let firebaseAdminInfo: any = {
     configured: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT),
@@ -32,17 +31,14 @@ export default async function handler(req: any, res: any) {
     status: 'ok',
     version: '1.0.4',
     timestamp: new Date().toISOString(),
-    nodeVersion: process.version,
     checks: {
       encryptionKey: hasEncKey,
       jwtSecret: hasJwtSec,
       superadminConfigured: hasSuperPass,
-      superadminUsername: superUser,
-      superadminPasswordLength: superPass.trim().length,
       firebaseAdmin: firebaseAdminInfo
     },
     message: hasSuperPass 
       ? 'Hệ thống máy chủ backend Vercel hoạt động bình thường.' 
-      : 'Cảnh báo: SUPERADMIN_PASSWORD chưa có giá trị trên Vercel.'
+      : 'Cảnh báo: Chưa cấu hình đầy đủ thông tin xác thực quản trị trên máy chủ.'
   });
 }

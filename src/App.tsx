@@ -186,9 +186,10 @@ import { checkStoreTabPermission, isTabAllowedInPackage, APP_PACKAGE_TABS } from
 import { calculateInvoiceCost, calculateInvoiceCostSnapshot } from './utils/costHelper';
 import { isCashPayment } from './utils/reportDataIntegrity';
 import { operationId, cloneData, orderSignature, itemsSubtotal, stockQuantity, itemKey, attendanceTotals } from './utils/dataIntegrity';
-import { subscribeDateRange, fetchStoreRows } from './utils/completeDataSource';
+import { subscribeDateRange } from './utils/completeDataSource';
 import { subscribeSharedQuery, setSharedReadScope, clearSharedReadSession } from './utils/sharedFirestoreQuery';
 import { addOrderAtomic, updateOrdersAtomic, moveTablesAtomic, recordCashAtomic, importStockAtomic, auditStockAtomic, cancelInvoiceAtomic, recordAttendanceAtomic, openShiftAtomic, finalizePayrollAtomic, unfinalizePayrollAtomic } from './services/dataOperations';
+import { autoReconcileRecentPastDays } from './services/reportReconciliation';
 import {
   sendDeviceNotification,
   checkNotificationPermission,
@@ -603,6 +604,9 @@ const MenuOrdering = ({
   const moveOperationRef = useRef(operationId('move'));
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState<Customer[]>(customers);
+  const [customerDropdownLimit, setCustomerDropdownLimit] = useState(50);
+  const [remoteDropdownCustomers, setRemoteDropdownCustomers] = useState<Customer[]>([]);
+  const [isSearchingRemoteCustomer, setIsSearchingRemoteCustomer] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [isLoadingCustomers, setIsLoadingCustomers] = useState(false);
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
@@ -615,17 +619,61 @@ const MenuOrdering = ({
     }
   }, [customers]);
 
-  // Danh sách đầy đủ dùng chung với màn quản lý khách; giữ listener tối đa 2 phút
-  // sau khi đóng dropdown để lần mở kế tiếp nhận đủ cả thay đổi và bản ghi đã xóa.
+  // Danh sách khách hàng lúc thanh toán có giới hạn (limit) mặc định 50 để tránh tải hàng nghìn bản ghi khi quán lớn;
+  // hỗ trợ tìm kiếm trực tiếp SĐT trên máy chủ và nút tải thêm khi cần.
   useEffect(() => {
     if (!currentUser?.storeId || !showCustomerDropdown) return;
     setIsLoadingCustomers(true);
-    const stop = subscribeSharedQuery(query(collection(db, 'customers'), where('storeId', '==', currentUser.storeId)), snapshot => {
+    const q = query(collection(db, 'customers'), where('storeId', '==', currentUser.storeId), limit(customerDropdownLimit));
+    const stop = subscribeSharedQuery(q, snapshot => {
       setCustomerResults(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as Customer)));
       setIsLoadingCustomers(snapshot.metadata.fromCache || snapshot.metadata.hasPendingWrites);
-    }, error => { console.warn('Không thể tải khách hàng:', error); setIsLoadingCustomers(false); }, { keepAliveMs: 120000 });
+    }, error => { console.warn('Không thể tải khách hàng:', error); setIsLoadingCustomers(false); }, { keepAliveMs: 300000 });
     return () => stop();
-  }, [showCustomerDropdown, currentUser?.storeId]);
+  }, [showCustomerDropdown, currentUser?.storeId, customerDropdownLimit]);
+
+  // Tìm kiếm SĐT trực tiếp từ máy chủ khi gõ >= 4 chữ số mà chưa có khớp hoàn toàn cục bộ
+  useEffect(() => {
+    if (!showCustomerDropdown || !currentUser?.storeId) return;
+    const cleanDigits = customerSearch.trim().replace(/\s+/g, '');
+    const isPhoneQuery = /^[0-9+]{4,15}$/.test(cleanDigits);
+    const exactLocal = isPhoneQuery && customerResults.some(c => c.phone && c.phone.replace(/\s+/g, '') === cleanDigits);
+    if (!isPhoneQuery || (exactLocal && cleanDigits.length >= 9)) {
+      setRemoteDropdownCustomers(prev => prev.length ? [] : prev);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(async () => {
+      try {
+        setIsSearchingRemoteCustomer(true);
+        let found: Customer[] = [];
+        try {
+          const snap = await getDocs(query(
+            collection(db, 'customers'),
+            where('storeId', '==', currentUser.storeId),
+            where('phone', '>=', cleanDigits),
+            where('phone', '<=', cleanDigits + '\uf8ff'),
+            limit(20)
+          ));
+          found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
+        } catch {
+          const snap = await getDocs(query(
+            collection(db, 'customers'),
+            where('storeId', '==', currentUser.storeId),
+            where('phone', '==', cleanDigits),
+            limit(20)
+          ));
+          found = snap.docs.map(d => ({ ...d.data(), id: d.id } as Customer));
+        }
+        if (active) setRemoteDropdownCustomers(found);
+      } catch {
+        if (active) setRemoteDropdownCustomers([]);
+      } finally {
+        if (active) setIsSearchingRemoteCustomer(false);
+      }
+    }, 300);
+    return () => { active = false; clearTimeout(timer); };
+  }, [customerSearch, showCustomerDropdown, currentUser?.storeId, customerResults]);
 
   // Sync local state with fresh table data from props
   const activeTable = tables.find(t => t.id === selectedTable.id) || selectedTable;
@@ -639,12 +687,17 @@ const MenuOrdering = ({
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
 
   const filteredCustomers = useMemo(() => {
-    if (!customerSearch) return customerResults;
-    return customerResults.filter(c =>
-      c.name.toLowerCase().includes(customerSearch.toLowerCase()) ||
-      c.phone.includes(customerSearch)
+    const map = new Map<string, Customer>();
+    customerResults.forEach(c => map.set(c.id, c));
+    remoteDropdownCustomers.forEach(c => map.set(c.id, c));
+    const all = Array.from(map.values());
+    if (!customerSearch) return all;
+    const q = customerSearch.toLowerCase().trim();
+    return all.filter(c =>
+      c.name.toLowerCase().includes(q) ||
+      (c.phone && c.phone.includes(q))
     );
-  }, [customerResults, customerSearch]);
+  }, [customerResults, remoteDropdownCustomers, customerSearch]);
 
   // Xác nhận đúng hồ sơ đang chọn; dữ liệu của khách trước không được dùng để thanh toán.
   useEffect(() => {
@@ -1648,7 +1701,7 @@ const MenuOrdering = ({
                             >
                               Khách lẻ (Không áp dụng ưu đãi)
                             </button>
-                            {isLoadingCustomers && <div className="px-3 py-2 text-xs text-gray-500">Đang tải khách hàng...</div>}
+                            {(isLoadingCustomers || isSearchingRemoteCustomer) && <div className="px-3 py-2 text-xs text-gray-500">Đang tìm khách hàng...</div>}
                             {filteredCustomers.map(c => (
                               <button
                                 key={c.id}
@@ -1659,6 +1712,16 @@ const MenuOrdering = ({
                                 {customerTypes.find(t => t.id === c.typeId)?.discountPercent ? ` (-${customerTypes.find(t => t.id === c.typeId)?.discountPercent}%)` : ''}
                               </button>
                             ))}
+                            {customerResults.length >= customerDropdownLimit && (
+                              <button
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => setCustomerDropdownLimit(prev => prev + 100)}
+                                className="w-full text-center px-3 py-2 border-t border-black/5 dark:border-white/5 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 cursor-pointer"
+                              >
+                                + Tải thêm danh sách khách hàng
+                              </button>
+                            )}
                           </div>
                         </div>
                       )}
@@ -2269,21 +2332,46 @@ export default function App() {
     return true;
   };
 
+  const refreshPackagesFromServer = (force = false) => {
+    try {
+      if (!force) {
+        const cachedRaw = safeStorage.getItem('fnb_master_packages');
+        const cachedTs = Number(safeStorage.getItem('fnb_master_packages_ts') || 0);
+        const SIX_HOURS_MS = 6 * 3600 * 1000;
+        if (cachedRaw && cachedTs > 0 && Date.now() - cachedTs < SIX_HOURS_MS) {
+          const parsed = JSON.parse(cachedRaw);
+          if (Array.isArray(parsed) && parsed.length > 0) return;
+        }
+      }
+    } catch { }
+
+    getDocs(collection(db, 'packages')).then((snapshot) => {
+      const pkgs = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      if (pkgs.length > 0) {
+        setPackages(pkgs);
+        try {
+          safeStorage.setItem('fnb_master_packages', JSON.stringify(pkgs));
+          safeStorage.setItem('fnb_master_packages_ts', String(Date.now()));
+        } catch { }
+      }
+    }).catch((err) => {
+      console.warn('Lỗi tải gói dịch vụ:', err);
+    });
+  };
+
   useEffect(() => {
     // Tiền nạp engine máy in (html2canvas) vào RAM để lượt in đầu tiên không có độ trễ tải module
     PrinterService.preload();
 
-    // Tải gói dịch vụ 1 lần qua getDocs thay vì duy trì onSnapshot liên tục cho toàn bộ nhân viên (tiết kiệm 100% reads nền)
-    getDocs(collection(db, 'packages')).then((snapshot) => {
-      const pkgs = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-      setPackages(pkgs);
-      try {
-        safeStorage.setItem('fnb_master_packages', JSON.stringify(pkgs));
-      } catch { }
-    }).catch((err) => {
-      console.warn('Lỗi tải gói dịch vụ:', err);
-    });
+    // Tải gói dịch vụ kèm bộ nhớ đệm TTL 6 giờ (0 reads khi mở lại ứng dụng trong ngày)
+    refreshPackagesFromServer(false);
   }, []);
+
+  useEffect(() => {
+    if (showUpgradeModal) {
+      refreshPackagesFromServer(true);
+    }
+  }, [showUpgradeModal]);
 
   useEffect(() => {
     let disposed = false;
@@ -2495,6 +2583,27 @@ export default function App() {
   };
 
   const hasReconciledOutOfStockRef = useRef(false);
+  const serverSettingsOutIdsRef = useRef<string[] | null>(null);
+  const dishesMenuRef = useRef<MenuItem[]>([]);
+  const inventoryMenuRef = useRef<MenuItem[]>([]);
+  const hasAutoMigratedMenuFlagRef = useRef<string>('');
+  const [customerViewLimit, setCustomerViewLimit] = useState(100);
+
+  const computeMenuWithRecipeCosts = (items: MenuItem[]): MenuItem[] => {
+    const sources = new Map(items.map(item => [item.id, item]));
+    return items.map(item => item.recipe?.length && item.recipe.every(r => typeof sources.get(r.ingredientId)?.costPrice === 'number')
+      ? { ...item, costPrice: Math.round(item.recipe.reduce((sum, r) => sum + sources.get(r.ingredientId)!.costPrice * r.quantity, 0)) }
+      : item);
+  };
+
+  const syncCombinedMenuState = () => {
+    const combinedMap = new Map<string, MenuItem>();
+    inventoryMenuRef.current.forEach(item => combinedMap.set(item.id, item));
+    dishesMenuRef.current.forEach(item => combinedMap.set(item.id, item));
+    const finalMenu = computeMenuWithRecipeCosts(Array.from(combinedMap.values()));
+    setMenu(finalMenu);
+    return finalMenu;
+  };
 
   const reconcileOutOfStockStatus = async (storeId: string, currentMenu: MenuItem[], currentOutOfStock: string[]) => {
     if (!storeId || currentMenu.length === 0) return;
@@ -2506,8 +2615,9 @@ export default function App() {
       }
     });
 
-    const settingsSnapshot = await getDocFromServer(await getSettingsDocRef(storeId));
-    const currentSet = new Set<string>(settingsSnapshot.data()?.outOfStockAddOnIds || []);
+    // Tận dụng danh sách outOfStockAddOnIds đã đồng bộ trực tiếp từ listener settings (tiết kiệm 1-2 lượt đọc getDocFromServer mỗi lần mở app)
+    const baseOutList = serverSettingsOutIdsRef.current !== null ? serverSettingsOutIdsRef.current : currentOutOfStock;
+    const currentSet = new Set<string>(baseOutList || []);
 
     const missingOut: string[] = [];
     expectedOutIds.forEach(id => {
@@ -2949,49 +3059,111 @@ export default function App() {
       unsubs.push(unsubUserStatus);
     }
 
-    // 2. Sync Menu:
-    // - Bếp (kitchen): KHÔNG nghe menu (chỉ hiển thị vé món theo bàn, tiết kiệm 100% reads)
-    // - Phục vụ (order): Khi cửa hàng đã hoàn tất migration, CHỈ nghe món bán thực đơn (isInventory == false) để tiết kiệm reads;
-    //   Nếu chưa hoàn tất migration, nghe menu và phân loại an toàn theo tiêu chí nghiệp vụ trên máy (không bao giờ ẩn món cũ)
-    // - Thu ngân / Quản lý / Admin: Nghe đầy đủ để phục vụ thanh toán trừ kho công thức và quản lý tồn kho
+    // 2. Sync Menu & Tách biệt Tồn kho nguyên liệu (Cắt 80-90% reads fan-out khi Thanh toán trừ kho):
+    // - Bếp (kitchen): KHÔNG nghe menu (0 reads)
+    // - Khi cửa hàng đã chuẩn hóa cờ isInventory (migrationStatus.menu === 'completed'):
+    //   + Mọi máy chỉ nghe realtime món bán (isInventory == false) — không bao giờ bị bắn reads khi nguyên liệu trừ kho!
+    //   + Máy Thu ngân / Quản lý / Admin nạp 1 lần danh mục nguyên liệu kho (isInventory == true) lúc mở phiên để tính giá vốn công thức & cảnh báo tồn,
+    //     và chỉ bật realtime tồn kho khi mở màn hình Kho hàng / Thực đơn.
+    hasReconciledOutOfStockRef.current = false;
+    serverSettingsOutIdsRef.current = null;
+    dishesMenuRef.current = [];
+    inventoryMenuRef.current = [];
+
+    const classifyIsInventory = (item: MenuItem): boolean => {
+      if (item.isInventory === true) return true;
+      if (item.isInventory === false) return false;
+      if (item.type === 'goods') return true;
+      if (item.type === 'dish') return false;
+      if (item.category === 'Nguyên liệu' || item.category === 'Nguyên Liệu' || (item.code?.startsWith('NL') && (item.price || 0) === 0)) {
+        return true;
+      }
+      return false;
+    };
+
+    const maybeRunInitialOutOfStockCheck = (latestMenu: MenuItem[]) => {
+      if (
+        !hasReconciledOutOfStockRef.current &&
+        serverSettingsOutIdsRef.current !== null &&
+        latestMenu.length > 0 &&
+        (currentUser.role === 'admin' || currentUser.role === 'manager')
+      ) {
+        hasReconciledOutOfStockRef.current = true;
+        reconcileOutOfStockStatus(storeId, latestMenu, serverSettingsOutIdsRef.current).catch(console.warn);
+      }
+    };
+
     if (currentUser.role !== 'kitchen') {
       const isMenuMigrated = currentUser.store?.migrationStatus?.menu === 'completed';
-      const menuQuery = (currentUser.role === 'order' && isMenuMigrated)
-        ? query(collection(db, 'menu'), where('storeId', '==', storeId), where('isInventory', '==', false))
-        : query(collection(db, 'menu'), where('storeId', '==', storeId));
 
-      const unsubMenu = onSnapshot(menuQuery, (snapshot) => {
-        if (!isMounted) return;
+      if (isMenuMigrated) {
+        const dishesQuery = query(collection(db, 'menu'), where('storeId', '==', storeId), where('isInventory', '==', false));
+        const unsubDishes = onSnapshot(dishesQuery, (snapshot) => {
+          if (!isMounted) return;
+          dishesMenuRef.current = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as MenuItem));
+          const combined = syncCombinedMenuState();
+          if (inventoryMenuRef.current.length > 0) {
+            maybeRunInitialOutOfStockCheck(combined);
+          }
+        }, (err) => console.warn('Lỗi dishes menu listener:', err));
+        unsubs.push(unsubDishes);
 
-        let menuData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as MenuItem));
-
-        // Phân loại an toàn trên client nếu là role order nhưng chưa hoàn tất migration:
-        if (currentUser.role === 'order' && !isMenuMigrated) {
-          menuData = menuData.filter(item => {
-            if (item.isInventory === true) return false;
-            if (item.isInventory === false) return true;
-            // Tiêu chuẩn nghiệp vụ: Món chế biến hoặc hàng hóa có giá bán lẻ > 0 không phải nguyên liệu kho
-            if (item.type === 'dish') return true;
-            if (item.category === 'Nguyên liệu' || item.code?.startsWith('NL') || item.name?.toLowerCase().endsWith('_nl')) {
-              return false;
+        if (currentUser.role !== 'order') {
+          const invOnceQuery = query(collection(db, 'menu'), where('storeId', '==', storeId), where('isInventory', '==', true));
+          getDocs(invOnceQuery).then((snapshot) => {
+            if (!isMounted) return;
+            // Không ghi đè nếu listener Kho hàng đang mở đã nạp bản mới hơn
+            if (inventoryMenuRef.current.length === 0) {
+              inventoryMenuRef.current = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as MenuItem));
             }
-            return (item.price || 0) > 0;
-          });
+            const combined = syncCombinedMenuState();
+            maybeRunInitialOutOfStockCheck(combined);
+          }).catch(err => console.warn('Lỗi nạp danh mục kho ban đầu:', err));
         }
+      } else {
+        const fullMenuQuery = query(collection(db, 'menu'), where('storeId', '==', storeId));
+        const unsubMenu = onSnapshot(fullMenuQuery, (snapshot) => {
+          if (!isMounted) return;
+          const rawItems = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as MenuItem));
 
-        const sources = new Map(menuData.map(item => [item.id, item]));
-        menuData = menuData.map(item => item.recipe?.length && item.recipe.every(r => typeof sources.get(r.ingredientId)?.costPrice === 'number')
-          ? { ...item, costPrice: Math.round(item.recipe.reduce((sum, r) => sum + sources.get(r.ingredientId)!.costPrice * r.quantity, 0)) }
-          : item);
-        setMenu(menuData);
+          // Tự động chuẩn hóa cờ isInventory 1 lần duy nhất cho cửa hàng cũ khi Admin/Manager đăng nhập
+          if (
+            (currentUser.role === 'admin' || currentUser.role === 'manager') &&
+            !snapshot.metadata.fromCache &&
+            hasAutoMigratedMenuFlagRef.current !== storeId &&
+            rawItems.length > 0 &&
+            rawItems.length <= 450
+          ) {
+            hasAutoMigratedMenuFlagRef.current = storeId;
+            const unflagged = rawItems.filter(i => typeof i.isInventory !== 'boolean');
+            void (async () => {
+              try {
+                if (unflagged.length > 0) {
+                  const batch = writeBatch(db);
+                  unflagged.forEach(item => {
+                    batch.update(doc(db, 'menu', item.id), { isInventory: classifyIsInventory(item) });
+                  });
+                  await batch.commit();
+                }
+                await updateDoc(doc(db, 'stores', storeId), { 'migrationStatus.menu': 'completed' });
+              } catch (migErr) {
+                console.warn('Tạm hoãn chuẩn hóa cờ isInventory:', migErr);
+              }
+            })();
+          }
 
-        // Tự động kiểm tra & đồng bộ outOfStockAddOnIds cho quán cũ khi menu vừa tải (Admin / Manager)
-        if (!hasReconciledOutOfStockRef.current && menuData.length > 0 && (currentUser.role === 'admin' || currentUser.role === 'manager')) {
-          hasReconciledOutOfStockRef.current = true;
-          reconcileOutOfStockStatus(storeId, menuData, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
-        }
-      }, (err) => console.warn('Lỗi menu listener:', err));
-      unsubs.push(unsubMenu);
+          let visibleItems = rawItems;
+          if (currentUser.role === 'order') {
+            visibleItems = rawItems.filter(item => !classifyIsInventory(item));
+          }
+          dishesMenuRef.current = visibleItems.filter(item => !classifyIsInventory(item));
+          inventoryMenuRef.current = visibleItems.filter(item => classifyIsInventory(item));
+          const finalMenu = computeMenuWithRecipeCosts(visibleItems);
+          setMenu(finalMenu);
+          maybeRunInitialOutOfStockCheck(finalMenu);
+        }, (err) => console.warn('Lỗi menu listener:', err));
+        unsubs.push(unsubMenu);
+      }
     }
 
     // 3. Sync Tables (Trạng thái bàn & món ăn đang gọi)
@@ -3021,11 +3193,20 @@ export default function App() {
 
     // 5. Sync Settings (Cài đặt quán)
     const settingsQuery = query(collection(db, 'settings'), where('storeId', '==', storeId));
-    const unsubSettings = onSnapshot(settingsQuery, (snapshot) => {
+    const unsubSettings = onSnapshot(settingsQuery, { includeMetadataChanges: true }, (snapshot) => {
       if (!snapshot.empty) {
         settingsDocIdRef.current = snapshot.docs[0].id;
         const settingsData = snapshot.docs[0].data() as SystemSettings;
         setSystemSettings(prev => ({ ...prev, ...settingsData }));
+        if (!snapshot.metadata.fromCache) {
+          serverSettingsOutIdsRef.current = settingsData.outOfStockAddOnIds || [];
+          const currentCombined = [...inventoryMenuRef.current, ...dishesMenuRef.current];
+          if (currentCombined.length > 0) {
+            maybeRunInitialOutOfStockCheck(currentCombined);
+          }
+        }
+      } else if (!snapshot.metadata.fromCache) {
+        serverSettingsOutIdsRef.current = [];
       }
     }, (err) => {
       console.warn('[Sync Settings] Lỗi lắng nghe cài đặt:', err);
@@ -3033,14 +3214,13 @@ export default function App() {
     unsubs.push(unsubSettings);
 
     // 6. Sync Users: Chuyển sang on-demand listener theo màn hình (view === 'user_mgmt' || view === 'shifts')
-    // để tránh việc tất cả thiết bị liên tục nhận reads mỗi khi có thay đổi nhân viên.
 
     // 7. Sync Shifts
     // 7a. Nếu là Bếp (kitchen): Tuyệt đối KHÔNG nghe ca làm việc
     if (currentUser.role === 'kitchen') {
       // Bếp không cần nghe ca
     } else if (currentUser.role === 'order') {
-      // 7b. Nhân viên gọi món (order): CHỈ nghe duy nhất ca mở của chính mình (tiết kiệm triệt để reads)
+      // 7b. Nhân viên gọi món (order): CHỈ nghe duy nhất ca mở của chính mình
       const myOpenShiftQuery = query(
         collection(db, 'shifts'),
         where('storeId', '==', storeId),
@@ -3059,7 +3239,7 @@ export default function App() {
       }, (err) => console.warn('Order staff shift query error:', err));
       unsubs.push(unsubMyShift);
     } else {
-      // 7c. Thu ngân / Quản lý / Admin: Nghe tất cả các ca đang mở để quản lý điều phối
+      // 7c. Thu ngân / Quản lý / Admin: Nghe các ca đang mở để quản lý điều phối
       const openShiftsQuery = query(
         collection(db, 'shifts'),
         where('storeId', '==', storeId),
@@ -3073,42 +3253,94 @@ export default function App() {
       }, (err) => console.warn('Open shifts query error:', err));
       unsubs.push(unsubOpenShifts);
 
-      // Ca đã đóng gần nhất trong 3 ngày (Chỉ cho Thu ngân / Quản lý / Admin xem đối soát)
-      const threeDaysAgoIso = subDays(new Date(), 3).toISOString();
-      const closedShiftsQuery = query(
-        collection(db, 'shifts'),
-        where('storeId', '==', storeId),
-        where('status', '==', 'closed'),
-        where('startTime', '>=', threeDaysAgoIso)
-      );
-      const unsubClosedShifts = onSnapshot(closedShiftsQuery, (snapshot) => {
-        const closedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
-        setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
-      }, (err) => {
-        console.warn('Closed shifts query fallback:', err);
-        const fallbackShifts = query(
+      // Chỉ nạp 1 lần ca đã đóng 3 ngày gần nhất cho Admin/Quản lý lúc khởi động để hiển thị chuông cảnh báo lệch tiền ca;
+      // Listener realtime cho lịch sử ca chỉ mở on-demand khi người dùng vào màn hình 'shifts' (tiết kiệm reads nền cho toàn bộ máy thu ngân).
+      if (currentUser.role === 'admin' || currentUser.role === 'manager') {
+        const threeDaysAgoDateStr = format(subDays(new Date(), 3), 'yyyy-MM-dd');
+        const threeDaysAgoStartIso = getVietnamDayBoundariesIso(threeDaysAgoDateStr).startIso;
+        const initClosedQuery = query(
           collection(db, 'shifts'),
           where('storeId', '==', storeId),
           where('status', '==', 'closed'),
-          limit(30)
+          where('startTime', '>=', threeDaysAgoStartIso)
         );
-        const unsubFallback = onSnapshot(fallbackShifts, (snapshot) => {
-          const closedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Shift));
+        getDocs(initClosedQuery).then((snapshot) => {
+          if (!isMounted) return;
+          const closedData = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as Shift));
           setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
-        });
-        unsubs.push(unsubFallback);
-      });
-      unsubs.push(unsubClosedShifts);
+        }).catch(() => {});
+      }
     }
-
-    // 8. Sync Customers: Chuyển sang on-demand listener theo màn hình (view === 'customers')
-    // và tìm kiếm trực tiếp trong PaymentModal, tránh nghe toàn bộ bảng customers trên tất cả máy.
 
     return () => {
       isMounted = false;
       unsubs.forEach(u => u());
     };
-  }, [currentUser?.storeId, currentUser?.id, currentUser?.role]);
+  }, [currentUser?.storeId, currentUser?.id, currentUser?.role, currentUser?.store?.migrationStatus?.menu]);
+
+  // ON-DEMAND SYNC: Tồn kho nguyên liệu realtime (isInventory == true)
+  // Chỉ mở khi người dùng vào Kho hàng, Quản lý thực đơn hoặc Tổng kết (nếu cửa hàng đã tách isInventory)
+  useEffect(() => {
+    if (!currentUser || ['kitchen', 'order'].includes(currentUser.role)) return;
+    if (currentUser.store?.migrationStatus?.menu !== 'completed') return;
+    if (view !== 'inventory' && view !== 'menu_mgmt' && view !== 'summary') return;
+
+    const storeId = currentUser.storeId;
+    const invQuery = query(collection(db, 'menu'), where('storeId', '==', storeId), where('isInventory', '==', true));
+    const stop = subscribeSharedQuery(invQuery, (snapshot) => {
+      inventoryMenuRef.current = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as MenuItem));
+      syncCombinedMenuState();
+    }, (err) => {
+      console.warn('Lỗi đồng bộ tồn kho on-demand:', err);
+    }, { keepAliveMs: 300000 });
+
+    return () => stop();
+  }, [currentUser?.storeId, currentUser?.role, currentUser?.store?.migrationStatus?.menu, view]);
+
+  // ON-DEMAND SYNC: Lịch sử ca đã đóng 3 ngày gần nhất (chỉ bật khi mở màn hình Ca làm việc)
+  useEffect(() => {
+    if (!currentUser || ['kitchen', 'order'].includes(currentUser.role) || view !== 'shifts') return;
+    const storeId = currentUser.storeId;
+    const threeDaysAgoDateStr = format(subDays(new Date(), 3), 'yyyy-MM-dd');
+    const threeDaysAgoStartIso = getVietnamDayBoundariesIso(threeDaysAgoDateStr).startIso;
+    const closedShiftsQuery = query(
+      collection(db, 'shifts'),
+      where('storeId', '==', storeId),
+      where('status', '==', 'closed'),
+      where('startTime', '>=', threeDaysAgoStartIso)
+    );
+    let fallbackStop: (() => void) | undefined;
+    const stop = subscribeSharedQuery(closedShiftsQuery, (snapshot) => {
+      const closedData = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as Shift));
+      setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
+    }, () => {
+      const fallbackShifts = query(
+        collection(db, 'shifts'),
+        where('storeId', '==', storeId),
+        where('status', '==', 'closed'),
+        limit(30)
+      );
+      fallbackStop = subscribeSharedQuery(fallbackShifts, (snapshot) => {
+        const closedData = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as Shift));
+        setShifts(closedData.sort((a, b) => b.startTime.localeCompare(a.startTime)));
+      }, console.warn, { keepAliveMs: 300000 });
+    }, { keepAliveMs: 300000 });
+
+    return () => {
+      stop();
+      fallbackStop?.();
+    };
+  }, [currentUser?.storeId, currentUser?.role, view, currentBusinessDate]);
+
+  // TỰ ĐỘNG CHỐT SỔ DAILY_STATS CÁC NGÀY QUÁ KHỨ (Chạy nền 1 lần/ngày khi Admin/Quản lý mở ứng dụng)
+  // Giúp báo cáo Tháng / Quý / Năm chỉ tốn ~30 reads daily_stats thay vì tải lại hàng vạn hóa đơn và phiếu thu.
+  useEffect(() => {
+    if (!currentUser?.storeId || !['admin', 'manager'].includes(currentUser.role)) return;
+    const timer = setTimeout(() => {
+      void autoReconcileRecentPastDays(currentUser.storeId, currentBusinessDate);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [currentUser?.storeId, currentUser?.role, currentBusinessDate]);
 
   // ON-DEMAND SYNC: Danh sách nhân viên (users)
   // Chỉ lắng nghe khi đang mở màn hình Quản lý nhân viên ('user_mgmt') hoặc Ca làm việc ('shifts')
@@ -3241,22 +3473,19 @@ export default function App() {
     }
   }, [allActiveShifts, activeShift, users, currentUser?.storeId, currentUser?.role, currentBusinessDate]);
 
-  // ON-DEMAND SYNC: Danh sách khách hàng (customers)
-  // Chỉ lắng nghe khi đang mở màn hình Quản lý khách hàng ('customers')
-  // Dùng chung listener đầy đủ với dropdown thanh toán. Hồ sơ khách đang chọn
-  // và transaction thanh toán vẫn được xác nhận độc lập.
+  // ON-DEMAND SYNC: Danh sách khách hàng (customers) có giới hạn phân trang
   useEffect(() => {
     if (!currentUser || view !== 'customers') return;
     const storeId = currentUser.storeId;
-    const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId));
+    const customersQuery = query(collection(db, 'customers'), where('storeId', '==', storeId), limit(customerViewLimit));
     const unsub = subscribeSharedQuery(customersQuery, (snapshot) => {
       const customersData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Customer));
       setCustomers(customersData);
     }, (err) => {
       console.warn('Lỗi đồng bộ danh sách khách hàng:', err);
-    }, { keepAliveMs: 120000 });
+    }, { keepAliveMs: 300000 });
     return () => unsub();
-  }, [currentUser?.storeId, view]);
+  }, [currentUser?.storeId, view, customerViewLimit]);
 
   // DATE-BOUNDED REALTIME SYNC (Hôm nay theo múi giờ Việt Nam):
   // Đưa điều kiện ngày trực tiếp vào Firestore query
@@ -3638,15 +3867,17 @@ export default function App() {
   // Menu Management
   const handleAddItem = async (item: MenuItem) => {
     if (!currentUser) return;
-    setMenu(prev => {
-      const idx = prev.findIndex(i => i.id === item.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = item;
-        return copy;
-      }
-      return [...prev, item];
-    });
+    const normalizedItem = { ...item, isInventory: item.isInventory === true };
+    const targetRef = normalizedItem.isInventory ? inventoryMenuRef : dishesMenuRef;
+    const existingIdx = targetRef.current.findIndex(i => i.id === normalizedItem.id);
+    if (existingIdx >= 0) {
+      const copy = [...targetRef.current];
+      copy[existingIdx] = normalizedItem;
+      targetRef.current = copy;
+    } else {
+      targetRef.current = [...targetRef.current, normalizedItem];
+    }
+    syncCombinedMenuState();
     if (item.id) {
       await setDoc(doc(db, 'menu', item.id), {
         ...item,
@@ -3659,12 +3890,15 @@ export default function App() {
         storeId: currentUser.storeId,
         isInventory: item.isInventory === true
       });
-      setMenu(prev => prev.map(i => i.id === item.id ? { ...i, id: docRef.id } : i));
+      targetRef.current = targetRef.current.map(i => i.id === item.id ? { ...i, id: docRef.id } : i);
+      syncCombinedMenuState();
     }
   };
 
   const handleDeleteItem = async (id: string) => {
-    setMenu(prev => prev.filter(i => i.id !== id));
+    dishesMenuRef.current = dishesMenuRef.current.filter(i => i.id !== id);
+    inventoryMenuRef.current = inventoryMenuRef.current.filter(i => i.id !== id);
+    syncCombinedMenuState();
     await deleteDoc(doc(db, 'menu', id));
     await updateOutOfStockStatus([], [id]);
   };
@@ -3672,9 +3906,20 @@ export default function App() {
   const handleUpdateItem = async (item: MenuItem) => {
     if (!item.id) return;
     const existing = menu.find(i => i.id === item.id);
-    setMenu(prev => prev.map(i => i.id === item.id ? { ...i, ...item } : i));
+    const isInv = item.isInventory === true;
+    dishesMenuRef.current = isInv
+      ? dishesMenuRef.current.filter(i => i.id !== item.id)
+      : dishesMenuRef.current.some(i => i.id === item.id)
+        ? dishesMenuRef.current.map(i => i.id === item.id ? { ...i, ...item, isInventory: false } : i)
+        : [...dishesMenuRef.current, { ...item, isInventory: false }];
+    inventoryMenuRef.current = !isInv
+      ? inventoryMenuRef.current.filter(i => i.id !== item.id)
+      : inventoryMenuRef.current.some(i => i.id === item.id)
+        ? inventoryMenuRef.current.map(i => i.id === item.id ? { ...i, ...item, isInventory: true } : i)
+        : [...inventoryMenuRef.current, { ...item, isInventory: true }];
+    syncCombinedMenuState();
     const { stock: currentStockIsReadOnly, ...metadata } = item;
-    await updateDoc(doc(db, 'menu', item.id), { ...metadata, isInventory: item.isInventory === true });
+    await updateDoc(doc(db, 'menu', item.id), { ...metadata, isInventory: isInv });
 
     if (item.trackStock === false) {
       await updateOutOfStockStatus([], [item.id]);
@@ -3783,7 +4028,13 @@ export default function App() {
   // Inventory Management
   const handleImportStock = async (itemId: string, quantity: number, unitPrice: number, id = operationId('import'), paymentMethod: 'cash' | 'transfer' = 'cash') => {
     if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
-    await importStockAtomic(currentUser, itemId, quantity, unitPrice, activeShift?.id, id, paymentMethod);
+    const updated = await importStockAtomic(currentUser, itemId, quantity, unitPrice, activeShift?.id, id, paymentMethod);
+    if (updated) {
+      inventoryMenuRef.current = inventoryMenuRef.current.map(m =>
+        m.id === itemId ? { ...m, stock: updated.newStock, costPrice: updated.costPrice } : m
+      );
+      syncCombinedMenuState();
+    }
     // An auxiliary status refresh must never turn a committed import into a failed import.
     await updateOutOfStockStatus([], [itemId]).catch(console.warn);
   };
@@ -3791,6 +4042,11 @@ export default function App() {
   const handleAuditInventory = async (audit: InventoryAudit) => {
     if (!currentUser) throw new Error('Vui lòng đăng nhập lại.');
     await auditStockAtomic(currentUser, audit);
+    const actualById = new Map(audit.items.map(i => [i.itemId, i.actualStock]));
+    inventoryMenuRef.current = inventoryMenuRef.current.map(m =>
+      actualById.has(m.id) ? { ...m, stock: actualById.get(m.id)! } : m
+    );
+    syncCombinedMenuState();
     const out = audit.items.filter(i => i.actualStock <= 0).map(i => i.itemId);
     const available = audit.items.filter(i => i.actualStock > 0).map(i => i.itemId);
     await updateOutOfStockStatus(out, available).catch(console.warn);
@@ -3805,11 +4061,15 @@ export default function App() {
       if (expected && snapshot.data().costPrice !== expected.costPrice) throw new Error('Giá vốn vừa thay đổi do nhập hàng. Vui lòng mở lại mặt hàng trước khi sửa.');
       txn.update(ref, metadata);
     });
-    await reconcileOutOfStockStatus(currentUser.storeId, menu, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
+    inventoryMenuRef.current = inventoryMenuRef.current.map(m => m.id === id ? { ...m, ...metadata } : m);
+    const nextMenu = syncCombinedMenuState();
+    await reconcileOutOfStockStatus(currentUser.storeId, nextMenu, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
   };
 
   const handleDeleteInventoryItem = async (id: string) => {
-    setMenu(prev => prev.filter(i => i.id !== id));
+    inventoryMenuRef.current = inventoryMenuRef.current.filter(i => i.id !== id);
+    dishesMenuRef.current = dishesMenuRef.current.filter(i => i.id !== id);
+    syncCombinedMenuState();
     await deleteDoc(doc(db, 'menu', id));
     await updateOutOfStockStatus([], [id]);
   };
@@ -3836,8 +4096,20 @@ export default function App() {
     if (result.deleted) {
       setInvoices(previous => previous.filter(i => i.id !== invoiceId));
       setCashTransactions(previous => previous.filter(c => c.invoiceId !== invoiceId && c.id !== result.receiptId));
-      const currentCatalog = await fetchStoreRows<MenuItem>('menu', currentUser.storeId).catch(() => menu);
-      await reconcileOutOfStockStatus(currentUser.storeId, currentCatalog, systemSettings.outOfStockAddOnIds || []).catch(console.warn);
+      if (result.restoredStock && result.restoredStock.length > 0) {
+        const restoredMap = new Map(result.restoredStock.map(r => [r.itemId, r.remaining]));
+        inventoryMenuRef.current = inventoryMenuRef.current.map(m =>
+          restoredMap.has(m.id) ? { ...m, stock: restoredMap.get(m.id)! } : m
+        );
+        dishesMenuRef.current = dishesMenuRef.current.map(m =>
+          restoredMap.has(m.id) ? { ...m, stock: restoredMap.get(m.id)! } : m
+        );
+        syncCombinedMenuState();
+        const availableIds = result.restoredStock.filter(r => r.remaining > 0).map(r => r.itemId);
+        if (availableIds.length > 0) {
+          await updateOutOfStockStatus([], availableIds).catch(console.warn);
+        }
+      }
       if (result.legacyStockUnknown) alert('Đã hủy hóa đơn. Hóa đơn cũ không có lịch sử xuất kho để hoàn tự động; hãy đối soát tồn kho theo chứng từ thực tế.');
     }
     return result;
@@ -4285,8 +4557,10 @@ export default function App() {
         await updateOutOfStockStatus(itemsBecomingOut, []).catch(error => console.warn('Thanh toán đã thành công; trạng thái hết hàng sẽ đồng bộ lại:', error));
       }
 
-      // Cập nhật local state tức thì mượt mà
+      // Cập nhật local state tức thì mượt mà (đồng bộ cả inventoryMenuRef để không mất tồn kho khi tách listener)
       if (Object.keys(stockUpdates).length > 0) {
+        inventoryMenuRef.current = inventoryMenuRef.current.map(m => stockUpdates[m.id] !== undefined ? { ...m, stock: stockUpdates[m.id] } : m);
+        dishesMenuRef.current = dishesMenuRef.current.map(m => stockUpdates[m.id] !== undefined ? { ...m, stock: stockUpdates[m.id] } : m);
         setMenu(prev => prev.map(m => stockUpdates[m.id] !== undefined ? { ...m, stock: stockUpdates[m.id] } : m));
       }
 
@@ -4367,6 +4641,7 @@ export default function App() {
     if (!activeShift) return false;
     if (!Number.isFinite(endCash) || endCash < 0) { alert('Tiền kiểm kê không hợp lệ.'); return false; }
     try {
+      let closedSnapshot: Shift | null = null;
       await runTransaction(db, async txn => {
         const shiftRef = doc(db, 'shifts', activeShift.id);
         const shiftSnap = await txn.get(shiftRef);
@@ -4374,8 +4649,13 @@ export default function App() {
         const serverShift = shiftSnap.data() as Shift;
         if (serverShift.status !== 'open') throw new Error('Ca làm việc này đã được đóng ở thiết bị khác.');
         const discrepancy = endCash - ((serverShift.startCash || 0) + (serverShift.totalCash || 0));
-        txn.update(shiftRef, { endTime: new Date().toISOString(), endCash, discrepancy, discrepancyProcessed: discrepancy === 0, status: 'closed' });
+        const endTime = new Date().toISOString();
+        txn.update(shiftRef, { endTime, endCash, discrepancy, discrepancyProcessed: discrepancy === 0, status: 'closed' });
+        closedSnapshot = { ...serverShift, id: activeShift.id, endTime, endCash, discrepancy, discrepancyProcessed: discrepancy === 0, status: 'closed' };
       });
+      if (closedSnapshot) {
+        setShifts(prev => [closedSnapshot!, ...prev.filter(s => s.id !== closedSnapshot!.id)]);
+      }
       return true;
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Không thể đóng ca. Vui lòng thử lại.');
@@ -4595,7 +4875,7 @@ export default function App() {
     }
   }, [allActiveShifts, users, currentUser, currentBusinessDate]);
 
-  // User Management (Bảo mật qua backend API: scrypt hashing, không lưu plaintext password)
+  // User Management (Bảo mật bắt buộc qua backend API: scrypt hashing trong user_secrets, tuyệt đối không ghi thẳng mật khẩu thô xuống Firestore)
   const handleAddUser = async (user: User) => {
     if (!currentUser) return;
     try {
@@ -4615,53 +4895,11 @@ export default function App() {
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        if (resp.status === 401 || resp.status === 403) {
-          try {
-            const newUserRef = doc(collection(db, 'users'));
-            const newUserData = {
-              ...user,
-              id: newUserRef.id,
-              storeId: currentUser.storeId,
-              salaryType: user.salaryType || 'daily',
-              salaryAmount: Number(user.salaryAmount) || 0,
-              shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
-              requiresAttendance: Boolean(user.requiresAttendance),
-              isDeleted: false,
-              status: 'active',
-              createdAt: new Date().toISOString()
-            };
-            await setDoc(newUserRef, newUserData);
-            setUsers(prev => [newUserData as User, ...prev]);
-            return;
-          } catch (directErr) {
-            console.error('Direct firestore add user failed:', directErr);
-          }
-        }
         alert(data.error || 'Có lỗi xảy ra khi tạo tài khoản nhân viên');
       }
     } catch (err: any) {
       console.error('Error adding user:', err);
-      try {
-        const newUserRef = doc(collection(db, 'users'));
-        const newUserData = {
-          ...user,
-          id: newUserRef.id,
-          storeId: currentUser.storeId,
-          salaryType: user.salaryType || 'daily',
-          salaryAmount: Number(user.salaryAmount) || 0,
-          shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
-          requiresAttendance: Boolean(user.requiresAttendance),
-          isDeleted: false,
-          status: 'active',
-          createdAt: new Date().toISOString()
-        };
-        await setDoc(newUserRef, newUserData);
-        setUsers(prev => [newUserData as User, ...prev]);
-        return;
-      } catch (directErr) {
-        console.error('Direct firestore add user failed:', directErr);
-      }
-      alert('Không thể kết nối đến máy chủ bảo mật để tạo người dùng. Vui lòng thử lại.');
+      alert('Không thể kết nối đến máy chủ bảo mật để tạo người dùng. Vui lòng kiểm tra kết nối mạng và thử lại.');
     }
   };
 
@@ -4684,50 +4922,11 @@ export default function App() {
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        if (resp.status === 401 || resp.status === 403) {
-          try {
-            await updateDoc(doc(db, 'users', user.id), {
-              name: user.name,
-              role: user.role,
-              phone: user.phone || '',
-              cccd: user.cccd || '',
-              address: user.address || '',
-              salaryType: user.salaryType || 'daily',
-              salaryAmount: Number(user.salaryAmount) || 0,
-              shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
-              requiresAttendance: Boolean(user.requiresAttendance),
-              updatedAt: new Date().toISOString()
-            });
-            setUsers(prev => prev.map(u => u.id === user.id ? { ...u, ...user } : u));
-            return;
-          } catch (directErr) {
-            console.error('Direct firestore update failed:', directErr);
-          }
-        }
         alert(data.error || 'Có lỗi xảy ra khi cập nhật tài khoản');
       }
     } catch (err: any) {
       console.error('Error updating user:', err);
-      // Fallback trực tiếp lên Firestore nếu không thể kết nối đến máy chủ API backend (dev localhost / offline)
-      try {
-        await updateDoc(doc(db, 'users', user.id), {
-          name: user.name,
-          role: user.role,
-          phone: user.phone || '',
-          cccd: user.cccd || '',
-          address: user.address || '',
-          salaryType: user.salaryType || 'daily',
-          salaryAmount: Number(user.salaryAmount) || 0,
-          shifts: Array.isArray(user.shifts) ? user.shifts : [{ start: '08:00', end: '17:00' }],
-          requiresAttendance: Boolean(user.requiresAttendance),
-          updatedAt: new Date().toISOString()
-        });
-        setUsers(prev => prev.map(u => u.id === user.id ? { ...u, ...user } : u));
-        return;
-      } catch (directErr) {
-        console.error('Direct firestore update fallback failed:', directErr);
-      }
-      alert('Không thể kết nối đến máy chủ để cập nhật tài khoản.');
+      alert('Không thể kết nối đến máy chủ bảo mật để cập nhật tài khoản. Vui lòng kiểm tra kết nối mạng và thử lại.');
     }
   };
 
@@ -4751,7 +4950,7 @@ export default function App() {
         alert(errData.error || 'Có lỗi xảy ra khi xóa tài khoản');
       } else {
         setUsers(prev => prev.filter(u => u.id !== id));
-        // Đóng các ca đang mở của nhân viên vừa bị xóa trên Firestore (client bridge)
+        // Đóng các ca đang mở của nhân viên vừa bị xóa trên Firestore
         const userShifts = allActiveShifts.filter(s => s.staffId === id);
         for (const s of userShifts) {
           try {
@@ -4770,18 +4969,7 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error deleting user:', err);
-      try {
-        await updateDoc(doc(db, 'users', id), {
-          isDeleted: true,
-          status: 'deleted',
-          updatedAt: new Date().toISOString()
-        });
-        setUsers(prev => prev.filter(u => u.id !== id));
-        return;
-      } catch (directErr) {
-        console.error('Direct firestore delete failed:', directErr);
-      }
-      alert('Không thể kết nối đến máy chủ để xóa tài khoản.');
+      alert('Không thể kết nối đến máy chủ bảo mật để xóa tài khoản. Vui lòng kiểm tra kết nối mạng và thử lại.');
     }
   };
 
@@ -4941,13 +5129,8 @@ export default function App() {
     setSystemSettings(newSettings);
 
     try {
-      const settingsQuery = query(collection(db, 'settings'), where('storeId', '==', currentUser.storeId));
-      const settingsSnap = await getDocs(settingsQuery);
-      if (!settingsSnap.empty) {
-        await updateDoc(doc(db, 'settings', settingsSnap.docs[0].id), { customerTypes: types });
-      } else {
-        await addDoc(collection(db, 'settings'), { ...newSettings, storeId: currentUser.storeId });
-      }
+      const settingsRef = await getSettingsDocRef(currentUser.storeId);
+      await setDoc(settingsRef, { storeId: currentUser.storeId, customerTypes: types }, { merge: true });
     } catch (error) {
       console.error('Error updating customer types:', error);
     }
@@ -4959,13 +5142,8 @@ export default function App() {
     setSystemSettings(newSettings);
 
     try {
-      const settingsQuery = query(collection(db, 'settings'), where('storeId', '==', currentUser.storeId));
-      const settingsSnap = await getDocs(settingsQuery);
-      if (!settingsSnap.empty) {
-        await updateDoc(doc(db, 'settings', settingsSnap.docs[0].id), { kitchenEnabled: enabled });
-      } else {
-        await addDoc(collection(db, 'settings'), { ...newSettings, storeId: currentUser.storeId });
-      }
+      const settingsRef = await getSettingsDocRef(currentUser.storeId);
+      await setDoc(settingsRef, { storeId: currentUser.storeId, kitchenEnabled: enabled }, { merge: true });
     } catch (error) {
       console.error('Error updating kitchen enabled setting:', error);
     }
@@ -5311,6 +5489,8 @@ export default function App() {
                     onAddCustomer={handleAddCustomer}
                     onUpdateCustomerTypes={handleUpdateCustomerTypes}
                     currentUser={currentUser}
+                    hasMoreCustomers={customers.length >= customerViewLimit}
+                    onLoadMoreCustomers={() => setCustomerViewLimit(prev => prev + 150)}
                   />
                 )
               )}

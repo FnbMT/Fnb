@@ -24,4 +24,12 @@ verification/*.json
 verification/*.diff
 scripts/inspect_*.ts
 scripts/check_*.ts
+*firebase-adminsdk*.json
+*service-account*.json
+*.keystore
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
 

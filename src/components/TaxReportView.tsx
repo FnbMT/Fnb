@@ -7,8 +7,9 @@ import { db } from '../lib/firebase';
 import { collection, query, where, doc, getDocFromServer, runTransaction } from 'firebase/firestore';
 import { getVietnamBusinessDate, getVietnamDayBoundariesIso } from '../utils/firestoreDateHelper';
 import { dailyStatsFromSources, reconcileDay, RECEIPT_RECONCILIATION_VERSION } from '../utils/dataIntegrity';
-import { subscribeDateRange, fetchDateRangeRows } from '../utils/completeDataSource';
+import { subscribeDateRange } from '../utils/completeDataSource';
 import { subscribeSharedQuery } from '../utils/sharedFirestoreQuery';
+import { reconcileStoreDaysBatch } from '../services/reportReconciliation';
 
 // Bộ nhớ đệm ngoài component để bảo toàn cả daily_stats lẫn hóa đơn fallback và phạm vi ngày đã phủ khi rời/quay lại tab
 interface TaxYearCache {
@@ -84,39 +85,7 @@ export const TaxReportView = ({ invoices, isInvoicesReady = true, currentUser, o
     setLoadingStatusText(`Đang đối soát dữ liệu ${pastDays.length} ngày từ máy chủ...`);
     try {
       const storeId = currentUser.storeId;
-      const skipped: string[] = [];
-      let saved = 0;
-      const fingerprint = (value: unknown) => JSON.stringify(Object.entries(value || {}).sort(([a], [b]) => a.localeCompare(b)));
-      for (const day of pastDays) {
-        try {
-          const statsRef = doc(db, 'daily_stats', `${storeId}_${day}`);
-          const baseline = await getDocFromServer(statsRef);
-          if (baseline.metadata.hasPendingWrites) throw new Error('Dữ liệu ngày này đang đồng bộ.');
-          const baselineFingerprint = fingerprint(baseline.data());
-          const [invoices, cash] = await Promise.all([
-            fetchDateRangeRows<Invoice>('invoices', storeId, day, day),
-            fetchDateRangeRows<CashTransaction>('cash_transactions', storeId, day, day),
-          ]);
-          const stat = reconcileDay(storeId, day, invoices, cash);
-          await runTransaction(db, async txn => {
-            const current = await txn.get(statsRef);
-            if (current.exists() !== baseline.exists() || fingerprint(current.data()) !== baselineFingerprint) {
-              throw new Error('Có giao dịch mới phát sinh trong lúc đối soát.');
-            }
-            const now = new Date().toISOString();
-            const revision = Number(current.data()?.sourceRevision || 0);
-            txn.set(statsRef, {
-              ...stat,
-              reconciledAt: now,
-              updatedAt: now,
-              sourceRevision: (Number.isFinite(revision) ? revision : 0) + 1,
-            }, { merge: true });
-          });
-          saved++;
-        } catch (error) {
-          skipped.push(`${day} · ${error instanceof Error ? error.message : 'Chưa xác nhận được chứng từ.'}`);
-        }
-      }
+      const { saved, skipped } = await reconcileStoreDaysBatch(storeId, pastDays, todayVn, setLoadingStatusText);
       setReconcileResult({ saved, skipped });
       setRefreshKey(v => v + 1);
     } catch (err) {

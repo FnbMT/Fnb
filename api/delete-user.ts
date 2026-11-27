@@ -73,9 +73,10 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // Xóa trong collection user_secrets để vô hiệu hóa hoàn toàn mật khẩu & quyền đăng nhập
+    // Xóa trong collection user_secrets (và bản ghi legacy trong system nếu có) để vô hiệu hóa hoàn toàn mật khẩu & quyền đăng nhập
     try {
       await adminDb.collection('user_secrets').doc(cleanUserId).delete();
+      await adminDb.collection('system').doc(`user_secret_${cleanUserId}`).delete().catch(() => {});
     } catch (secErr) {}
 
     // Tự động đóng tất cả ca làm việc đang mở của nhân viên bị xóa
@@ -129,9 +130,12 @@ export default async function handler(req: any, res: any) {
       await adminDb.collection('checkout_locks').doc(`attendance_${targetStoreId}_${cleanUserId}`).delete().catch(() => {});
     } catch (_) {}
 
-    // Thu hồi tức thì phiên đăng nhập & refresh token
+    // Thu hồi tức thì phiên đăng nhập & refresh token + đánh dấu cập nhật thống kê nhân sự quán
     invalidateUserStatusCache(cleanUserId);
     await adminAuth.revokeRefreshTokens(cleanUserId);
+    if (targetStoreId) {
+      await adminDb.collection('stores').doc(targetStoreId).update({ 'userSummary.needsSync': true }).catch(() => {});
+    }
 
     return res.status(200).json({
       success: true,

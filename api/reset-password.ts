@@ -99,18 +99,8 @@ export default async function handler(req: any, res: any) {
       return res.status(500).json({ error: 'Không thể lưu đồng thời mật khẩu và phiên bản tài khoản.' });
     }
 
-    // 6. THU HỒI TỨC THÌ TRONG CACHE VÀ FIREBASE AUTH REFRESH TOKENS
-
-    try {
-      const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-      await adminDb.collection('system').doc(`user_secret_${cleanUserId}`).set({
-        userId: cleanUserId,
-        storeId: targetStoreId,
-        role: targetRole,
-        clientHash,
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
-    } catch (_) {}
+    // 6. THU HỒI TỨC THÌ TRONG CACHE, DỌN BẢN GHI LEGACY TRONG SYSTEM VÀ REVOKE FIREBASE TOKENS
+    await adminDb.collection('system').doc(`user_secret_${cleanUserId}`).delete().catch(() => {});
 
     invalidateUserStatusCache(cleanUserId);
     await adminAuth.revokeRefreshTokens(cleanUserId);

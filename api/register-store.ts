@@ -101,6 +101,8 @@ export default async function handler(req: any, res: any) {
           packageId: 'trial'
         },
         credentialStorageVersion: 1,
+        migrationStatus: { menu: 'completed' },
+        userSummary: { employeeCount: 0, adminLastLogin: '', staffLogins: {}, needsSync: false, syncedAt: new Date().toISOString() },
         createdAt: new Date().toISOString()
       });
       storeId = storeRef.id;
@@ -117,21 +119,9 @@ export default async function handler(req: any, res: any) {
       });
       adminUserId = adminUserRef.id;
 
-      // 6. Lưu mật khẩu đã mã hóa và băm vào vùng tối mật user_secrets
+      // 6. Lưu mật khẩu đã mã hóa AES-256 và băm scrypt vào vùng tối mật user_secrets (tuyệt đối không lưu bản sao ra bảng system công khai)
       const passwordHash = hashPassword(cleanPassword);
       const encryptedPassword = encryptAes(cleanPassword);
-
-
-      try {
-        const clientHash = crypto.createHash('sha256').update(cleanPassword).digest('hex');
-        await adminDb.collection('system').doc(`user_secret_${adminUserId}`).set({
-          userId: adminUserId,
-          storeId: storeId,
-          role: 'admin',
-          clientHash,
-          updatedAt: new Date().toISOString()
-        }, { merge: true });
-      } catch (_) {}
 
       await adminDb.collection('user_secrets').doc(adminUserId).set({
         userId: adminUserId,

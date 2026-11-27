@@ -58,11 +58,11 @@ export function subscribeSharedQuery(
   const created = !entry;
   if (!entry) {
     entry = { target, scope, observers: new Set(), stop: () => {},
-      keepAliveMs: Math.max(0, options.keepAliveMs ?? 15000), closed: false };
+      keepAliveMs: Math.max(0, options.keepAliveMs ?? 300000), closed: false };
     entries.add(entry);
   }
   const shared = entry;
-  shared.keepAliveMs = Math.max(shared.keepAliveMs, options.keepAliveMs ?? 15000);
+  shared.keepAliveMs = Math.max(shared.keepAliveMs, options.keepAliveMs ?? 300000);
   if (shared.timer !== undefined) { clearTimeout(shared.timer); shared.timer = undefined; }
   const observer: Observer = { next: onData, error: onError };
   shared.observers.add(observer);

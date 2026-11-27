@@ -14,6 +14,7 @@ import { subscribeDateRange, fetchDateRangeRows, fetchFinancialPeriodSources } f
 import { subscribeSharedQuery } from '../utils/sharedFirestoreQuery';
 import { mergeDaySources, reconciledSource, verifiedDayCost, contiguousDateRanges, cashBookTotals, aggregateReportDays } from '../utils/reportSources';
 import { legacyReceiptCandidates, MissingInvoiceReceiptError, type InvoiceCancellation } from '../services/dataOperations';
+import { reconcileStoreDaysBatch } from '../services/reportReconciliation';
 import { checkStoreTabPermission } from '../utils/packagePermissions';
 
 export function safeFormatDate(dateVal: any, formatStr: string = 'HH:mm dd/MM/yyyy', fallback: string = '—'): string {
@@ -640,44 +641,14 @@ export const SummaryView = ({
     }
 
     setIsReconcilingMissingDays(true);
-    let successCount = 0;
-    const fingerprint = (value: unknown) => JSON.stringify(Object.entries(value || {}).sort(([a], [b]) => a.localeCompare(b)));
 
     try {
-      for (const day of missingDays) {
-        try {
-          const statsRef = doc(db, 'daily_stats', `${storeId}_${day}`);
-          const baseline = await getDocFromServer(statsRef);
-          if (baseline.metadata.hasPendingWrites) continue;
-          const baselineFingerprint = fingerprint(baseline.data());
-
-          const [invRows, cashRows] = await Promise.all([
-            fetchDateRangeRows<Invoice>('invoices', storeId, day, day),
-            fetchDateRangeRows<CashTransaction>('cash_transactions', storeId, day, day),
-          ]);
-
-          const stat = reconcileDay(storeId, day, invRows, cashRows);
-
-          await runTransaction(db, async txn => {
-            const current = await txn.get(statsRef);
-            if (current.exists() !== baseline.exists() || fingerprint(current.data()) !== baselineFingerprint) {
-              throw new Error('Có giao dịch mới phát sinh trong lúc đối soát.');
-            }
-            const now = new Date().toISOString();
-            const revision = Number(current.data()?.sourceRevision || 0);
-            txn.set(statsRef, {
-              ...stat,
-              reconciledAt: now,
-              updatedAt: now,
-              sourceRevision: (Number.isFinite(revision) ? revision : 0) + 1,
-            }, { merge: true });
-          });
-          successCount++;
-        } catch (dayErr) {
-          console.warn(`Lỗi đối soát ngày ${day}:`, dayErr);
-        }
+      const { saved: successCount, skipped } = await reconcileStoreDaysBatch(storeId, missingDays, todayVietnam);
+      if (skipped.length > 0) {
+        alert(`Đã đối soát và chốt thành công ${successCount}/${missingDays.length} ngày.\nBỏ qua ${skipped.length} ngày cần kiểm tra chứng từ:\n- ${skipped.slice(0, 5).join('\n- ')}`);
+      } else {
+        alert(`Đã đối soát và chốt thành công ${successCount}/${missingDays.length} ngày vào máy chủ!`);
       }
-      alert(`Đã đối soát và chốt thành công ${successCount}/${missingDays.length} ngày vào máy chủ!`);
     } catch (err) {
       console.error('Lỗi quá trình đối soát ngày cũ:', err);
       alert('Có lỗi xảy ra trong quá trình đối soát ngày cũ.');
@@ -687,10 +658,10 @@ export const SummaryView = ({
   };
 
   useEffect(() => {
-    if (!invoiceSearch.trim() || filterType === 'day' || activeTab !== 'sales' || !hasMoreInvoices) return;
+    if (invoiceSearch.trim().length < 2 || filterType === 'day' || activeTab !== 'sales' || !hasMoreInvoices) return;
     const timer = setTimeout(() => { handleLoadAllInvoices().catch(error => {
       if (currentPeriodRef.current === periodKey) setReportError(error instanceof Error ? error.message : 'Không thể tải đủ kết quả tìm kiếm.');
-    }); }, 300);
+    }); }, 500);
     return () => clearTimeout(timer);
   }, [invoiceSearch, periodKey, activeTab, hasMoreInvoices]);
 
@@ -1582,17 +1553,29 @@ export const SummaryView = ({
       let dataToExport: Record<string, any>[] = [], fileName = '';
       const current = () => key === currentPeriodRef.current && requestId === activeRequestId.current && activeTabRef.current === activeTab;
       if (activeTab === 'inventory') {
-        const rows = await fetchDateRangeRows<InventoryTransaction>('inventory_logs', currentUser.storeId, dates[0], dates[dates.length - 1]);
+        const rows = (inventoryDataReady && !hasMoreLogs)
+          ? filteredLogs
+          : await fetchDateRangeRows<InventoryTransaction>('inventory_logs', currentUser.storeId, dates[0], dates[dates.length - 1]);
         if (!current()) throw new Error('Kỳ báo cáo đã thay đổi. Vui lòng xuất lại.');
-        dataToExport = rows.sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).map(row => ({
+        dataToExport = [...rows].sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).map(row => ({
           'Thời gian': safeFormatDate(row.date), 'Loại': row.type === 'import' ? 'Nhập hàng' : 'Trả hàng',
           'PTTT': row.paymentMethod === 'transfer' ? 'Chuyển khoản' : 'Tiền mặt', 'Mặt hàng': row.itemName,
           'Số lượng': row.quantity, 'Tổng tiền': row.totalPrice,
         }));
         fileName = `Bao_cao_kho_${dateFilter}_(toan_ky).xlsx`;
       } else {
-        // Lấy mảng đầy đủ trực tiếp; không await setState rồi sử dụng mảng của lượt render cũ.
-        const sources = await fetchFinancialPeriodSources(currentUser.storeId, dates[0], dates[dates.length - 1]);
+        // Nếu đang xem 1 ngày và cả 2 nguồn chứng từ gốc đã được máy chủ xác nhận đầy đủ trong bộ nhớ (0 phân trang),
+        // tái sử dụng trực tiếp để tiết kiệm 100% lượt đọc lặp mà vẫn kiểm tra toàn vẹn chéo receiptMismatch.
+        const canReuseConfirmedMemory = filterType === 'day'
+          && !hasMoreInvoices
+          && !hasMoreCash
+          && (isViewingTodayOnly
+            ? Boolean(todaySourceEnabled && isInvoicesReady && rawReport.invoiceDays.has(todayVietnam) && rawReport.cashDays.has(todayVietnam))
+            : Boolean(rawScope.periodKey === periodKey && rawScope.isFullPeriod && rawScope.invoicesConfirmed && rawScope.cashConfirmed));
+
+        const sources = canReuseConfirmedMemory
+          ? { invoices: periodInvoices.filter(i => i.status !== 'cancelled'), cash: sourcePeriodCash }
+          : await fetchFinancialPeriodSources(currentUser.storeId, dates[0], dates[dates.length - 1]);
         if (!current()) throw new Error('Kỳ báo cáo đã thay đổi. Vui lòng xuất lại.');
         const invalidInvoice = sources.invoices.find(invoice => !validInvoiceAmount(invoice));
         const invalidCash = sources.cash.find(receipt => !validCashAmount(receipt));

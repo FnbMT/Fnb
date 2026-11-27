@@ -30,9 +30,25 @@ export const LoginView = ({
     if (!isNative) {
       const fetchApk = async () => {
         try {
+          const cacheKey = 'fnb_ver_cache_v1_android_version';
+          const TWO_HOURS_MS = 2 * 3600 * 1000;
+          const cachedRaw = localStorage.getItem(cacheKey);
+          if (cachedRaw) {
+            const parsed = JSON.parse(cachedRaw);
+            if (parsed && parsed.ts && Date.now() - Number(parsed.ts) < TWO_HOURS_MS && parsed.data?.apkUrl) {
+              setApkUrl(parsed.data.apkUrl);
+              return;
+            }
+          }
           const snap = await getDoc(doc(db, 'app_settings', 'android_version'));
-          if (snap.exists() && snap.data().apkUrl) {
-            setApkUrl(snap.data().apkUrl);
+          if (snap.exists()) {
+            const data = snap.data();
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data }));
+            } catch {}
+            if (data.apkUrl) {
+              setApkUrl(data.apkUrl);
+            }
           }
         } catch (e) {}
       };
@@ -217,10 +233,17 @@ export const LoginView = ({
         }
 
         if (isAuthSuccess) {
+          const loginNowIso = new Date().toISOString();
           try {
             await updateDoc(doc(db, 'users', userDoc.id), {
-              lastLogin: new Date().toISOString()
+              lastLogin: loginNowIso
             });
+            if (storeData?.userSummary && typeof storeData.userSummary.employeeCount === 'number') {
+              await updateDoc(doc(db, 'stores', storeId), userData.role === 'admin'
+                ? { 'userSummary.adminLastLogin': loginNowIso }
+                : { [`userSummary.staffLogins.${userDoc.id}`]: loginNowIso }
+              );
+            }
           } catch (e) {}
 
           onLogin({

@@ -89,10 +89,29 @@ export const UpdateChecker: React.FC<UpdateCheckerProps> = ({ onNotifyPush }) =>
           return;
         }
 
-        const snap = await getDoc(doc(db, 'app_settings', docName));
-        if (!snap.exists()) return;
+        const cacheKey = `fnb_ver_cache_v1_${docName}`;
+        const TWO_HOURS_MS = 2 * 3600 * 1000;
+        let data: VersionInfo | null = null;
 
-        const data = snap.data() as VersionInfo;
+        try {
+          const cachedRaw = localStorage.getItem(cacheKey);
+          if (cachedRaw) {
+            const parsed = JSON.parse(cachedRaw);
+            if (parsed && parsed.ts && Date.now() - Number(parsed.ts) < TWO_HOURS_MS && parsed.data) {
+              data = parsed.data as VersionInfo;
+            }
+          }
+        } catch {}
+
+        if (!data) {
+          const snap = await getDoc(doc(db, 'app_settings', docName));
+          if (!snap.exists()) return;
+          data = snap.data() as VersionInfo;
+          try {
+            localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data }));
+          } catch {}
+        }
+
         const remoteVer = data?.version;
 
         if (!remoteVer) return;

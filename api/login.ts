@@ -257,7 +257,14 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    await adminDb.collection('users').doc(userId).update({ lastLogin: new Date().toISOString() }).catch(() => {});
+    const loginNowIso = new Date().toISOString();
+    await adminDb.collection('users').doc(userId).update({ lastLogin: loginNowIso }).catch(() => {});
+    if (storeData?.userSummary && typeof storeData.userSummary.employeeCount === 'number') {
+      const storeSummaryPatch = userData.role === 'admin'
+        ? { 'userSummary.adminLastLogin': loginNowIso }
+        : { [`userSummary.staffLogins.${userId}`]: loginNowIso };
+      await adminDb.collection('stores').doc(storeId).update(storeSummaryPatch).catch(() => {});
+    }
     const sanitizedUserData = { ...userData };
     delete sanitizedUserData.password;
     delete sanitizedUserData.pinCode;

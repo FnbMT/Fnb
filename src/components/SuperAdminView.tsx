@@ -96,6 +96,9 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
   const [isSavingIos, setIsSavingIos] = useState(false);
 
   const [stores, setStores] = useState<StoreTenant[]>([]);
+  const [storeSearch, setStoreSearch] = useState('');
+  const [storePage, setStorePage] = useState(1);
+  const STORES_PER_PAGE = 20;
   const [packages, setPackages] = useState<StorePackage[]>([]);
   const [loading, setLoading] = useState(true);
   const [storeFilter, setStoreFilter] = useState<'all' | 'trial' | 'active' | 'expired' | 'inactive_admin'>('all');
@@ -247,12 +250,31 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
 
       // Load Stores
       const storeSnapshot = await getDocs(collection(db, 'stores'));
-      const storesData = storeSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StoreTenant));
+      const storesData = storeSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as StoreTenant & { userSummary?: any }));
       
-      // Load all users to calculate stats
-      const userSnapshot = await getDocs(collection(db, 'users'));
-      const users = userSnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as any));
-      
+      // Tối ưu hóa Reads cho quy mô SaaS thương mại hóa:
+      // Chỉ truy vấn bảng 'users' cho những cửa hàng cũ chưa có userSummary hoặc vừa biến động nhân sự (needsSync === true),
+      // sau đó lưu trực tiếp userSummary vào document cửa hàng để các lần mở sau tốn 0 reads trên bảng users!
+      const storesMissingSummary = storesData.filter(
+        s => !s.userSummary || typeof s.userSummary.employeeCount !== 'number' || s.userSummary.needsSync === true
+      );
+
+      const fetchedUsersByStore = new Map<string, any[]>();
+      if (storesMissingSummary.length > 0) {
+        const missingIds = storesMissingSummary.map(s => s.id);
+        for (let idx = 0; idx < missingIds.length; idx += 30) {
+          const chunk = missingIds.slice(idx, idx + 30);
+          const uSnap = await getDocs(query(collection(db, 'users'), where('storeId', 'in', chunk)));
+          uSnap.docs.forEach(d => {
+            const u = { ...d.data(), id: d.id } as any;
+            if (u.isDeleted || u.status === 'deleted') return;
+            const list = fetchedUsersByStore.get(u.storeId) || [];
+            list.push(u);
+            fetchedUsersByStore.set(u.storeId, list);
+          });
+        }
+      }
+
       const now = new Date();
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       
@@ -284,19 +306,40 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
           }
         }
 
-        const storeUsers = users.filter(u => u.storeId === store.id);
-        const adminUser = storeUsers.find(u => u.role === 'admin');
-        const regularEmployees = storeUsers.filter(u => u.role !== 'admin');
-        
-        const activeEmployees7Days = regularEmployees.filter(u => {
-          if (!u.lastLogin) return false;
-          const loginDate = new Date(u.lastLogin);
+        let summary = store.userSummary;
+        if (!summary || typeof summary.employeeCount !== 'number' || summary.needsSync === true) {
+          const storeUsers = fetchedUsersByStore.get(store.id) || [];
+          const adminUser = storeUsers.find(u => u.role === 'admin');
+          const regularEmployees = storeUsers.filter(u => u.role !== 'admin');
+          const staffLogins: Record<string, string> = {};
+          regularEmployees.forEach(u => {
+            if (u.lastLogin) staffLogins[u.id] = u.lastLogin;
+          });
+          summary = {
+            employeeCount: regularEmployees.length,
+            adminLastLogin: adminUser?.lastLogin || '',
+            staffLogins,
+            needsSync: false,
+            syncedAt: now.toISOString()
+          };
+          store.userSummary = summary;
+          try {
+            await updateDoc(doc(db, 'stores', store.id), { userSummary: summary });
+          } catch (e) {
+            console.warn('Backfill userSummary notice:', e);
+          }
+        }
+
+        const staffLoginsMap: Record<string, string> = summary.staffLogins || {};
+        const activeEmployees7Days = Object.values(staffLoginsMap).filter(iso => {
+          if (!iso) return false;
+          const loginDate = new Date(iso);
           return loginDate >= sevenDaysAgo;
         }).length;
-        
+
         let adminActive = false;
-        if (adminUser && adminUser.lastLogin) {
-          const adminLogin = new Date(adminUser.lastLogin);
+        if (summary.adminLastLogin) {
+          const adminLogin = new Date(summary.adminLastLogin);
           if (adminLogin >= sevenDaysAgo) {
             adminActive = true;
           }
@@ -305,8 +348,8 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
         return {
           ...store,
           stats: {
-            employeeCount: regularEmployees.length,
-            activeEmployees7Days,
+            employeeCount: summary.employeeCount || 0,
+            activeEmployees7Days: Math.min(summary.employeeCount || 0, activeEmployees7Days),
             adminActive
           }
         };
@@ -799,11 +842,21 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
   };
 
   const filteredStores = stores.filter(store => {
-    if (storeFilter === 'all') return true;
-    if (storeFilter === 'inactive_admin') return !store.stats?.adminActive;
-    if (storeFilter === 'expired') return store.subscription?.status === 'expired';
-    return store.subscription?.status === storeFilter;
+    if (storeFilter === 'inactive_admin' && store.stats?.adminActive) return false;
+    if (storeFilter === 'expired' && store.subscription?.status !== 'expired') return false;
+    if (storeFilter !== 'all' && storeFilter !== 'inactive_admin' && storeFilter !== 'expired' && store.subscription?.status !== storeFilter) return false;
+    const q = storeSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      (store.name || '').toLowerCase().includes(q) ||
+      (store.code || '').toLowerCase().includes(q) ||
+      (store.phone || '').toLowerCase().includes(q)
+    );
   });
+
+  const totalStorePages = Math.max(1, Math.ceil(filteredStores.length / STORES_PER_PAGE));
+  const safeStorePage = Math.min(storePage, totalStorePages);
+  const paginatedStores = filteredStores.slice((safeStorePage - 1) * STORES_PER_PAGE, safeStorePage * STORES_PER_PAGE);
 
   const totalStores = stores.length;
   const trialStores = stores.filter(s => s.subscription?.status === 'trial').length;
@@ -902,9 +955,23 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
               </div>
             </div>
 
+            {/* Thanh tìm kiếm cửa hàng nhanh */}
+            <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
+              <input
+                type="text"
+                placeholder="Tìm theo tên quán, mã quán hoặc SĐT..."
+                value={storeSearch}
+                onChange={(e) => { setStoreSearch(e.target.value); setStorePage(1); }}
+                className="w-full sm:max-w-md bg-white dark:bg-[#151619] border border-black/10 dark:border-white/10 rounded-xl px-4 py-2.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-emerald-500/50"
+              />
+              <span className="text-xs text-gray-500">
+                Hiển thị {paginatedStores.length} / {filteredStores.length} cửa hàng
+              </span>
+            </div>
+
             {/* Mobile Store Cards List (Visible on mobile screens) */}
             <div className="block md:hidden space-y-3">
-              {filteredStores.map(store => {
+              {paginatedStores.map(store => {
                 const currentPackage = packages.find(p => p.id === store.subscription?.packageId);
                 return (
                   <div key={store.id} className="bg-white dark:bg-[#151619] border border-black/10 dark:border-white/10 rounded-2xl p-4 shadow-sm space-y-3">
@@ -1002,7 +1069,7 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/5 dark:divide-white/5">
-                  {filteredStores.map(store => {
+                  {paginatedStores.map(store => {
                     const currentPackage = packages.find(p => p.id === store.subscription?.packageId);
                     return (
                     <tr key={store.id} className="hover:bg-black/5 dark:hover:bg-white/5">
@@ -1075,6 +1142,30 @@ export const SuperAdminView = ({ onLogout }: { onLogout: () => void }) => {
                 </tbody>
               </table>
             </div>
+
+            {totalStorePages > 1 && (
+              <div className="flex items-center justify-between pt-2">
+                <button
+                  type="button"
+                  disabled={safeStorePage <= 1}
+                  onClick={() => setStorePage(p => Math.max(1, p - 1))}
+                  className="px-4 py-2 rounded-xl border border-black/10 dark:border-white/10 text-xs font-semibold disabled:opacity-40 cursor-pointer"
+                >
+                  Trang trước
+                </button>
+                <span className="text-xs text-gray-500 font-medium">
+                  Trang {safeStorePage} / {totalStorePages}
+                </span>
+                <button
+                  type="button"
+                  disabled={safeStorePage >= totalStorePages}
+                  onClick={() => setStorePage(p => Math.min(totalStorePages, p + 1))}
+                  className="px-4 py-2 rounded-xl border border-black/10 dark:border-white/10 text-xs font-semibold disabled:opacity-40 cursor-pointer"
+                >
+                  Trang sau
+                </button>
+              </div>
+            )}
           </div>
         )}
 

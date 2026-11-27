@@ -515,7 +515,7 @@ export async function importStockAtomic(
   shiftId: string | undefined,
   id: string,
   paymentMethod: 'cash' | 'transfer' = 'cash'
-) {
+): Promise<{ newStock: number; costPrice: number } | undefined> {
   if (!Number.isFinite(quantity) || quantity <= 0)
     throw new Error("Lượng nhập phải lớn hơn 0.");
   validAmount(unitPrice);
@@ -534,7 +534,7 @@ export async function importStockAtomic(
     cashRef = doc(db, "cash_transactions", `import_${id}`),
     cardRef = doc(db, "stock_card", `import_${id}`),
     statsRef = doc(db, "daily_stats", `${user.storeId}_${day}`);
-  await runTransaction(db, async (txn) => {
+  return await runTransaction(db, async (txn) => {
     const existing = await txn.get(logRef);
     const snap = await txn.get(ref);
     await txn.get(statsRef);
@@ -601,6 +601,7 @@ export async function importStockAtomic(
         statsRef,
         shift
       );
+    return { newStock, costPrice: cost };
   });
 }
 
@@ -691,6 +692,7 @@ export interface InvoiceCancellation {
   deleted: boolean;
   legacyStockUnknown?: boolean;
   receiptId?: string;
+  restoredStock?: { itemId: string; remaining: number }[];
 }
 
 export async function cancelInvoiceAtomic(
@@ -807,8 +809,10 @@ export async function cancelInvoiceAtomic(
       cash = !invoice.paymentMethod || invoice.paymentMethod === "cash";
     const points =
       (invoice as any).pointsEarned ?? Math.floor(invoice.total / 100000);
+    const restoredStockUpdates: { itemId: string; remaining: number }[] = [];
     stockReads.forEach(({ ref, data, quantity }, index) => {
       const remaining = stockQuantity((data.stock || 0) + quantity);
+      restoredStockUpdates.push({ itemId: ref.id, remaining });
       txn.update(ref, { stock: remaining });
       txn.set(doc(db, "stock_card", `cancel_${invoiceId}_${index}`), {
         storeId: user.storeId,
@@ -913,7 +917,12 @@ export async function cancelInvoiceAtomic(
         shiftRef && !shift?.exists() ? "missing_shift" : "complete",
     });
     txn.delete(invoiceRef);
-    return { deleted: true, legacyStockUnknown: Boolean(legacyStockUnknown), receiptId: matchedReceipt.data.id };
+    return {
+      deleted: true,
+      legacyStockUnknown: Boolean(legacyStockUnknown),
+      receiptId: matchedReceipt.data.id,
+      restoredStock: restoredStockUpdates,
+    };
   });
 }
 
@@ -1264,10 +1273,12 @@ export async function finalizePayrollAtomic(
   if (!payroll.userId || !payroll.month) throw new Error("Thiếu thông tin nhân viên hoặc tháng tính lương.");
   const id = `${storeId}_${payroll.userId}_${payroll.month}`;
 
-  // 1. Lấy dữ liệu chấm công thực tế từ máy chủ (bỏ qua cache) để xác nhận phiên bản
+  // 1. Lấy dữ liệu chấm công thực tế + guard từ máy chủ (bỏ qua cache) để xác nhận phiên bản
   const startDay = `${payroll.month}-01`;
   const endDay = `${payroll.month}-31`;
+  const guardDocRef = doc(db, "checkout_locks", `attendance_${storeId}_${payroll.userId}`);
   let serverRecords: AttendanceRecord[] = [];
+  let preGuardData: Record<string, any> | null = null;
   try {
     const q = query(
       collection(db, "attendance_records"),
@@ -1276,18 +1287,26 @@ export async function finalizePayrollAtomic(
       where("date", ">=", startDay),
       where("date", "<=", endDay)
     );
-    const snap = await getDocsFromServer(q);
+    const [snap, gSnap] = await Promise.all([
+      getDocsFromServer(q),
+      getDocFromServer(guardDocRef),
+    ]);
     serverRecords = snap.docs.map(d => ({ ...d.data(), id: d.id } as AttendanceRecord));
+    preGuardData = gSnap.exists() ? (gSnap.data() as Record<string, any>) : null;
   } catch {
     const fallbackQ = query(
       collection(db, "attendance_records"),
       where("storeId", "==", storeId),
       where("userId", "==", payroll.userId)
     );
-    const snap = await getDocsFromServer(fallbackQ);
+    const [snap, gSnap] = await Promise.all([
+      getDocsFromServer(fallbackQ),
+      getDocFromServer(guardDocRef),
+    ]);
     serverRecords = snap.docs
       .map(d => ({ ...d.data(), id: d.id } as AttendanceRecord))
       .filter(r => r.date && r.date.startsWith(payroll.month));
+    preGuardData = gSnap.exists() ? (gSnap.data() as Record<string, any>) : null;
   }
 
   const serverValidRecords = serverRecords.filter(r =>
@@ -1320,16 +1339,23 @@ export async function finalizePayrollAtomic(
   let finalRecordToSave: PayrollRecord | null = null;
 
   await runTransaction(db, async txn => {
-    // A. Kiểm tra bảng lương đã chốt trước đó chưa
     const payrollRef = doc(db, "payroll_records", id);
-    const payrollSnap = await txn.get(payrollRef);
+    const userRef = doc(db, "users", payroll.userId);
+    const latestGuardRecordId = preGuardData?.recordId;
+    const latestRecRef = latestGuardRecordId ? doc(db, "attendance_records", String(latestGuardRecordId)) : null;
+
+    // A, B, C: Đọc song song bảng lương, nhân viên, khóa guard chấm công (tiết kiệm ~30 reads tuần tự lặp lại)
+    const [payrollSnap, userSnap, guardSnap, latestRecSnap] = await Promise.all([
+      txn.get(payrollRef),
+      txn.get(userRef),
+      txn.get(guardDocRef),
+      latestRecRef ? txn.get(latestRecRef) : Promise.resolve(null),
+    ]);
+
     if (payrollSnap.exists()) {
       throw new Error("Bảng lương tháng này đã được chốt ở thiết bị khác.");
     }
 
-    // B. Đọc và xác nhận cấu hình lương nhân viên từ máy chủ
-    const userRef = doc(db, "users", payroll.userId);
-    const userSnap = await txn.get(userRef);
     if (!userSnap.exists()) {
       throw new Error("Tài khoản nhân viên không tồn tại trên máy chủ.");
     }
@@ -1352,26 +1378,35 @@ export async function finalizePayrollAtomic(
       throw err;
     }
 
-    // C. Đọc guard chấm công của nhân viên để ngăn chặn race condition chấm công ngay lúc chốt
-    const guardRef = doc(db, "checkout_locks", `attendance_${storeId}_${payroll.userId}`);
-    const guardSnap = await txn.get(guardRef);
+    // D. Khóa kiểm tra guard chấm công: Mọi thao tác vào/ra ca đều đi qua guardDocRef.
+    // Nếu guard tồn tại và không đổi từ bước đọc máy chủ ở trên -> toàn bộ bản ghi chấm công đảm bảo 100% nguyên vẹn mà không cần đọc lặp 30 docs.
     if (guardSnap.exists()) {
       const guardData = guardSnap.data();
       if (guardData?.openRecordId) {
         throw new Error("Nhân viên đang có lượt chấm công chưa hoàn tất trên máy chủ. Vui lòng hoàn tất trước khi chốt lương.");
       }
-    }
-
-    // D. Đọc từng bản ghi chấm công để khóa kiểm tra và đảm bảo không có lượt nào mở
-    for (const rec of serverValidRecords) {
-      const recRef = doc(db, "attendance_records", rec.id);
-      const recSnap = await txn.get(recRef);
-      if (!recSnap.exists()) {
-        throw new Error("Một bản ghi chấm công đã bị thay đổi hoặc xóa trên máy chủ trong lúc chốt. Vui lòng tính lại.");
+      if (
+        !preGuardData ||
+        guardData?.lastActionAt !== preGuardData.lastActionAt ||
+        guardData?.recordId !== preGuardData.recordId
+      ) {
+        throw new Error("Dữ liệu chấm công vừa phát sinh thay đổi trong lúc chốt. Vui lòng tính lại bảng lương.");
       }
-      const rData = recSnap.data() as AttendanceRecord;
-      if (!rData.checkOutTime) {
-        throw new Error("Có lượt chấm công chưa kết thúc. Vui lòng hoàn tất trước khi chốt lương.");
+      if (latestRecRef && (!latestRecSnap || !latestRecSnap.exists() || !latestRecSnap.data()?.checkOutTime)) {
+        throw new Error("Có lượt chấm công gần nhất chưa kết thúc hoặc vừa thay đổi. Vui lòng kiểm tra lại.");
+      }
+    } else if (serverValidRecords.length > 0) {
+      // Fallback duy nhất cho dữ liệu cũ chưa từng có guard: đọc song song để khóa kiểm tra
+      const recSnaps = await Promise.all(
+        serverValidRecords.map(rec => txn.get(doc(db, "attendance_records", rec.id)))
+      );
+      for (const recSnap of recSnaps) {
+        if (!recSnap.exists()) {
+          throw new Error("Một bản ghi chấm công đã bị thay đổi hoặc xóa trên máy chủ trong lúc chốt. Vui lòng tính lại.");
+        }
+        if (!(recSnap.data() as AttendanceRecord).checkOutTime) {
+          throw new Error("Có lượt chấm công chưa kết thúc. Vui lòng hoàn tất trước khi chốt lương.");
+        }
       }
     }
 
